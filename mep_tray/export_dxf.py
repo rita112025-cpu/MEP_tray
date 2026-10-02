@@ -38,6 +38,7 @@ def load_ezdxf(importer=importlib.import_module):
 
 ezdxf = load_ezdxf()
 
+from .disclosure import base_notes  # noqa: E402
 from .geometry import Box, segment_box  # noqa: E402
 from .model import Inputs  # noqa: E402
 from . import acad  # noqa: E402
@@ -103,16 +104,8 @@ def _mtext(msp, lines, at, layer: str, h: float = 120.0, width: float = 3000.0) 
 
 def disclosure_notes(inp: Inputs, gov: dict, reports=(), extra: list[str] = (),
                      acad_audit: int | None = None, acad_version: str = "") -> list[str]:
-    """圖面揭露文字：座標約定、規範值未驗證清單、預設電纜、未實機驗證。"""
-    notes = ["座標 = 公尺×1000 (mm)，原點 = 輸入座標系原點（不平移）"]
-    bad = sorted({g.code for g in gov.values() if not g.verified})
-    n_unv = sum(1 for rep in reports for f in rep.checks if f.status == "UNVERIFIED")
-    if n_unv:     # 自 checks（不只 findings）統計：零 finding 的「乾淨」圖也必須揭露
-        notes.append(f"本圖有 {n_unv} 項檢查所依規範值尚未核對條文（verified=false），不得視為合規")
-    if bad:
-        notes.append("規範值未驗證 (verified=false)：" + ", ".join(bad) + "；結果不得視為合規依據")
-    if inp.cables_defaulted:
-        notes.append("未輸入電纜資料，填充率以預設電纜計算")
+    """圖面揭露文字 = 共用揭露（座標約定、未驗證規範值、預設電纜）+ AutoCAD 驗證狀態 + 額外補充。"""
+    notes = base_notes(inp, gov, reports)
     if acad_audit is None:
         notes.append("本圖未於 AutoCAD 實機驗證（僅以 ezdxf 回讀與稽核）")
     elif acad_audit == 0:

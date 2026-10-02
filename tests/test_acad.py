@@ -125,6 +125,7 @@ def test_no_acad_no_oda_only_dxf(monkeypatch):
     assert res.dxf.exists() and res.dwg is None and res.acad_audit is None and "ODA" in res.dwg_note
 
 
+@pytest.mark.autocad
 @pytest.mark.skipif(acad.find_accore() is None, reason="本機未安裝 AutoCAD（accoreconsole.exe）")
 def test_real_autocad_opens_audits_and_converts():
     """整合測試：真實 AutoCAD 開啟本工具輸出的 DXF，稽核 0 錯誤並轉存 DWG。"""
