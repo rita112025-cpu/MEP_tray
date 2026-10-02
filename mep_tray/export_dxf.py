@@ -40,6 +40,7 @@ ezdxf = load_ezdxf()
 
 from .geometry import Box, segment_box  # noqa: E402
 from .model import Inputs  # noqa: E402
+from . import acad  # noqa: E402
 from .paths import check_run_id, out_path  # noqa: E402
 from .router import Route  # noqa: E402
 from .rules import LABELS  # noqa: E402
@@ -59,6 +60,8 @@ class DxfResult:
     dxf: Path
     dwg: Path | None
     dwg_note: str
+    acad_audit: int | None = None     # AutoCAD 稽核錯誤數；None=未稽核/無法解析
+    acad_version: str = ""
 
 
 def _pt(p) -> tuple:
@@ -98,7 +101,8 @@ def _mtext(msp, lines, at, layer: str, h: float = 120.0, width: float = 3000.0) 
         "layer": layer, "style": "MEP", "char_height": h, "insert": at, "width": width})
 
 
-def disclosure_notes(inp: Inputs, gov: dict, reports=(), extra: list[str] = ()) -> list[str]:
+def disclosure_notes(inp: Inputs, gov: dict, reports=(), extra: list[str] = (),
+                     acad_audit: int | None = None, acad_version: str = "") -> list[str]:
     """圖面揭露文字：座標約定、規範值未驗證清單、預設電纜、未實機驗證。"""
     notes = ["座標 = 公尺×1000 (mm)，原點 = 輸入座標系原點（不平移）"]
     bad = sorted({g.code for g in gov.values() if not g.verified})
@@ -109,20 +113,18 @@ def disclosure_notes(inp: Inputs, gov: dict, reports=(), extra: list[str] = ()) 
         notes.append("規範值未驗證 (verified=false)：" + ", ".join(bad) + "；結果不得視為合規依據")
     if inp.cables_defaulted:
         notes.append("未輸入電纜資料，填充率以預設電纜計算")
-    notes.append("本圖未於 AutoCAD 實機驗證（僅以 ezdxf 回讀與稽核）")
+    if acad_audit is None:
+        notes.append("本圖未於 AutoCAD 實機驗證（僅以 ezdxf 回讀與稽核）")
+    elif acad_audit == 0:
+        notes.append(f"本圖已以 {acad_version} 開啟並稽核：0 個錯誤（不代表規範合規）")
+    else:
+        notes.append(f"{acad_version} 稽核發現 {acad_audit} 個錯誤，請勿直接採用")
     return notes + list(extra)
 
 
-def export_dxf(inp: Inputs, route: Route, reports: list, gov: dict, run_id: str,
-               notes: list[str] = (), name: str | None = None, convert_dwg: bool = True,
-               overwrite: bool = False) -> DxfResult:
-    """reports: [clash.Report, compliance.Report…]；gov: merge_strictest 結果（用於揭露文字）。
-    run_id 由本函式自行驗證；目標檔已存在時預設拒絕覆寫（FileExistsError）。"""
-    check_run_id(run_id)
-    path = out_path(run_id, name or f"tray_{run_id}.dxf")
-    if path.exists() and not overwrite:
-        raise FileExistsError(f"輸出檔已存在，拒絕覆寫: {path.name}")
-    notes = disclosure_notes(inp, gov, reports, notes)
+def _build_doc(inp: Inputs, route: Route, reports: list, gov: dict, run_id: str,
+               notes: list[str], acad_audit: int | None, acad_version: str):
+    notes = disclosure_notes(inp, gov, reports, notes, acad_audit, acad_version)
     doc = ezdxf.new("R2010", setup=False)
     _setup(doc, None)
     msp = doc.modelspace()
@@ -163,11 +165,39 @@ def export_dxf(inp: Inputs, route: Route, reports: list, gov: dict, run_id: str,
     lo = _pt(inp.room_box().lo)
     _mtext(msp, [f"RUN {run_id}", *notes], (lo[0], lo[1] - 600, lo[2]), "MEP-NOTE", h=150, width=8000)
 
-    doc.saveas(path)
+    return doc
+
+
+def export_dxf(inp: Inputs, route: Route, reports: list, gov: dict, run_id: str,
+               notes: list[str] = (), name: str | None = None, convert_dwg: bool = True,
+               overwrite: bool = False, accore: Path | None = None) -> DxfResult:
+    """reports: [clash.Report, compliance.Report…]；gov: merge_strictest 結果（用於揭露文字）。
+    run_id 由本函式自行驗證；目標檔已存在時預設拒絕覆寫（FileExistsError）。
+    convert_dwg=True 且偵測到 AutoCAD：先以草稿稽核，將結果寫進圖面揭露後再定稿並轉存 DWG；
+    否則退而用 ODA File Converter；都沒有則只輸出 DXF（回報原因）。"""
+    check_run_id(run_id)
+    path = out_path(run_id, name or f"tray_{run_id}.dxf")
+    if path.exists() and not overwrite:
+        raise FileExistsError(f"輸出檔已存在，拒絕覆寫: {path.name}")
+    acad_exe = (accore or acad.find_accore()) if convert_dwg else None
+    audit, ver = None, ""
+    if acad_exe is not None:                              # 第 1 趟：草稿 → AutoCAD 稽核
+        with tempfile.TemporaryDirectory() as tmp:
+            draft = Path(tmp) / "draft.dxf"
+            _build_doc(inp, route, reports, gov, run_id, notes, None, "").saveas(draft)
+            r1 = acad.audit_and_convert(draft, None, accore=acad_exe)
+            audit, ver = r1.audit_errors, r1.version
+    _build_doc(inp, route, reports, gov, run_id, notes, audit, ver).saveas(path)
     dwg, note = (None, "未要求 DWG")
     if convert_dwg:
-        dwg, note = to_dwg(path)
-    return DxfResult(path, dwg, note)
+        if acad_exe is not None:                          # 第 2 趟：定稿 → 轉存 DWG（並再稽核定稿）
+            r2 = acad.audit_and_convert(path, path.with_suffix(".dwg"), accore=acad_exe)
+            audit, ver = r2.audit_errors, r2.version
+            dwg, note = r2.dwg, r2.note
+        if dwg is None:
+            dwg, note2 = to_dwg(path)
+            note = note2 if acad_exe is None else f"{note}；ODA：{note2}"
+    return DxfResult(path, dwg, note, audit, ver)
 
 
 def find_oda() -> Path | None:

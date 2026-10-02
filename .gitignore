@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 output/
 versions/
+ErrorReports/
+*.dwg
+*.dxf
+cer.log
