@@ -52,11 +52,10 @@ def test_route_straight_when_free():
 def test_route_avoids_obstacle_with_clearance():
     wall = Obstacle("water", "water", Box((5, 0, 0), (5.3, 4, 3.2)))
     r = route_tray(ROOM, (1, 1, 3), [(10, 1, 3)], [wall], 0.3, 0.1, "power", _rules())
-    need = 0.3 + 0.15           # 水管淨距 300mm + 橋架半寬
-    from mep_tray.geometry import segment_box as sb
+    req = _rules()["clear_water_mm"].value / 1000
     for a, b in r.segments:
-        assert sb(a, b, 0.3, 0.1).gap(wall.box) >= 0.3 - 1e-6
-    assert r.length_m > 9 and need > 0
+        assert segment_box(a, b, 0.3, 0.1).gap(wall.box) >= req - 1e-6
+    assert r.length_m > 9
 
 
 def test_route_blocked_raises():
@@ -65,20 +64,30 @@ def test_route_blocked_raises():
         route_tray(ROOM, (1, 1, 3), [(10, 1, 3)], [full], 0.3, 0.1, "power", _rules())
 
 
-def test_branches_share_trunk_and_hangers_respect_span():
+def _hangers_on(hs, a, b):
+    axis = next(i for i in range(3) if abs(a[i] - b[i]) > 1e-9)
+    other = [i for i in range(3) if i != axis]
+    on = [h for h in hs if all(abs(h[i] - a[i]) < 1e-6 for i in other)
+          and min(a[axis], b[axis]) - 1e-6 <= h[axis] <= max(a[axis], b[axis]) + 1e-6]
+    return sorted(on, key=lambda h: h[axis]), axis
+
+
+def test_branches_share_trunk():
     r = route_tray(ROOM, (1, 1, 3), [(10, 1, 3), (6, 5, 3)], [], 0.3, 0.1, "power", _rules())
     assert len(r.waypoints) == 2
     assert r.length_m == pytest.approx(13.0)
-    hs = place_hangers(r, 2.0)
+
+
+def test_hangers_span_and_near_ends():
+    r = route_tray(ROOM, (1, 1, 3), [(10, 1, 3), (6, 5, 3)], [], 0.3, 0.1, "power", _rules())
+    hs = place_hangers(r, 2.0, near_bend_m=0.3)
     for a, b in r.segments:
-        on = sorted([h for h in hs if _on(h, a, b)], key=lambda h: sum(h))
+        on, axis = _hangers_on(hs, a, b)
+        assert len(on) >= 2
         for h1, h2 in zip(on, on[1:]):
-            assert sum(abs(x - y) for x, y in zip(h1, h2)) <= 2.0 + 1e-6
-
-
-def _on(h, a, b):
-    return all(min(a[i], b[i]) - 1e-6 <= h[i] <= max(a[i], b[i]) + 1e-6 for i in range(3)) and \
-        sum(abs(h[i] - a[i]) > 1e-6 and 1 or 0 for i in range(3)) <= 3
+            assert h2[axis] - h1[axis] <= 2.0 + 1e-6
+        assert abs(on[0][axis] - min(a[axis], b[axis])) <= 0.3 + 1e-6
+        assert abs(max(a[axis], b[axis]) - on[-1][axis]) <= 0.3 + 1e-6
 
 
 def test_bend_leg_check():
@@ -188,8 +197,41 @@ def test_inputs_roundtrip_and_defaults_disclosed():
         Inputs.from_dict({"obstacles": [{"name": "x", "kind": "nope", "lo": [0, 0, 0], "hi": [1, 1, 1]}]})
 
 
-def test_snap_error_reported_and_zero_on_aligned_coords():
-    r = route_tray(ROOM, (1, 1, 3), [(10, 1, 3)], [], 0.3, 0.1, "power", _rules())
-    assert r.snap_error_m == 0
-    r2 = route_tray(ROOM, (1.03, 1, 3), [(10, 1, 3)], [], 0.3, 0.1, "power", _rules())
-    assert 0 < r2.snap_error_m <= r2.cell_m
+def test_endpoints_preserved_exactly_and_misaligned_rejected():
+    r = route_tray(ROOM, (1.1, 1, 3), [(6.1, 5.05, 3)], [], 0.3, 0.1, "power", _rules())
+    assert r.waypoints[0][0] == (1.1, 1.0, 3.0) and r.waypoints[0][-1] == (6.1, 5.05, 3.0)
+    with pytest.raises(RoutingError, match="對齊"):
+        route_tray(ROOM, (1.03, 1, 3), [(10, 1, 3)], [], 0.3, 0.1, "power", _rules())
+    with pytest.raises(RoutingError, match="對齊"):
+        route_tray(ROOM, (1.1, 1, 3), [(10, 1, 3)], [], 0.3, 0.1, "power", _rules(), cell=0.25)
+
+
+def _thin(gap=None):
+    obs = [Obstacle("plate", "other", Box((5.05, 0, 0), (5.10, 6, 4)))]
+    if gap:
+        obs = [Obstacle("p1", "other", Box((5.05, 0, 0), (5.10, gap[0], 4))),
+               Obstacle("p2", "other", Box((5.05, gap[1], 0), (5.10, 6, 4)))]
+    return obs
+
+
+def test_thin_plate_through_room_cannot_be_crossed():
+    g = merge_strictest(["TW_BUILDING"])
+    with pytest.raises(RoutingError):
+        route_tray(ROOM, (1, 1, 3), [(10, 1, 3)], _thin(), 0.1, 0.1, "power", g, cell=0.25)
+
+
+def test_thin_plate_with_gap_is_detoured():
+    g = merge_strictest(["TW_BUILDING"])
+    r = route_tray(ROOM, (1, 1, 3), [(10, 1, 3)], _thin(gap=(3.0, 4.5)), 0.1, 0.1, "power", g, cell=0.25)
+    assert r.length_m > 9
+    for a, b in r.segments:
+        for ob in _thin(gap=(3.0, 4.5)):
+            assert not segment_box(a, b, 0.1, 0.1).intersects(ob.box)
+
+
+def test_bend_check_covers_junction_legs():
+    r = route_tray(ROOM, (1, 1, 3), [(10, 1, 3), (6.1, 5, 3)], [], 0.3, 0.1, "power", _rules())
+    assert r.junctions
+    assert not check_bend_legs(r, 0.3)
+    near = route_tray(ROOM, (1, 1, 3), [(10, 1, 3), (1.1, 5, 3)], [], 0.3, 0.1, "power", _rules())
+    assert any(abs(p[0] - 1.1) < 1e-6 for p, _ in check_bend_legs(near, 0.5))

@@ -41,7 +41,7 @@ class Route:
     length_m: float
     hangers: list[Vec] = field(default_factory=list)
     cell_m: float = 0.0
-    snap_error_m: float = 0.0             # 起訖點吸附到格點的最大位移
+    junctions: list = field(default_factory=list)   # [(點, 分支索引)]
 
 
 def clearance_m(kind: str, tray_type: str, rules: dict[str, Governing]) -> float:
@@ -64,13 +64,22 @@ class RouteResult:
     cell_m: float = 0.0
 
 
-def auto_cell(tray_w_m: float, rules: dict[str, Governing], max_cell: float = 0.25) -> float:
-    """格距需 ≤ 最小非零淨距與橋架寬/2，避免窄通道被誤判無路；下限 0.05m。"""
+def _aligned(points, origin, cell: float) -> bool:
+    return all(abs((p[i] - origin[i]) / cell - round((p[i] - origin[i]) / cell)) * cell < 1e-6
+               for p in points for i in range(3))
+
+
+def auto_cell(tray_w_m: float, rules: dict[str, Governing], points=(), origin=(0.0, 0.0, 0.0),
+              max_cell: float = 0.25) -> float:
+    """格距需 ≤ 最小非零淨距與橋架寬/2（避免窄通道誤判無路），且須整除所有起訖座標。
+    只從 NICE_CELLS 挑；若連 0.05m 都對不齊，回傳 0.05（route_tray 會明確報錯）。"""
     cands = [max_cell, tray_w_m / 2]
     cands += [g.value / 1000 for k, g in rules.items() if k.endswith("_mm") and 0 < g.value]
     limit = min(cands)
-    # 只取易整除常見座標(5cm 倍數)的格距，降低端點吸附誤差
-    return next((c for c in NICE_CELLS if c <= limit + 1e-9), NICE_CELLS[-1])
+    for c in NICE_CELLS:
+        if c <= limit + 1e-9 and _aligned(points, origin, c):
+            return c
+    return NICE_CELLS[-1]
 
 
 def try_route_tray(*a, **kw) -> RouteResult:
@@ -86,12 +95,15 @@ def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle]
                tray_w_m: float, tray_h_m: float, tray_type: str,
                rules: dict[str, Governing], cell: float | None = None,
                bend_penalty: float = 4.0, vertical_penalty: float = 1.3) -> Route:
+    origin = room.lo
     if cell is None:
-        cell = auto_cell(tray_w_m, rules)
+        cell = auto_cell(tray_w_m, rules, [start, *ends], origin)
+    if not _aligned([start, *ends], origin, cell):
+        raise RoutingError(
+            f"起訖座標未對齊格距 {cell} m（相對房間原點需為其整數倍）；請調整座標或指定可整除的格距")
     half = max(tray_w_m, tray_h_m) / 2
     sc = rules.get("structure_clear_mm")
     wall = (sc.value if sc else 0.0) / 1000.0 + half
-    origin = room.lo
     n = tuple(int(math.floor((room.hi[i] - room.lo[i]) / cell)) + 1 for i in range(3))
 
     def to_cell(p: Vec):
@@ -106,6 +118,7 @@ def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle]
         return all(room.lo[i] + wall - 1e-9 <= p[i] <= room.hi[i] - wall + 1e-9 for i in range(3))
 
     blocked: set = set()
+    blocked_edges: set = set()
     for ob in obstacles:
         inf = ob.box.inflate(clearance_m(ob.kind, tray_type, rules) + half)
         rng = []
@@ -119,42 +132,64 @@ def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle]
                     p = to_pos((x, y, z))
                     if all(inf.lo[k] < p[k] < inf.hi[k] for k in range(3)):
                         blocked.add((x, y, z))
+        # 邊檢查：相鄰格點間線段穿過膨脹盒（薄障礙，兩端格點皆在盒外）也必須阻擋
+        for ax in range(3):
+            oth = [k for k in range(3) if k != ax]
+            e0 = max(0, int(math.floor((inf.lo[ax] - origin[ax]) / cell)) - 1)
+            e1 = min(n[ax] - 2, int(math.ceil((inf.hi[ax] - origin[ax]) / cell)))
+            for i in range(e0, e1 + 1):
+                lo_p = origin[ax] + i * cell
+                if not (lo_p < inf.hi[ax] - 1e-9 and lo_p + cell > inf.lo[ax] + 1e-9):
+                    continue
+                for u in rng[oth[0]]:
+                    if not inf.lo[oth[0]] < origin[oth[0]] + u * cell < inf.hi[oth[0]]:
+                        continue
+                    for v in rng[oth[1]]:
+                        if not inf.lo[oth[1]] < origin[oth[1]] + v * cell < inf.hi[oth[1]]:
+                            continue
+                        c = [0, 0, 0]
+                        c[ax], c[oth[0]], c[oth[1]] = i, u, v
+                        blocked_edges.add((tuple(c), ax))
 
     def free(c) -> bool:
         return all(0 <= c[i] < n[i] for i in range(3)) and in_bounds(c) and c not in blocked
+
+    def edge_free(c, nc) -> bool:
+        ax = next(k for k in range(3) if c[k] != nc[k])
+        lo = c if c[ax] < nc[ax] else nc
+        return (lo, ax) not in blocked_edges
 
     s_cell = to_cell(start)
     if not free(s_cell):
         raise RoutingError(f"起點 {start} 落在障礙/淨距範圍或牆邊禁區內")
     network: set = {s_cell}
     waypoints: list[list[Vec]] = []
-    junctions: list[Vec] = []
+    junctions: list[tuple[Vec, int]] = []
 
     # 由遠到近逐一接入網路：先成形長幹線，近端分支再接入，共幹較省
     for end in sorted(ends, key=lambda e: (-dist(start, e), e)):
         t_cell = to_cell(end)
         if not free(t_cell):
             raise RoutingError(f"終點 {end} 落在障礙/淨距範圍或牆邊禁區內")
-        path = _astar(network, t_cell, free, bend_penalty, vertical_penalty)
+        path = _astar(network, t_cell, free, edge_free, bend_penalty, vertical_penalty)
         if path is None:
             raise RoutingError(f"找不到通往終點 {end} 的可行路徑（淨距/障礙過嚴？）")
         if path[0] != s_cell and len(network) > 1:
-            junctions.append(to_pos(path[0]))
+            junctions.append((to_pos(path[0]), len(waypoints)))
         network.update(path)
         waypoints.append(_simplify([to_pos(c) for c in path]))
 
     segs: list[tuple[Vec, Vec]] = []
-    bends: list[Vec] = list(junctions)
+    bends: list[Vec] = [j for j, _ in junctions]
     for wp in waypoints:
         for a, b in zip(wp, wp[1:]):
             segs.append((a, b))
         bends.extend(wp[1:-1])
     length = sum(dist(a, b) for a, b in segs)
-    snap = max(dist(p, to_pos(to_cell(p))) for p in [start, *ends])
-    return Route(waypoints, segs, _uniq(bends), length, cell_m=cell, snap_error_m=snap)
+    return Route(waypoints, segs, _uniq(bends), length, cell_m=cell, junctions=junctions)
 
 
-def _astar(sources: set, goal, free, bend_penalty, vertical_penalty):
+def _astar(sources: set, goal, free, edge_free, bend_penalty, vertical_penalty):
     def h(c):
         return abs(c[0] - goal[0]) + abs(c[1] - goal[1]) + abs(c[2] - goal[2])
 
@@ -179,7 +214,7 @@ def _astar(sources: set, goal, free, bend_penalty, vertical_penalty):
             return out
         for nd, v in enumerate(DIRS):
             nc = (c[0] + v[0], c[1] + v[1], c[2] + v[2])
-            if not free(nc):
+            if not free(nc) or not edge_free(c, nc):
                 continue
             step = vertical_penalty if v[2] else 1.0
             if d != -1 and d != nd:
@@ -236,11 +271,26 @@ def place_hangers(route: Route, span_max_m: float, near_bend_m: float = 0.3) -> 
 
 
 def check_bend_legs(route: Route, radius_m: float) -> list[tuple[Vec, float]]:
-    """轉彎處相鄰兩邊長若小於配件半徑則回報 (節點, 較短邊長)。"""
+    """轉彎處與分支接入點相鄰邊長若小於配件半徑，回報 (節點, 較短邊長)。"""
     bad = []
     for wp in route.waypoints:
         for i in range(1, len(wp) - 1):
             leg = min(dist(wp[i - 1], wp[i]), dist(wp[i], wp[i + 1]))
             if leg + 1e-9 < radius_m:
                 bad.append((wp[i], leg))
+    for j, bi in route.junctions:
+        legs = [dist(route.waypoints[bi][0], route.waypoints[bi][1])]
+        for k, wp in enumerate(route.waypoints):
+            if k == bi:
+                continue
+            for a, b in zip(wp, wp[1:]):
+                if _on_segment(j, a, b) and j != a and j != b:
+                    legs += [dist(j, a), dist(j, b)]
+        leg = min(legs)
+        if leg + 1e-9 < radius_m:
+            bad.append((j, leg))
     return bad
+
+
+def _on_segment(p: Vec, a: Vec, b: Vec) -> bool:
+    return all(min(a[i], b[i]) - 1e-9 <= p[i] <= max(a[i], b[i]) + 1e-9 for i in range(3)) and         sum(1 for i in range(3) if abs(a[i] - b[i]) > 1e-9) == 1 and         sum(1 for i in range(3) if abs(p[i] - a[i]) > 1e-9 and abs(a[i] - b[i]) <= 1e-9) == 0
