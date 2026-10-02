@@ -17,3 +17,8 @@ def base_notes(inp: Inputs, gov: dict, reports=(), extra=()) -> list[str]:
     if inp.cables_defaulted:
         notes.append("未輸入電纜資料，填充率以預設電纜計算")
     return notes + list(extra)
+
+
+# 不把過往 session 的敘述當作本版本實機驗證證據。
+REVIT_STATUS = ("未於 Revit 驗證（UNVERIFIED，實機操作待確認）；Revit 2025／2027 相容性尚未驗證；"
+                "未提供 .rfa（Cable Tray 為系統族）。")

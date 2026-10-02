@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Revit Cable Tray 系統族建模匯入器（Revit 外部命令）。
+    用法: dotnet build -c Release -p:RevitVersion=2025
+    - 以本機 runtimeconfig 選擇目標；無法讀取時 2025/2026 fallback net8.0、2027 fallback net10.0。
+      fallback 是建置設定，不是 Revit 版本相容性或實機驗證證據。
+    - RevitAPI/RevitAPIUI 取自 Revit 安裝目錄（不隨專案發佈）。
+  -->
+  <PropertyGroup>
+    <RevitVersion Condition="'$(RevitVersion)' == ''">2025</RevitVersion>
+    <RevitInstallDir Condition="'$(RevitInstallDir)' == ''">C:\Program Files\Autodesk\Revit $(RevitVersion)\</RevitInstallDir>
+    <!-- 讀取本機 RevitAPI.runtimeconfig.json 選擇建置框架；不代表已實機驗證。
+         讀不到時使用上述 fallback；可用 -p:RevitTfm=... 覆寫。 -->
+    <RevitRuntimeCfg>$(RevitInstallDir)RevitAPI.runtimeconfig.json</RevitRuntimeCfg>
+    <RevitTfm Condition="'$(RevitTfm)' == '' And Exists('$(RevitRuntimeCfg)') And $([System.IO.File]::ReadAllText('$(RevitRuntimeCfg)').Contains('net10.0'))">net10.0-windows</RevitTfm>
+    <RevitTfm Condition="'$(RevitTfm)' == '' And Exists('$(RevitRuntimeCfg)')">net8.0-windows</RevitTfm>
+    <RevitTfm Condition="'$(RevitTfm)' == '' And '$(RevitVersion)' &lt; '2027'">net8.0-windows</RevitTfm>
+    <RevitTfm Condition="'$(RevitTfm)' == ''">net10.0-windows</RevitTfm>
+    <TargetFramework>$(RevitTfm)</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>12.0</LangVersion>
+    <RootNamespace>MepTray.Revit</RootNamespace>
+    <AssemblyName>MepTrayImport</AssemblyName>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <NoWarn>$(NoWarn);MSB3277</NoWarn>   <!-- Revit 隨附 DLL 的版本衝突警告（非本專案問題） -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Using Include="System.IO" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="RevitAPI">
+      <HintPath>$(RevitInstallDir)RevitAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="RevitAPIUI">
+      <HintPath>$(RevitInstallDir)RevitAPIUI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <ProjectReference Include="..\MepTray.Core\MepTray.Core.csproj" />
+  </ItemGroup>
+
+</Project>

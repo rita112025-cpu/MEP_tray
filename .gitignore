@@ -4,6 +4,7 @@ __pycache__/
 output/
 versions/
 ErrorReports/
-*.dwg
-*.dxf
 cer.log
+.handoff-temp/
+**/bin/
+**/obj/

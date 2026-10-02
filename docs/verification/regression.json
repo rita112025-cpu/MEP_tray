@@ -1,0 +1,117 @@
+[
+  {
+    "command": [
+      "C:\\Users\\user\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+      "-m",
+      "pytest",
+      "--basetemp=.handoff-temp/gate-final-python2",
+      "-p",
+      "no:cacheprovider",
+      "--tb=short",
+      "-q"
+    ],
+    "command_line": "C:\\Users\\user\\AppData\\Local\\Programs\\Python\\Python312\\python.exe -m pytest --basetemp=.handoff-temp/gate-final-python2 -p no:cacheprovider --tb=short -q",
+    "exit_code": 0,
+    "stdout": "........................................................................ [ 53%]\n..............................................................           [100%]\n134 passed, 5 deselected in 10.62s\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "C:\\Users\\user\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+      "-m",
+      "pytest",
+      "-m",
+      "autocad",
+      "--basetemp=.handoff-temp/gate-final-acad2",
+      "-p",
+      "no:cacheprovider",
+      "--tb=short",
+      "-q"
+    ],
+    "command_line": "C:\\Users\\user\\AppData\\Local\\Programs\\Python\\Python312\\python.exe -m pytest -m autocad --basetemp=.handoff-temp/gate-final-acad2 -p no:cacheprovider --tb=short -q",
+    "exit_code": 0,
+    "stdout": "....                                                                     [100%]\n4 passed, 135 deselected in 7.95s\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "C:\\Users\\user\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+      "-m",
+      "compileall",
+      "-q",
+      "mep_tray",
+      "tests"
+    ],
+    "command_line": "C:\\Users\\user\\AppData\\Local\\Programs\\Python\\Python312\\python.exe -m compileall -q mep_tray tests",
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "C:\\Users\\user\\AppData\\Local\\Microsoft\\dotnet-sdk10\\dotnet.exe",
+      "build",
+      "revit/MepTray.Core",
+      "-c",
+      "Release",
+      "--no-restore",
+      "-nologo"
+    ],
+    "command_line": "C:\\Users\\user\\AppData\\Local\\Microsoft\\dotnet-sdk10\\dotnet.exe build revit/MepTray.Core -c Release --no-restore -nologo",
+    "exit_code": 0,
+    "stdout": "  MepTray.Core -> D:\\github\\MEP_tray\\revit\\MepTray.Core\\bin\\Release\\net10.0\\MepTray.Core.dll\n  MepTray.Core -> D:\\github\\MEP_tray\\revit\\MepTray.Core\\bin\\Release\\net8.0\\MepTray.Core.dll\n\n建置成功。\n    0 個警告\n    0 個錯誤\n\n經過時間 00:00:00.33\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "C:\\Users\\user\\AppData\\Local\\Microsoft\\dotnet-sdk10\\dotnet.exe",
+      "build",
+      "revit/MepTray.Core.SelfTest",
+      "-c",
+      "Release",
+      "--no-restore",
+      "-nologo"
+    ],
+    "command_line": "C:\\Users\\user\\AppData\\Local\\Microsoft\\dotnet-sdk10\\dotnet.exe build revit/MepTray.Core.SelfTest -c Release --no-restore -nologo",
+    "exit_code": 0,
+    "stdout": "  MepTray.Core -> D:\\github\\MEP_tray\\revit\\MepTray.Core\\bin\\Release\\net10.0\\MepTray.Core.dll\n  MepTray.Core.SelfTest -> D:\\github\\MEP_tray\\revit\\MepTray.Core.SelfTest\\bin\\Release\\net10.0\\MepTray.Core.SelfTest.dll\n\n建置成功。\n    0 個警告\n    0 個錯誤\n\n經過時間 00:00:00.56\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "C:\\Users\\user\\AppData\\Local\\Microsoft\\dotnet-sdk10\\dotnet.exe",
+      "build",
+      "revit/MepTrayImport",
+      "-c",
+      "Release",
+      "--no-restore",
+      "-nologo"
+    ],
+    "command_line": "C:\\Users\\user\\AppData\\Local\\Microsoft\\dotnet-sdk10\\dotnet.exe build revit/MepTrayImport -c Release --no-restore -nologo",
+    "exit_code": 0,
+    "stdout": "  MepTray.Core -> D:\\github\\MEP_tray\\revit\\MepTray.Core\\bin\\Release\\net10.0\\MepTray.Core.dll\n  MepTrayImport -> D:\\github\\MEP_tray\\revit\\MepTrayImport\\bin\\Release\\net10.0-windows\\MepTrayImport.dll\n\n建置成功。\n    0 個警告\n    0 個錯誤\n\n經過時間 00:00:00.70\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "C:\\Users\\user\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+      "-m",
+      "tests.benchmark"
+    ],
+    "command_line": "C:\\Users\\user\\AppData\\Local\\Programs\\Python\\Python312\\python.exe -m tests.benchmark",
+    "exit_code": 0,
+    "stdout": "{\n  \"environment\": {\n    \"os\": \"Windows-11-10.0.26300-SP0\",\n    \"python\": \"3.12.10\",\n    \"machine\": \"AMD64\",\n    \"processor\": \"Intel64 Family 6 Model 198 Stepping 2, GenuineIntel\"\n  },\n  \"memory_metric\": \"tracemalloc peak Python allocations; not process RSS\",\n  \"timing\": \"one run per case with tracemalloc enabled; no FPS (no canvas UI)\",\n  \"results\": [\n    {\n      \"case\": \"small\",\n      \"room_m\": [\n        [\n          0,\n          0,\n          0\n        ],\n        [\n          12,\n          6,\n          4\n        ]\n      ],\n      \"cell_m\": 0.25,\n      \"endpoints\": 1,\n      \"obstacles\": 0,\n      \"runtime_s\": 0.004301,\n      \"python_peak_bytes\": 95200,\n      \"segments\": 1,\n      \"route_length_m\": 9.0,\n      \"geometry_checks\": 2,\n      \"correctness\": \"PASS\"\n    },\n    {\n      \"case\": \"obstacles\",\n      \"room_m\": [\n        [\n          0,\n          0,\n          0\n        ],\n        [\n          20,\n          12,\n          6\n        ]\n      ],\n      \"cell_m\": 0.25,\n      \"endpoints\": 2,\n      \"obstacles\": 12,\n      \"runtime_s\": 0.51495,\n      \"python_peak_bytes\": 8520688,\n      \"segments\": 3,\n      \"route_length_m\": 35.0,\n      \"geometry_checks\": 14,\n      \"correctness\": \"PASS\"\n    },\n    {\n      \"case\": \"large_straight\",\n      \"room_m\": [\n        [\n          0,\n          0,\n          0\n        ],\n        [\n          200,\n          12,\n          6\n        ]\n      ],\n      \"cell_m\": 0.5,\n      \"endpoints\": 1,\n      \"obstacles\": 0,\n      \"runtime_s\": 0.041783,\n      \"python_peak_bytes\": 669320,\n      \"segments\": 1,\n      \"route_length_m\": 179.0,\n      \"geometry_checks\": 2,\n      \"correctness\": \"PASS\"\n    }\n  ]\n}\n",
+    "stderr": ""
+  },
+  {
+    "command": [
+      "git",
+      "diff",
+      "--check"
+    ],
+    "command_line": "git diff --check",
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "warning: in the working copy of '.gitignore', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'mep_tray/acad.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'mep_tray/disclosure.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'tests/test_acad.py', LF will be replaced by CRLF the next time Git touches it\n"
+  }
+]

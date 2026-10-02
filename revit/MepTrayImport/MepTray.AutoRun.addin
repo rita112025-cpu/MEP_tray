@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 僅供自動化測試，勿安裝到一般使用者環境 -->
+<RevitAddIns>
+  <AddIn Type="Application">
+    <Name>MEP Tray AutoRun (test only)</Name>
+    <Assembly>MepTrayImport.dll</Assembly>
+    <AddInId>2c8e4f90-1a6b-4b3d-9f0e-7d5a1c2b8e33</AddInId>
+    <FullClassName>MepTray.Revit.AutoRunApp</FullClassName>
+    <VendorId>MEPT</VendorId>
+    <VendorDescription>MEP_tray</VendorDescription>
+  </AddIn>
+</RevitAddIns>

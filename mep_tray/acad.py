@@ -68,8 +68,18 @@ def parse_audit_bytes(raw: bytes) -> int | None:
     return None
 
 
+def kill_tree(pid: int) -> None:
+    """終止整棵行程樹（accoreconsole 可能衍生子行程；subprocess 逾時只會殺直接子行程）。"""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(int(pid))], shell=False,
+                       capture_output=True, timeout=30, check=True)
+    else:
+        os.kill(int(pid), 9)
+
+
 def audit_and_convert(dxf: Path, dwg_out: Path | None = None, accore: Path | None = None,
-                      runner=subprocess.run, timeout: int = 90) -> AcadResult:
+                      popen=subprocess.Popen, killer=kill_tree, timeout: int = 90) -> AcadResult:
+    """popen / killer 為測試注入點；逾時依自建 PID 嘗試清理並回報未確認的清理步驟。"""
     accore = accore or find_accore()
     if accore is None:
         return AcadResult(None, None, "", "未偵測到 AutoCAD（accoreconsole.exe；可設環境變數 MEP_ACCORE_PATH）")
@@ -87,19 +97,56 @@ def audit_and_convert(dxf: Path, dwg_out: Path | None = None, accore: Path | Non
         lines += ["_.QUIT", "_Y", ""]
         scr.write_text("\n".join(lines), encoding="ascii")
         args = [str(accore), "/i", str(src), "/s", str(scr), "/l", "en-US"]      # 引數陣列
+        rc = "?"
+        proc = None
         try:
             with open(log, "wb") as fh:
-                r = runner(args, shell=False, timeout=timeout, stdout=fh, cwd=str(tmp),   # cwd=暫存：AutoCAD 會在 cwd 寫 ErrorReports/
-                           stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+                # cwd=暫存：AutoCAD 會在 cwd 寫 ErrorReports/；stdout 導向檔案（不用管線，避免子行程握住管線卡死）
+                proc = popen(args, shell=False, stdout=fh, stderr=subprocess.DEVNULL,
+                             stdin=subprocess.DEVNULL, cwd=str(tmp))
+                try:
+                    rc = proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    cleanup = []
+                    try:
+                        killer(proc.pid)
+                        if os.name != "nt":
+                            cleanup.append("非 Windows 平台僅終止直接行程，子行程未確認")
+                    except (OSError, subprocess.SubprocessError) as e:
+                        cleanup.append(f"行程樹終止未確認: {e}")
+                    try:
+                        proc.wait(timeout=10)
+                    except (OSError, subprocess.SubprocessError):
+                        proc.kill()
+                        proc.wait(timeout=10)
+                    detail = "；".join(cleanup) if cleanup else "已依本次 PID 終止行程樹並確認直接行程結束"
+                    return AcadResult(None, None, ver, f"{ver} 執行逾時（>{timeout}s）；{detail}")
         except (OSError, subprocess.SubprocessError) as e:
-            return AcadResult(None, None, ver, f"{ver} 執行失敗: {e}")
+            cleanup = []
+            if proc is not None and proc.poll() is None:
+                try:
+                    killer(proc.pid)
+                except (OSError, subprocess.SubprocessError) as err:
+                    cleanup.append(f"行程樹終止未確認: {err}")
+                try:
+                    proc.wait(timeout=10)
+                except (OSError, subprocess.SubprocessError):
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=10)
+                    except (OSError, subprocess.SubprocessError) as err:
+                        cleanup.append(f"直接行程結束未確認: {err}")
+            detail = ("；" + "；".join(cleanup)) if cleanup else ""
+            return AcadResult(None, None, ver, f"{ver} 執行失敗: {e}{detail}")
+        if rc != 0:
+            return AcadResult(None, None, ver, f"{ver} 執行失敗（returncode={rc}），不發布未完成的 DWG")
         errors = parse_audit_bytes(log.read_bytes()) if log.is_file() else None
         dwg = None
         if dwg_out is not None and out.is_file() and out.stat().st_size > 0:
             shutil.copy2(out, dwg_out)
             dwg = Path(dwg_out)
         if errors is None:
-            note = f"{ver} 已執行但無法解析稽核結果（returncode={getattr(r, 'returncode', '?')}）"
+            note = f"{ver} 已執行但無法解析稽核結果（returncode={rc}）"
         else:
             note = f"已由 {ver} 稽核：{errors} 個錯誤" + ("；並轉存為 DWG（2018）" if dwg else "")
         return AcadResult(errors, dwg, ver, note)

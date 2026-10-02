@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RevitAddIns>
+  <AddIn Type="Command">
+    <Name>MEP Tray Import</Name>
+    <Assembly>MepTrayImport.dll</Assembly>
+    <AddInId>6f1b3a52-9c4e-4d7a-8b21-3e5d0a7c9f11</AddInId>
+    <FullClassName>MepTray.Revit.ImportCommand</FullClassName>
+    <Text>MEP Tray Import</Text>
+    <Description>由 MEP_tray 產生的 tray_*.json 以 Cable Tray 系統族建模</Description>
+    <VendorId>MEPT</VendorId>
+    <VendorDescription>MEP_tray</VendorDescription>
+  </AddIn>
+</RevitAddIns>
