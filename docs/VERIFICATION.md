@@ -2,7 +2,35 @@
 
 本輪只驗證與修正既有路徑，不新增產品功能。所有下表 runtime 狀態與 build 分開；Python baseline 122 tests 與第一次 benchmark 留在 HANDOFF。
 
+## Revit 2025.5 manual acceptance update (2026-10-03)
+
+- Installed / Add-in Load / Command Invocation: PASS on Revit 25.5.0.57.
+- Straight / Elbow / Tee / Cross creation and transaction commit: PASS. The four local reports have Committed=true, Abort=null, Phase=done and Warnings=[]; fitting results are OK.
+- Missing CableTrayType error path: PASS. The probe aborted during resolve with Committed=false and no created elements.
+- Save, close and reopen: PASS (human confirmation and 3D screenshot). The user confirmed the trays and fittings remain after reopening, without reimporting. Local `output/revit2025_gui/acceptance.rvt` exists (8,495,104 bytes). No API comparison of element counts or values was performed.
+- Inspection=null: numerical dimensions, endpoint coordinates and Comments readback remain UNVERIFIED. Project Base Point, union, other error/rollback paths and Revit 2027 remain UNVERIFIED.
+- Installed Revit runtimeconfig specifies net10.0; the installed add-in targets net10.0-windows. The independent Core SelfTest Code Integrity BLOCKED evidence remains separate from successful Revit imports.
+- Fixtures use the document's exact existing type name and the existing routing/exporter. `python -m tests.generate_revit_acceptance --type-name '<exact document type>' --run-id '<new output directory>'` preserves existing output files.
+
+The individual cases and original gate below retain their historical status. This update supersedes their earlier pending statements for the acceptance scope listed above.
+
 ## VERIFIED
+
+### 2026-10-03：Cross 實機匯入
+
+使用者回報成功，且已讀取 `output/revit2025_gui/tray_cross.json.revit_report.json`：Committed=true、Abort=null、Phase=done、CreatedTrays=[S001=586386,S002=586387,S003=586388,S004=586389]、J001 Kind=cross Status=OK、Warnings=[]。Cross 的 4 段橋架及 1 個接頭建立／提交 PASS。Straight／Elbow／Tee／Cross 四種建立路徑均已有本機 Revit 2025.5 報告證據；Inspection=null，尺寸／端點讀回及儲存重開仍 UNVERIFIED。
+
+### 2026-10-03：Tee 實機匯入
+
+使用者回報成功，且已讀取 `output/revit2025_gui/tray_tee.json.revit_report.json`：Committed=true、Abort=null、Phase=done、CreatedTrays=[S001=586380,S002=586381,S003=586382]、J001 Kind=tee Status=OK、Warnings=[]。Tee 的 3 段橋架及 1 個接頭建立／提交 PASS。Inspection=null，尺寸／端點讀回及儲存重開仍 UNVERIFIED。Cross 尚待測。
+
+### 2026-10-03：Elbow 實機匯入
+
+使用者提供可見彎頭的平面圖，且已讀取 `output/revit2025_gui/tray_elbow.json.revit_report.json`：Committed=true、Abort=null、Phase=done、CreatedTrays=[S001=586357,S002=586358]、J001 Kind=elbow Status=OK、Warnings=[]。Elbow 的 2 段橋架及 1 個接頭建立／提交 PASS，平面圖可見；尺寸／端點讀回及儲存重開仍 UNVERIFIED。Tee／Cross 尚待測。
+
+### 2026-10-03：Straight 實機匯入
+
+使用者提供 Revit 2025.5 結果視窗，並已讀取 `output/revit2025_gui/tray_straight.json.revit_report.json`：Committed=true、Abort=null、Phase=done、Basis=INTERNAL_ORIGIN、CreatedTrays=[S001=586316]、Joints=[]、Warnings=[]。Straight 建立及 transaction commit PASS；0/0 接頭為該案例預期。Inspection=null，因此實體尺寸／端點讀回、視覺位置確認與存檔重開仍 UNVERIFIED。上方 IN PROGRESS 為整體功能驗收狀態。
 
 最終 Python **134 passed**、AutoCAD marker **4 passed**、compileall PASS、C# Core net8/net10 / SelfTest net10 / Revit add-in net10-windows **BUILD PASS**（各 0 warnings、0 errors）。每條命令、exit code、stdout/stderr 與 benchmark 原始輸出存於 [regression.json](verification/regression.json)。
 
@@ -29,7 +57,7 @@ Static PASS 只表示已讀 interface/caller/source 並確認該範圍的防護�
 | Duplicate fitting detection：重複 joint ID／重複線段引用；不宣稱幾何全面去重 | PASS | PASS | BLOCKED | UNVERIFIED |
 | Segment reference validation：存在性、段數、null、唯一 ID | PASS | PASS | BLOCKED | UNVERIFIED |
 | Routing export：Python 實際輸出／C# 模型與 Comments 契約 | PASS | PASS | BLOCKED | UNVERIFIED |
-| Persistence：Revit 文件儲存及重新開啟 | UNVERIFIED | NOT APPLICABLE | NOT APPLICABLE | UNVERIFIED |
+| Persistence：Revit 文件儲存及重新開啟 | NOT APPLICABLE | NOT APPLICABLE | NOT APPLICABLE | PASS (human observation; no API readback) |
 
 Python export/roundtrip 已執行通過；C# Cross-language assertions 已 build、尚未執行。C# connector 是否吻合接頭座標於 MakeFitting 檢查，但完整 JSON 拓樸幾何一致性（線段端點／接頭位置）不是 Core Validate 已全面保證的能力。
 
@@ -121,6 +149,6 @@ git diff --check
 
 若執行仍遭政策阻擋，保存 command、exit/stdout/stderr 與 Code Integrity 證據，標 BLOCKED；不要改 assertion、skip runtime gate、Unblock-File 或解除 OS policy。
 
-## HUMAN TEST PENDING
+## HUMAN TEST PENDING?????????
 
 在可載入此外掛的 Revit 專用測試專案，依序確認：無開啟文件錯誤；正常匯入；取消及未指定 basis；Internal Origin／PBP 位置對照；不存在 type/level；短線段 transaction rollback；tee/cross/elbow/union connector 結果；Comments；儲存專案、關閉、重開讀回；報告輸出失敗。保存 Revit version/build、模型與結果，不能以 build 或 autorun.done 替代 assertions。此輪未啟動 Revit GUI。

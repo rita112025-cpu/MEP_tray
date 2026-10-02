@@ -26,14 +26,14 @@ python -m tests.benchmark
 - `export_revit.py`：毫米座標模型及接頭分類；`Fields.g.cs` 必須與 Python 產生器一致。
 - `paths.py`：限制輸出路徑，預設為 `output/<run_id>/`，拒絕路徑逸出及預設覆寫。
 
-## Revit 狀態
+## Revit acceptance status
 
-未於 Revit 驗證（UNVERIFIED，實機操作待確認）；Revit 2025／2027 相容性尚未驗證；未提供 .rfa（Cable Tray 為系統族）。
+2026-10-03: Revit 2025.5 (25.5.0.57) add-in load, command invocation and Straight / Elbow / Tee / Cross creation/commit PASS. Save, close and reopen persistence PASS by human confirmation and screenshot. Missing CableTrayType error handling PASS.
 
-- **VERIFIED**：原始 Python 122 tests baseline 保留；本輪 134 tests 通過、AutoCAD integration 4 tests 通過、Python compileall 及三個 C# 專案 build 通過。
-- **BLOCKED**：C# runtime，Code Integrity 3077 證實最終版本的 `MepTray.Core.dll` 被 OS policy 阻擋；BUILD PASS 不代表 runtime PASS。
-- **HUMAN TEST PENDING**：Revit GUI、儲存／重開／持久化。
-- **NOT SUPPORTED**：Shared Coordinates、Survey Point、Link transform、模型座標旋轉與任意模型原點平移。
+Numerical dimensions, endpoints and Comments readback, Project Base Point, additional rollback/error paths and Revit 2027 remain UNVERIFIED. Independent Core SelfTest remains BLOCKED by the previously recorded Code Integrity error; successful Revit imports do not substitute for that test. The installed artifact retains its earlier conservative disclosure text; current acceptance evidence is recorded in [VERIFICATION.md](docs/VERIFICATION.md).
+
+Earlier automated validation: Python 134 tests, AutoCAD integration 4 tests, compileall and C# builds passed. Shared Coordinates, Survey Point, Link transform and arbitrary model transforms remain unsupported.
+
 
 外掛的正式入口為 `ImportCommand`，使用檔案選擇器匯入模型。需有開啟的 Revit 專案、Level 與模型指定的 CableTrayType；未指定座標基準時由使用者選擇。Shared coordinates 尚未支援；非零模型原點、非標準座標軸及旋轉會在驗證階段拒絕。
 

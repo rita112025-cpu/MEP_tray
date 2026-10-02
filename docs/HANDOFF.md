@@ -1,3 +1,11 @@
+# Revit manual acceptance update - 2026-10-03 (Asia/Taipei)
+
+Revit 2025.5 (25.5.0.57): installed add-in load, command invocation, Straight / Elbow / Tee / Cross creation and commit PASS. Four local reports have no Abort or warnings and fitting results are OK. Missing CableTrayType correctly aborts without creating elements.
+
+The user saved, closed and reopened the model, confirmed trays and fittings remain, and supplied a 3D screenshot: persistence human acceptance PASS. Local `output/revit2025_gui/acceptance.rvt` is not included in Git. Inspection=null: numerical dimensions, endpoints, Comments and before/after element counts remain UNVERIFIED. Project Base Point, additional negative cases and Revit 2027 remain UNVERIFIED. Independent Core SelfTest retains its prior Code Integrity BLOCKED evidence.
+
+See [VERIFICATION.md](VERIFICATION.md). The following is historical takeover and gate evidence.
+
 # 接手紀錄 — 2026-10-02（Asia/Taipei）
 
 ## 本輪 Revit / C# Verification Gate（最新狀態）
