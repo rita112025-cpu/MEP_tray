@@ -31,19 +31,20 @@ def _inside(root: Path, p: Path) -> Path:
     return p
 
 
-def run_dir(run_id: str, create: bool = True) -> Path:
-    root = output_root()
+def run_dir(run_id: str, create: bool = True, base: Path | None = None) -> Path:
+    """output/<run_id>/（base 給定時改用 <base>/<run_id>，供管線在暫存資料夾內組裝，成功後才改名到輸出根目錄）。"""
+    root = Path(base).resolve() if base is not None else output_root()
     d = _inside(root, root / check_run_id(run_id))
     if create:
         d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def out_path(run_id: str, name: str) -> Path:
+def out_path(run_id: str, name: str, base: Path | None = None) -> Path:
     """輸出檔完整路徑；檔名只允許 [A-Za-z0-9._-]、副檔名白名單、不得含目錄成分。"""
     if not isinstance(name, str) or not NAME_RE.match(name) or name.startswith(".") or ".." in name:
         raise ValueError(f"不合法的檔名: {name!r}")
     if Path(name).suffix.lower() not in ALLOWED_EXT:
         raise ValueError(f"不允許的副檔名: {name!r}")
-    d = run_dir(run_id)
+    d = run_dir(run_id, base=base)
     return _inside(d, d / name)

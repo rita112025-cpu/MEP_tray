@@ -9,9 +9,14 @@
 from __future__ import annotations
 
 import glob
+import hashlib
 import importlib
+import json
 import os
+import re
 import sys
+import threading
+import uuid
 import shutil
 import subprocess
 import tempfile
@@ -161,15 +166,54 @@ def _build_doc(inp: Inputs, route: Route, reports: list, gov: dict, run_id: str,
     return doc
 
 
+# ── 確定性存檔 ──
+# ezdxf 預設每次存檔都寫入新的建檔時間戳與隨機 GUID（並在 XDATA 註記寫入時間），同一輸入兩次輸出位元組不同。
+# 為了讓版本管理與驗收能以位元組/雜湊比對，存檔期間開啟 ezdxf 官方的固定中繼資料選項：
+#   時間戳固定為 J2000 常數（因此 DXF 內的建檔時間不代表真實建立時間，真實時間記在 manifest）、
+#   GUID 先被寫成全零，再由本模組依「標準化輸入 + 所選規範值」以 uuid5 決定性取代。
+# DWG 由 AutoCAD 轉出，含其自身時間戳/GUID，不具確定性。
+_SAVE_LOCK = threading.Lock()
+_GUID_TAGS = (b"FINGERPRINTGUID", b"VERSIONGUID")
+_GUID_RES = {t: re.compile(rb"(\$" + t + rb"\r?\n\s*2\r?\n)\{[0-9A-Fa-f-]+\}") for t in _GUID_TAGS}
+
+
+def guid_seed(inp: Inputs, gov: dict) -> str:
+    """決定性種子：標準化輸入 JSON + 所選規範的有效值（code/value/verified）。"""
+    canon = json.dumps({"inputs": inp.to_dict(),
+                        "gov": sorted((k, g.code, g.value, g.verified) for k, g in gov.items())},
+                       sort_keys=True, ensure_ascii=False, allow_nan=False, default=list)
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+def _save_deterministic(doc, path: Path, seed: str) -> None:
+    # 官方選項只固定「存檔時」寫入的中繼資料；文件建立時記下的 CREATED_BY_EZDXF 時間戳要自行固定
+    doc.ezdxf_metadata()["CREATED_BY_EZDXF"] = f"{ezdxf.__version__} @ 2000-01-01T12:00:00+00:00"
+    with _SAVE_LOCK:                                   # 選項為全域，存檔瞬間內鎖住並還原
+        prev = ezdxf.options.write_fixed_meta_data_for_testing
+        ezdxf.options.write_fixed_meta_data_for_testing = True
+        try:
+            doc.saveas(path)
+        finally:
+            ezdxf.options.write_fixed_meta_data_for_testing = prev
+    raw = Path(path).read_bytes()
+    for tag in _GUID_TAGS:
+        guid = "{" + str(uuid.uuid5(uuid.NAMESPACE_URL, f"mep_tray:{tag.decode()}:{seed}")).upper() + "}"
+        raw, n = _GUID_RES[tag].subn(lambda m, g=guid.encode(): m.group(1) + g, raw, count=1)
+        if n != 1:
+            raise RuntimeError(f"DXF 標頭找不到 ${tag.decode()}，無法確定性化（ezdxf 版本變更？）")
+    Path(path).write_bytes(raw)
+
+
 def export_dxf(inp: Inputs, route: Route, reports: list, gov: dict, run_id: str,
                notes: list[str] = (), name: str | None = None, convert_dwg: bool = True,
-               overwrite: bool = False, accore: Path | None = None) -> DxfResult:
+               overwrite: bool = False, accore: Path | None = None,
+               base: Path | None = None) -> DxfResult:
     """reports: [clash.Report, compliance.Report…]；gov: merge_strictest 結果（用於揭露文字）。
     run_id 由本函式自行驗證；目標檔已存在時預設拒絕覆寫（FileExistsError）。
     convert_dwg=True 且偵測到 AutoCAD：先以草稿稽核，將結果寫進圖面揭露後再定稿並轉存 DWG；
     否則退而用 ODA File Converter；都沒有則只輸出 DXF（回報原因）。"""
     check_run_id(run_id)
-    path = out_path(run_id, name or f"tray_{run_id}.dxf")
+    path = out_path(run_id, name or f"tray_{run_id}.dxf", base)
     if path.exists() and not overwrite:
         raise FileExistsError(f"輸出檔已存在，拒絕覆寫: {path.name}")
     acad_exe = (accore or acad.find_accore()) if convert_dwg else None
@@ -180,7 +224,8 @@ def export_dxf(inp: Inputs, route: Route, reports: list, gov: dict, run_id: str,
             _build_doc(inp, route, reports, gov, run_id, notes, None, "").saveas(draft)
             r1 = acad.audit_and_convert(draft, None, accore=acad_exe)
             audit, ver = r1.audit_errors, r1.version
-    _build_doc(inp, route, reports, gov, run_id, notes, audit, ver).saveas(path)
+    _save_deterministic(_build_doc(inp, route, reports, gov, run_id, notes, audit, ver), path,
+                        guid_seed(inp, gov))
     dwg, note = (None, "未要求 DWG")
     if convert_dwg:
         if acad_exe is not None:                          # 第 2 趟：定稿 → 轉存 DWG（並再稽核定稿）

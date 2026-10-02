@@ -176,8 +176,9 @@ def build_model(inp: Inputs, route: Route, reports: list, gov: dict, run_id: str
     }
 
 
-def write_model(model: dict, run_id: str, name: str | None = None, overwrite: bool = False) -> Path:
-    path = out_path(run_id, name or f"tray_{run_id}.json")
+def write_model(model: dict, run_id: str, name: str | None = None, overwrite: bool = False,
+                base: Path | None = None) -> Path:
+    path = out_path(run_id, name or f"tray_{run_id}.json", base)
     if path.exists() and not overwrite:
         raise FileExistsError(f"輸出檔已存在，拒絕覆寫: {path.name}")
     path.write_text(json.dumps(model, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")

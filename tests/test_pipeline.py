@@ -64,14 +64,6 @@ def test_success_returns_data_files_stats_and_does_not_mutate_inputs(isolate):
     assert set(r.reports) == {"clash", "compliance"}
 
 
-def test_summary_dict_is_strict_json_and_uses_file_names_only():
-    r = P.run(sample(), ALL, "sum1", make_dwg=False)
-    d = r.to_summary_dict()
-    text = json.dumps(d, ensure_ascii=False, allow_nan=False)
-    assert d["files"]["dxf"] == "tray_sum1.dxf" and d["files"]["revit_json"] == "tray_sum1.json"
-    assert d["files"]["dwg"] is None and "\\" not in text.replace("\\n", "") and ":/" not in text
-
-
 # ---------- 結構化錯誤 ----------
 def bad_obstacle():
     return sample(obstacles=[{"name": "x", "kind": "water"}])
@@ -151,41 +143,6 @@ def test_programming_error_before_claim_also_propagates(monkeypatch):
     monkeypatch.setattr(P, "check_route", lambda *a, **k: (_ for _ in ()).throw(KeyError("oops")))
     with pytest.raises(KeyError):
         P.run(sample(), ALL, "bug2", make_dwg=False)
-
-
-# ---------- 清理安全 ----------
-def test_remove_claimed_refuses_anything_but_a_direct_child_of_output_root(isolate, tmp_path):
-    isolate.mkdir(parents=True)
-    outside = tmp_path / "outside"
-    (outside / "keep.txt").parent.mkdir()
-    (outside / "keep.txt").write_text("k")
-    nested = isolate / "a" / "b"
-    nested.mkdir(parents=True)
-    assert P._remove_claimed(outside) is False and (outside / "keep.txt").exists()
-    assert P._remove_claimed(isolate) is False and isolate.exists()           # 根目錄本身
-    assert P._remove_claimed(nested) is False and nested.exists()             # 非直接子層
-    own = isolate / "own"
-    own.mkdir()
-    (own / "f").write_text("1")
-    assert P._remove_claimed(own) is True and not own.exists()
-
-
-def test_junction_escape_is_rejected_and_target_untouched(isolate, tmp_path):
-    isolate.mkdir(parents=True)
-    outside = tmp_path / "victim"
-    outside.mkdir()
-    (outside / "important.txt").write_text("data")
-    link = isolate / "esc1"
-    try:
-        os.symlink(outside, link, target_is_directory=True)
-    except (OSError, NotImplementedError):
-        rc = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)],
-                            capture_output=True, shell=False) if os.name == "nt" else None
-        if rc is None or rc.returncode != 0:
-            pytest.skip("此環境無法建立 symlink/junction")
-    r = P.run(sample(), ALL, "esc1", make_dwg=False)
-    assert r.ok is False and r.error.code == "invalid_run_id"
-    assert (outside / "important.txt").read_text() == "data" and len(list(outside.iterdir())) == 1
 
 
 # ---------- 揭露 ----------

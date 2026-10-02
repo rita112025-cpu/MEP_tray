@@ -10,6 +10,25 @@ from dataclasses import asdict, dataclass, field
 from .geometry import Box, Vec
 from .router import Obstacle
 
+import math
+
+
+def _num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _vec(v, what: str) -> tuple:
+    if not isinstance(v, (list, tuple)) or len(v) != 3 or not all(_num(x) for x in v):
+        raise ValueError(f"{what} 需為 3 個有限數")
+    return tuple(v)
+
+
+def _vec_pair(v, what: str) -> tuple:
+    if not isinstance(v, (list, tuple)) or len(v) != 2:
+        raise ValueError(f"{what} 需為 (lo, hi)")
+    return _vec(v[0], f"{what}.lo"), _vec(v[1], f"{what}.hi")
+
+
 DEFAULT_CABLE = {"od_mm": 20.0, "count": 10, "kind": "power"}
 OBSTACLE_KINDS = {"water", "duct", "heat", "structure", "tray_power", "tray_signal", "other"}
 
@@ -42,18 +61,45 @@ class Inputs:
                 for o in self.obstacles]
 
     def validate(self) -> None:
+        """格式與範圍驗證。任何不合法的輸入一律拋 ValueError（不讓 KeyError/TypeError 外洩），
+        呼叫端因此只需捕捉 ValueError；其他例外代表程式錯誤。"""
         if self.tray_type not in ("power", "signal"):
             raise ValueError("tray_type 需為 power|signal")
-        if self.tray_w_mm <= 0 or self.tray_h_mm <= 0:
-            raise ValueError("橋架寬/高需為正數")
+        if not (_num(self.tray_w_mm) and _num(self.tray_h_mm) and self.tray_w_mm > 0 and self.tray_h_mm > 0):
+            raise ValueError("橋架寬/高需為有限的正數")
+        room = _vec_pair(self.room, "room")
+        if any(lo >= hi for lo, hi in zip(*room)):
+            raise ValueError("room 的 lo 需小於 hi")
+        _vec(self.start, "start")
+        if not isinstance(self.ends, (list, tuple)) or not self.ends:
+            raise ValueError("ends 需為非空清單")
+        for e in self.ends:
+            _vec(e, "ends 項目")
+        if not isinstance(self.obstacles, (list, tuple)):
+            raise ValueError("obstacles 需為清單")
         for o in self.obstacles:
+            if not isinstance(o, dict):
+                raise ValueError("障礙物需為物件")
+            name = o.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("障礙物需有非空的 name")
             if o.get("kind") not in OBSTACLE_KINDS:
                 raise ValueError(f"障礙物類型未知: {o.get('kind')!r}")
-            if any(l >= h for l, h in zip(o["lo"], o["hi"])):
-                raise ValueError(f"障礙物 {o.get('name')} 的 lo/hi 不合法")
+            lo, hi = _vec(o.get("lo"), f"障礙物 {name} 的 lo"), _vec(o.get("hi"), f"障礙物 {name} 的 hi")
+            if any(l >= h for l, h in zip(lo, hi)):
+                raise ValueError(f"障礙物 {name} 的 lo/hi 不合法")
+        if not isinstance(self.cables, (list, tuple)):
+            raise ValueError("cables 需為清單")
         for c in self.cables:
-            if c["od_mm"] <= 0 or c.get("count", 1) <= 0:
-                raise ValueError("電纜外徑/條數需為正數")
+            if not isinstance(c, dict) or not _num(c.get("od_mm")) or c["od_mm"] <= 0:
+                raise ValueError("電纜外徑需為有限的正數")
+            cnt = c.get("count", 1)
+            if isinstance(cnt, bool) or not isinstance(cnt, int) or cnt <= 0:
+                raise ValueError("電纜條數需為正整數")
+        if not isinstance(self.codes, (list, tuple)) or not all(isinstance(x, str) for x in self.codes):
+            raise ValueError("codes 需為字串清單")
+        if self.cell_m is not None and not (_num(self.cell_m) and self.cell_m > 0):
+            raise ValueError("cell_m 需為有限的正數或 None")
 
     def to_dict(self) -> dict:
         return asdict(self)
