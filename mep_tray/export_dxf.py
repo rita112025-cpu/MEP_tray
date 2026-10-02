@@ -188,6 +188,9 @@ def guid_seed(inp: Inputs, gov: dict) -> str:
 def _save_deterministic(doc, path: Path, seed: str) -> None:
     # 官方選項只固定「存檔時」寫入的中繼資料；文件建立時記下的 CREATED_BY_EZDXF 時間戳要自行固定
     doc.ezdxf_metadata()["CREATED_BY_EZDXF"] = f"{ezdxf.__version__} @ 2000-01-01T12:00:00+00:00"
+    if not hasattr(ezdxf.options, "write_fixed_meta_data_for_testing"):
+        # 此選項自 ezdxf 0.12 起存在；缺少時明確報錯，絕不靜默失去確定性
+        raise RuntimeError("ezdxf 缺少 options.write_fixed_meta_data_for_testing（需 ezdxf>=0.12），無法產生確定性 DXF")
     with _SAVE_LOCK:                                   # 選項為全域，存檔瞬間內鎖住並還原
         prev = ezdxf.options.write_fixed_meta_data_for_testing
         ezdxf.options.write_fixed_meta_data_for_testing = True

@@ -52,9 +52,11 @@ class PipelineError:
     stage: str      # validate | rules | route | output | io
     code: str       # 穩定的機器可讀代碼
     message: str    # 給人看的說明（已脫敏：不含本機路徑）
+    cleanup_failed: bool = False   # True=暫存資料夾未能清除（殘留會佔用磁碟，但不影響同 run_id 重跑，因為只有 rename 成功才認領）
 
     def to_dict(self) -> dict:
-        return {"stage": self.stage, "code": self.code, "message": self.message}
+        return {"stage": self.stage, "code": self.code, "message": self.message,
+                "cleanup_failed": self.cleanup_failed}
 
 
 @dataclass
@@ -85,11 +87,23 @@ class RunResult:
         }
 
 
+def _scrub(obj):
+    """遞迴脫敏：字串經 sanitize_text，容器逐項處理，其餘原樣。"""
+    if isinstance(obj, str):
+        return sanitize_text(obj)
+    if isinstance(obj, dict):
+        return {k: _scrub(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_scrub(v) for v in obj]
+    return obj
+
+
 def _fail(run_id, inp, codes, stage, code, message, gov=None, residue: str | None = None) -> RunResult:
     msg = sanitize_text(message)
     if residue:
         msg += "；" + sanitize_text(residue)
-    return RunResult(False, run_id, PipelineError(stage, code, msg), inp, list(codes), gov)
+    return RunResult(False, run_id, PipelineError(stage, code, msg, cleanup_failed=bool(residue)),
+                     inp, list(codes), gov)
 
 
 def _remove_stage(stage: Path) -> str | None:
@@ -98,13 +112,13 @@ def _remove_stage(stage: Path) -> str | None:
         if not os.path.lexists(stage):
             return None
         if stage.is_symlink() or os.path.isjunction(stage) or not stage.is_dir():
-            return f"拒絕清理（不是一般目錄）: {stage}"
+            return f"殘留資料夾未能清除: {stage.name}（拒絕清理：不是一般目錄）"
         r = stage.resolve()
         if r.parent != output_root() or not r.name.startswith(STAGE_PREFIX):
-            return f"拒絕清理（不在預期位置）: {stage}"
+            return f"殘留資料夾未能清除: {stage.name}（拒絕清理：不在預期位置）"
         shutil.rmtree(r)
     except OSError as e:
-        return f"清理暫存資料夾失敗，殘留: {stage}（{type(e).__name__}: {e}）"
+        return f"殘留資料夾未能清除: {stage.name}（{type(e).__name__}: {e}）"
     return None
 
 
@@ -148,14 +162,18 @@ def _dedupe(codes) -> list:
 
 def run(inputs: Inputs, codes: Sequence[str], run_id: str, *, type_name: str | None = None,
         basis: str = "UNSPECIFIED", make_dwg: bool | None = True, rules: dict | None = None,
-        notes: Sequence[str] = ()) -> RunResult:
+        notes: Sequence[str] = (), cell_m: float | None = None) -> RunResult:
     """執行完整管線。make_dwg: True/None=偵測到 AutoCAD/ODA 才轉 DWG；False=絕不啟動外部程式。
-    codes 去重並保序；大小寫不正規化（未知代號會被明確拒絕，如 "cns"）。"""
+    codes 去重並保序；大小寫不正規化（未知代號會被明確拒絕，如 "cns"）。
+    cell_m 不為 None 時覆寫 inputs.cell_m（呼叫端如 UI 不必改 Inputs 就能控制格距）；None=沿用 inputs.cell_m
+    （仍為 None 則依規範淨距自動，自動格距小場景約 5 秒/次；UI 建議預設 0.25）。"""
     if not isinstance(codes, (list, tuple)) or not all(isinstance(c, str) for c in codes):
         inp0 = dataclasses.replace(inputs)
         return _fail(run_id, inp0, [], "validate", "invalid_codes", "codes 需為字串清單")
     codes = _dedupe(codes)
     inp = dataclasses.replace(inputs, codes=list(codes))      # 副本，不改呼叫端物件
+    if cell_m is not None:
+        inp = dataclasses.replace(inp, cell_m=cell_m)
 
     # ── validate：只在具體呼叫點捕捉 ──
     try:
@@ -246,7 +264,7 @@ def run(inputs: Inputs, codes: Sequence[str], run_id: str, *, type_name: str | N
              "revit_json": final / f"tray_{run_id}.json"}
     result = RunResult(True, run_id, None, inp, codes, gov, route, reports, files,
                        sanitize_text(dxf.dwg_note), dxf.acad_audit, disclosures,
-                       _stats(route, reports, model, span, span_source))
+                       _scrub(_stats(route, reports, model, span, span_source)))
     if residue:                                           # 成功但暫存殘留：不靜默
         result.disclosures.append(sanitize_text(residue))
     return result

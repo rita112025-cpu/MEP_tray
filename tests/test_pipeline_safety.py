@@ -101,8 +101,17 @@ def test_cleanup_failure_after_structured_error_reports_residue_sanitised(isolat
     monkeypatch.setattr(P.shutil, "rmtree", boom(PermissionError("locked")))
     r = P.run(sample(), ALL, "cl1", make_dwg=False)
     assert r.ok is False and r.error.code == "os_error"
-    assert "殘留" in r.error.message and "<OUT>" in r.error.message and str(tmp_path) not in r.error.message
+    assert r.error.cleanup_failed is True
+    assert "殘留資料夾未能清除: " + P.STAGE_PREFIX in r.error.message and str(tmp_path) not in r.error.message
     assert len(stages(isolate)) == 1                          # 殘留確實存在，而且有被回報
+    assert r.to_summary_dict()["error"]["cleanup_failed"] is True
+
+
+def test_cleanup_failed_flag_is_false_when_cleanup_succeeds(isolate, monkeypatch):
+    monkeypatch.setattr(P.R, "write_model", boom(OSError(28, "disk full")))
+    r = P.run(sample(), ALL, "cl0", make_dwg=False)
+    assert r.ok is False and r.error.cleanup_failed is False and "殘留" not in r.error.message
+    assert stages(isolate) == []
 
 
 def test_cleanup_failure_on_propagating_exception_adds_note(isolate, monkeypatch):
@@ -304,3 +313,66 @@ def test_export_restores_global_ezdxf_option_even_when_save_fails(isolate, monke
     r = P.run(sample(), ALL, "opt1", make_dwg=False)
     assert r.ok is False and r.error.code == "os_error"
     assert ezdxf.options.write_fixed_meta_data_for_testing is False
+
+
+# ---------- 格距覆寫（UI 不必改 Inputs）----------
+def test_cell_override_parameter_wins_over_inputs_and_does_not_mutate_them(isolate):
+    base = Inputs(cell_m=0.1)
+    r = P.run(base, ALL, "cm1", make_dwg=False, cell_m=0.25)
+    assert r.ok and r.route.cell_m == 0.25 and r.inputs.cell_m == 0.25 and base.cell_m == 0.1
+    r2 = P.run(Inputs(cell_m=0.25), ALL, "cm2", make_dwg=False)               # None → 沿用 inputs.cell_m
+    assert r2.ok and r2.route.cell_m == 0.25
+    bad = P.run(Inputs(), ALL, "cm3", make_dwg=False, cell_m=-1)
+    assert bad.ok is False and bad.error.code == "invalid_input" and not (isolate / "cm3").exists()
+
+
+# ---------- 遞迴脫敏 ----------
+def test_scrub_is_recursive_over_dicts_and_lists_and_leaves_numbers_alone():
+    home = str(Path.home())
+    out = P._scrub({"a": [home + "/x", {"b": "ok " + home + "/y"}], "n": 1, "t": ("p", home), "none": None})
+    assert home not in json.dumps(out, ensure_ascii=False) and out["n"] == 1 and out["none"] is None
+    assert "<HOME>" in out["a"][0] and isinstance(out["t"], list)
+
+
+# ---------- ezdxf 選項防護與降級重匯入 ----------
+def test_missing_ezdxf_option_raises_instead_of_silently_losing_determinism(tmp_path):
+    import types
+    fake_ezdxf = types.SimpleNamespace(options=object(), __version__="0")
+    fake_doc = types.SimpleNamespace(ezdxf_metadata=lambda: {}, saveas=lambda p: pytest.fail("不應存檔"))
+    orig = X.ezdxf
+    X.ezdxf = fake_ezdxf
+    try:
+        with pytest.raises(RuntimeError, match="write_fixed_meta_data_for_testing"):
+            X._save_deterministic(fake_doc, tmp_path / "x.dxf", "seed")
+    finally:
+        X.ezdxf = orig
+
+
+def test_determinism_holds_after_ezdxf_fallback_reimport(isolate, monkeypatch, tmp_path):
+    import importlib
+    import sys
+    monkeypatch.delenv("EZDXF_DISABLE_C_EXT", raising=False)       # 讓降級路徑設定的變數於測試後被還原
+    saved = {k: v for k, v in sys.modules.items() if k == "ezdxf" or k.startswith("ezdxf.")}
+    old_mod, calls = X.ezdxf, []
+
+    def importer(name):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ImportError("DLL load failed while importing matrix44")
+        return importlib.import_module(name)
+
+    try:
+        new_mod = X.load_ezdxf(importer)
+        assert new_mod is not old_mod and new_mod.options is not old_mod.options     # 確實是重新匯入的另一份模組
+        monkeypatch.setattr(X, "ezdxf", new_mod)                                     # export_dxf 實際使用的模組物件
+        a = P.run(sample(), ALL, "fb1", make_dwg=False)
+        time.sleep(1.1)
+        monkeypatch.setenv("MEP_OUTPUT_ROOT", str(tmp_path / "fb_other"))
+        b = P.run(sample(), ALL, "fb1", make_dwg=False)
+        assert a.ok and b.ok and a.files["dxf"].read_bytes() == b.files["dxf"].read_bytes()
+        assert new_mod.options.write_fixed_meta_data_for_testing is False            # 在「使用的那份」上還原
+        assert old_mod.options.write_fixed_meta_data_for_testing is False
+    finally:
+        for k in [k for k in sys.modules if k == "ezdxf" or k.startswith("ezdxf.")]:
+            del sys.modules[k]
+        sys.modules.update(saved)
