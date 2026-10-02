@@ -62,3 +62,14 @@ def relative_to_output(path: Path | str | None) -> str | None:
         return p.resolve().relative_to(output_root()).as_posix()
     except (ValueError, OSError):
         return p.name
+
+
+def scrub(obj):
+    """遞迴脫敏：字串經 sanitize_text，dict/list/tuple 逐項處理（tuple 轉 list），其餘原樣。"""
+    if isinstance(obj, str):
+        return sanitize_text(obj)
+    if isinstance(obj, dict):
+        return {k: scrub(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [scrub(v) for v in obj]
+    return obj
