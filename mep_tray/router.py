@@ -23,7 +23,12 @@ NICE_CELLS = [0.25, 0.2, 0.1, 0.05]
 
 
 class RoutingError(RuntimeError):
-    pass
+    """路徑規劃的可預期失敗。code 為穩定的機器可讀代碼（供管線/UI 使用，勿比對中文訊息）：
+    misaligned | grid_too_large | endpoint_blocked | no_route | search_limit | route_error"""
+
+    def __init__(self, message: str, code: str = "route_error"):
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass
@@ -66,6 +71,7 @@ class RouteResult:
     route: "Route | None" = None
     error: str = ""
     cell_m: float = 0.0
+    code: str = ""
 
 
 def _aligned(points, origin, cell: float) -> bool:
@@ -92,7 +98,7 @@ def try_route_tray(*a, **kw) -> RouteResult:
         r = route_tray(*a, **kw)
         return RouteResult(True, r, "", r.cell_m)
     except RoutingError as e:
-        return RouteResult(False, None, str(e))
+        return RouteResult(False, None, str(e), code=e.code)
 
 
 def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle],
@@ -105,7 +111,8 @@ def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle]
         cell = auto_cell(tray_w_m, rules, [start, *ends], origin)
     if not _aligned([start, *ends], origin, cell):
         raise RoutingError(
-            f"起訖座標未對齊格距 {cell} m（相對房間原點需為其整數倍）；請調整座標或指定可整除的格距")
+            f"起訖座標未對齊格距 {cell} m（相對房間原點需為其整數倍）；請調整座標或指定可整除的格距",
+            "misaligned")
     half = max(tray_w_m, tray_h_m) / 2
     sc = rules.get("structure_clear_mm")
     hr = rules.get("headroom_mm")
@@ -114,7 +121,7 @@ def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle]
     n = tuple(int(math.floor((room.hi[i] - room.lo[i]) / cell)) + 1 for i in range(3))
     total = n[0] * n[1] * n[2]
     if total > max_cells:    # 確定性防護：建格前即報錯，不必跑 A*
-        raise RoutingError(f"格點總數 {total:,} 超過上限 {max_cells:,}，請放大格距或縮小場景")
+        raise RoutingError(f"格點總數 {total:,} 超過上限 {max_cells:,}，請放大格距或縮小場景", "grid_too_large")
 
     def to_cell(p: Vec):
         return tuple(int(round((p[i] - origin[i]) / cell)) for i in range(3))
@@ -172,7 +179,7 @@ def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle]
 
     s_cell = to_cell(start)
     if not free(s_cell):
-        raise RoutingError(f"起點 {start} 落在障礙/淨距範圍或牆邊禁區內")
+        raise RoutingError(f"起點 {start} 落在障礙/淨距範圍或牆邊禁區內", "endpoint_blocked")
     network: set = {s_cell}
     waypoints: list[list[Vec]] = []
     junctions: list[tuple[Vec, int]] = []
@@ -181,11 +188,11 @@ def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle]
     for end in sorted(ends, key=lambda e: (-dist(start, e), e)):
         t_cell = to_cell(end)
         if not free(t_cell):
-            raise RoutingError(f"終點 {end} 落在障礙/淨距範圍或牆邊禁區內")
+            raise RoutingError(f"終點 {end} 落在障礙/淨距範圍或牆邊禁區內", "endpoint_blocked")
         path = _astar(network, t_cell, free, edge_free, bend_penalty, vertical_penalty,
                       max_expansions)
         if path is None:
-            raise RoutingError(f"找不到通往終點 {end} 的可行路徑（淨距/障礙過嚴？）")
+            raise RoutingError(f"找不到通往終點 {end} 的可行路徑（淨距/障礙過嚴？）", "no_route")
         if path[0] != s_cell and len(network) > 1:
             junctions.append((to_pos(path[0]), len(waypoints)))
         network.update(path)
@@ -219,7 +226,7 @@ def _astar(sources: set, goal, free, edge_free, bend_penalty, vertical_penalty, 
             continue
         expanded += 1
         if expanded > max_expansions:
-            raise RoutingError("超過搜尋上限，請放大格距或縮小場景")
+            raise RoutingError("超過搜尋上限，請放大格距或縮小場景", "search_limit")
         if c == goal:
             out = [c]
             st = (c, d)
