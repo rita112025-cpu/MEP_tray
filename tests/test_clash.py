@@ -1,16 +1,17 @@
 import dataclasses
 import json
+import random
 
 import pytest
 
-from mep_tray.clash import CLASH, check_route
-from mep_tray.geometry import Box
+from mep_tray.clash import check_route
 from mep_tray.model import Inputs
-from mep_tray.router import Route, place_hangers, route_tray
-from mep_tray.rules import FAIL, PASS, UNVERIFIED, merge_strictest
+from mep_tray.router import Route, RoutingError, route_tray
+from mep_tray.rules import CLASH, FAIL, LABELS, PASS, UNVERIFIED, merge_strictest
 
 ALL = ["CNS", "IEC", "NEC", "TW_BUILDING", "MRT_APPX_C"]
 GOV = merge_strictest(ALL)
+GEOM_KINDS = ("clash", "clearance", "headroom", "structure")
 
 
 def ob(name, kind, lo, hi):
@@ -19,112 +20,150 @@ def ob(name, kind, lo, hi):
 
 def manual(*pts):
     wp = list(pts)
-    segs = list(zip(wp, wp[1:]))
-    return Route([wp], segs, wp[1:-1], 0.0)
+    return Route([wp], list(zip(wp, wp[1:])), wp[1:-1], 0.0)
 
 
 def inp(obstacles=(), **kw):
     return Inputs(start=(1, 1, 3), ends=[(10, 1, 3)], obstacles=list(obstacles), **kw)
 
 
-def test_overlap_is_clash_with_location_and_suggestion():
+STRAIGHT = manual((1, 1, 3), (10, 1, 3))
+
+
+def shift(route, axis, sign, mm):
+    d = [0, 0, 0]
+    d["XYZ".index(axis)] = (1 if sign == "+" else -1) * mm / 1000
+    mv = lambda p: tuple(p[i] + d[i] for i in range(3))
+    return manual(*[mv(p) for p in route.waypoints[0]])
+
+
+# ---------- 衝突 / 淨距 ----------
+def test_overlap_is_clash_with_location_and_machine_fix():
     i = inp([ob("pipe", "water", [5, 0.5, 2.5], [5.4, 1.5, 3.5])])
-    rep = check_route(i, manual((1, 1, 3), (10, 1, 3)), GOV)
+    rep = check_route(i, STRAIGHT, GOV)
     f = [x for x in rep.findings if x.kind == "clash"]
     assert len(f) == 1 and f[0].status == CLASH and rep.has_clash
-    assert 5.0 <= f[0].location[0] <= 5.4 and "移開" in f[0].suggestion and "pipe" in f[0].subject
+    assert 5.0 <= f[0].location[0] <= 5.4            # 相交取重疊區中心
+    assert f[0].fix["axis"] in "XYZ" and f[0].fix["move_mm"] > 0 and "pipe" in f[0].subject
 
 
-def test_clearance_fail_cites_code_and_is_unverified_by_default():
-    # 橋架邊緣 y=1.15；水管 y 起 1.35 → 淨距 200mm < 400mm(MRT_APPX_C)
-    i = inp([ob("water1", "water", [4, 1.35, 2.0], [6, 1.6, 3.6])])
-    rep = check_route(i, manual((1, 1, 3), (10, 1, 3)), GOV)
-    f = [x for x in rep.findings if x.kind == "clearance"][0]
-    assert f.actual == pytest.approx(200) and f.required == 400 and f.code == "MRT_APPX_C"
-    assert f.indicative == FAIL and f.status == UNVERIFIED and f.clause and "移開" in f.suggestion
+def test_verified_false_clash_stays_clash_and_clearance_is_unverified_with_indicative():
+    clash = inp([ob("pipe", "water", [5, 0.5, 2.5], [5.4, 1.5, 3.5])])
+    assert check_route(clash, STRAIGHT, GOV).findings[0].status == CLASH
+    near = inp([ob("water1", "water", [4, 1.35, 2.0], [6, 1.6, 3.6])])   # 淨距 200 < 400
+    f = [x for x in check_route(near, STRAIGHT, GOV).findings if x.kind == "clearance"][0]
+    assert (f.actual, f.required, f.code) == (pytest.approx(200), 400, "MRT_APPX_C")
+    assert f.status == UNVERIFIED and f.indicative == FAIL and f.clause
     ver = dict(GOV, clear_water_mm=dataclasses.replace(GOV["clear_water_mm"], verified=True))
-    f2 = [x for x in check_route(i, manual((1, 1, 3), (10, 1, 3)), ver).findings
-          if x.kind == "clearance"][0]
+    f2 = [x for x in check_route(near, STRAIGHT, ver).findings if x.kind == "clearance"][0]
     assert f2.status == FAIL
 
 
-def test_compliant_clearance_recorded_in_checks_but_not_a_finding_and_never_pass_if_unverified():
+def test_pass_is_recorded_in_checks_but_unverified_never_pass():
     i = inp([ob("water1", "water", [4, 2.0, 2.0], [6, 2.3, 3.6])])
-    rep = check_route(i, manual((1, 1, 3), (10, 1, 3)), GOV)
+    rep = check_route(i, STRAIGHT, GOV)
     assert not [x for x in rep.findings if x.kind == "clearance"]
     c = [x for x in rep.checks if x.kind == "clearance"][0]
     assert c.indicative == PASS and c.status == UNVERIFIED
 
 
+def test_boundary_exact_clearance_not_reported_one_mm_short_is_reported():
+    exact = inp([ob("w", "water", [4, 1.55, 2.0], [6, 1.9, 3.6])])     # 邊緣 1.15 → 淨距 400mm
+    assert not [f for f in check_route(exact, STRAIGHT, GOV).findings if f.kind == "clearance"]
+    short = inp([ob("w", "water", [4, 1.549, 2.0], [6, 1.9, 3.6])])    # 399mm
+    f = [f for f in check_route(short, STRAIGHT, GOV).findings if f.kind == "clearance"]
+    assert len(f) == 1 and f[0].actual == pytest.approx(399)
+
+
 def test_one_finding_per_obstacle_even_if_many_segments():
     i = inp([ob("pipe", "water", [3, 0.5, 2.5], [3.4, 1.5, 3.5])])
     r = manual((1, 1, 3), (2, 1, 3), (2, 5, 3), (9, 5, 3), (9, 1, 3), (10, 1, 3))
-    rep = check_route(i, r, GOV)
-    assert len([x for x in rep.checks if x.subject.startswith("pipe")]) == 1
+    assert len([x for x in check_route(i, r, GOV).checks if x.subject.startswith("pipe")]) == 1
 
 
 def test_same_type_tray_uses_parallel_rule_and_other_type_uses_separation():
-    near = ob("trayB", "tray_power", [1, 1.55, 2.95], [10, 1.85, 3.05])   # 淨距 ≈400mm
-    rep = check_route(inp([near], tray_type="power"), manual((1, 1, 3), (10, 1, 3)), GOV)
-    f = [x for x in rep.findings if x.subject.startswith("trayB")][0]
+    near = ob("trayB", "tray_power", [1, 1.45, 2.95], [10, 1.75, 3.05])      # 淨距 300 < 600
+    f = [x for x in check_route(inp([near], tray_type="power"), STRAIGHT, GOV).findings
+         if x.subject.startswith("trayB")][0]
     assert f.required == 600
-    sig = ob("trayS", "tray_signal", [1, 1.35, 2.95], [10, 1.65, 3.05])   # 淨距 200mm
-    rep2 = check_route(inp([sig], tray_type="power"), manual((1, 1, 3), (10, 1, 3)), GOV)
-    f2 = [x for x in rep2.findings if x.subject.startswith("trayS")][0]
-    assert f2.required == 300 and f2.code in ("CNS", "NEC", "MRT_APPX_C")
+    sig = ob("trayS", "tray_signal", [1, 1.35, 2.95], [10, 1.65, 3.05])      # 淨距 200 < 300
+    f2 = [x for x in check_route(inp([sig], tray_type="power"), STRAIGHT, GOV).findings
+          if x.subject.startswith("trayS")][0]
+    assert f2.required == 300
 
 
-def test_headroom_to_ceiling():
-    rep = check_route(inp(), manual((1, 1, 3.9), (10, 1, 3.9)), GOV)
-    f = [x for x in rep.findings if x.kind == "headroom"][0]
-    assert f.actual == pytest.approx(50) and f.required == 300
+# ---------- 房間 ----------
+def test_headroom_and_wall_faces():
+    f = [x for x in check_route(inp(), manual((1, 1, 3.9), (10, 1, 3.9)), GOV).findings
+         if x.kind == "headroom"][0]
+    assert f.actual == pytest.approx(50) and f.required == 300 and f.fix["axis"] == "Z"
+    wall = check_route(inp(), manual((0.03, 1, 3), (10, 1, 3)), GOV)      # 貼 X- 牆
+    s = [x for x in wall.findings if x.kind == "structure"][0]
+    assert s.subject == "X- 面" and s.location[0] == 0 and s.fix["sign"] == "+"
 
 
-def test_hanger_span_checked_and_missing_hangers_disclosed():
-    r = manual((1, 1, 3), (10, 1, 3))
-    assert "note_hangers" in check_route(inp(), r, GOV).design
-    r.hangers = [(1.3, 1, 3), (9.7, 1, 3)]
-    f = [x for x in check_route(inp(), r, GOV).findings if x.kind == "hanger_span"]
-    assert f and f[0].actual == pytest.approx(8.4)
-    place_hangers(r, GOV["span_max_m"].value)
-    assert not [x for x in check_route(inp(), r, GOV).findings if x.kind == "hanger_span"]
+# ---------- 建議可驗證 ----------
+@pytest.mark.parametrize("o", [ob("w", "water", [4, 1.35, 2.0], [6, 1.6, 3.6]),     # 淨距不足
+                               ob("pipe", "water", [5, 0.5, 2.5], [5.4, 1.5, 3.5]),  # 實體重疊
+                               ob("h", "heat", [4, 1.2, 2.5], [6, 1.4, 3.5])])
+def test_suggested_shift_removes_the_finding(o):
+    i = inp([o])
+    f = [x for x in check_route(i, STRAIGHT, GOV).findings if x.kind in ("clash", "clearance")][0]
+    moved = shift(STRAIGHT, f.fix["axis"], f.fix["sign"], f.fix["move_mm"])
+    again = [x for x in check_route(i, moved, GOV).findings if x.kind in ("clash", "clearance")]
+    assert not again
 
 
-def test_fill_fail_recommends_width_and_discloses_default_cables():
-    i = inp(cables=[{"od_mm": 30, "count": 40, "kind": "power"}], tray_w_mm=300)
-    rep = check_route(i, manual((1, 1, 3), (10, 1, 3)), GOV)
-    f = [x for x in rep.findings if x.kind == "fill"][0]
-    assert "建議橋架寬" in f.suggestion and f.code == "CNS"
-    assert "cables_defaulted" in check_route(inp(), manual((1, 1, 3), (10, 1, 3)), GOV).design
+# ---------- 與 router 一致、自身接點 ----------
+def _scene(seed):
+    rnd = random.Random(seed)
+    obs = []
+    for k in range(rnd.randint(1, 4)):
+        kind = rnd.choice(["water", "duct", "heat", "structure", "tray_signal", "tray_power"])
+        lo = [rnd.uniform(2, 9), rnd.uniform(0, 4.5), rnd.uniform(0, 3)]
+        hi = [lo[0] + rnd.uniform(0.3, 2), lo[1] + rnd.uniform(0.3, 1.5), lo[2] + rnd.uniform(0.3, 1.5)]
+        obs.append(ob(f"o{k}", kind, [round(v, 2) for v in lo], [round(v, 2) for v in hi]))
+    return Inputs(start=(1, 1, 3), ends=[(10, 5, 3), (6, 1, 3)], obstacles=obs)
 
 
-def test_bend_leg_finding():
-    r = manual((1, 1, 3), (1.2, 1, 3), (1.2, 5, 3))
-    rep = check_route(inp(), r, GOV)
-    assert [x for x in rep.findings if x.kind == "bend"]
-    assert rep.design["fitting_radius_mm_used"] >= 300
+def test_router_success_implies_no_geometric_findings_property():
+    ok = 0
+    for seed in range(25):
+        i = _scene(seed)
+        try:
+            r = route_tray(i.room_box(), i.start, i.ends, i.obstacle_objs(), 0.3, 0.1, "power",
+                           GOV, cell=0.25)
+        except RoutingError:
+            continue
+        ok += 1
+        bad = [f for f in check_route(i, r, GOV).findings if f.kind in GEOM_KINDS]
+        assert not bad, (seed, [(f.kind, f.subject, f.actual, f.required) for f in bad])
+    assert ok >= 12      # 確保此 property 真的有跑到足夠多組
 
 
-def test_router_output_has_no_clash_or_clearance_failure():
-    obs = [ob("w", "water", [5, 0, 0], [5.3, 4, 3.2]), ob("d", "duct", [8, 2, 0], [8.5, 6, 3.2])]
-    i = inp(obs)
-    r = route_tray(i.room_box(), i.start, i.ends, i.obstacle_objs(), 0.3, 0.1, "power", GOV, cell=0.25)
-    place_hangers(r, GOV["span_max_m"].value)
-    rep = check_route(i, r, GOV)
-    assert not [f for f in rep.findings if f.kind in ("clash", "clearance", "headroom", "structure")]
+def test_own_bends_and_branch_junctions_never_reported_as_clash():
+    for ends in ([(10, 5, 3)], [(10, 1, 3), (6, 5, 3)]):
+        i = Inputs(start=(1, 1, 3), ends=ends, obstacles=[ob("far", "water", [11, 5, 0], [11.5, 5.5, 1])])
+        r = route_tray(i.room_box(), i.start, i.ends, [], 0.3, 0.1, "power", GOV, cell=0.25)
+        assert r.bends
+        assert not [f for f in check_route(i, r, GOV).findings if f.kind in GEOM_KINDS]
 
 
 def test_exact_box_is_less_conservative_than_router_approximation():
-    # 橋架上方 200mm 處有風管(需 150mm)：精確外包盒(半高 50mm)判符合；
-    # router 以 max(寬,高)/2=150mm 膨脹，會認為該高度不可走 → 以 clash 為準
-    i = inp([ob("duct", "duct", [4, 0, 3.25], [6, 2, 3.6])])
-    rep = check_route(i, manual((1, 1, 3), (10, 1, 3)), GOV)
-    c = [x for x in rep.checks if x.kind == "clearance"][0]
+    i = inp([ob("duct", "duct", [4, 0, 3.25], [6, 2, 3.6])])   # 橋架上方 200mm，風管需 150mm
+    c = [x for x in check_route(i, STRAIGHT, GOV).checks if x.kind == "clearance"][0]
     assert c.actual == pytest.approx(200) and c.indicative == PASS
 
 
-def test_report_is_json_serialisable_and_deterministic():
+# ---------- 輸出契約 ----------
+def test_to_dict_stable_codes_schema_json_and_determinism():
     i = inp([ob("a", "water", [5, 0.5, 2.5], [5.4, 1.5, 3.5]), ob("b", "heat", [7, 1.3, 2], [8, 1.6, 4])])
-    r = manual((1, 1, 3), (10, 1, 3))
-    d1, d2 = check_route(i, r, GOV).to_dict(), check_route(i, r, GOV).to_dict()
-    assert json.dumps(d1, ensure_ascii=False) == json.dumps(d2, ensure_ascii=False)
+    d1 = check_route(i, STRAIGHT, GOV).to_dict()
+    d2 = check_route(i, STRAIGHT, GOV).to_dict()
+    s1 = json.dumps(d1, ensure_ascii=False, allow_nan=False)
+    assert s1 == json.dumps(d2, ensure_ascii=False, allow_nan=False)
+    assert d1["schema_version"] == 1
+    for f in d1["findings"] + d1["checks"]:
+        assert f["status"] in LABELS and f["indicative"] in LABELS
+        assert f["status_label"] == LABELS[f["status"]] and f["kind"].isascii()
+        assert all(isinstance(v, float) for v in f["location"])

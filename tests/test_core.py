@@ -252,3 +252,11 @@ def test_search_limit_returns_explicit_error():
     res = try_route_tray(ROOM, (1, 1, 3), [(10, 5, 1)], [], 0.3, 0.1, "power", _rules(),
                          cell=0.25, max_expansions=5)
     assert res.ok is False and "超過搜尋上限" in res.error
+
+
+def test_governing_direction_is_required():
+    from mep_tray.rules import Governing
+    with pytest.raises(TypeError):
+        Governing("k", "l", "mm", 1.0, "CNS", "c", True)           # 缺 direction
+    g = Governing("k", "l", "mm", 1.0, "CNS", "c", True, "min")
+    assert g.direction == "min" and g.all_values == {}

@@ -19,8 +19,8 @@ class Governing:
     code: str                      # 決定該值的規範代號
     clause: str
     verified: bool
+    direction: str                 # 必填：min=值為下限(越大越嚴) | max=值為上限(越小越嚴)
     all_values: dict = field(default_factory=dict)  # {code: value}
-    direction: str = "min"        # min=值為下限(越大越嚴) | max=值為上限(越小越嚴)
 
 
 UNIT_SUFFIX = {"_mm": "mm", "_m": "m"}
@@ -81,7 +81,7 @@ def merge_strictest(selected: list[str], rules: dict | None = None) -> dict[str,
         pick = (min if meta["direction"] == "max" else max)(vals, key=vals.get)
         info = rules["codes"][pick]
         out[key] = Governing(key, meta["label"], meta["unit"], vals[pick], pick,
-                             info["clause"], info["verified"], vals, meta["direction"])
+                             info["clause"], info["verified"], meta["direction"], vals)
     return out
 
 
@@ -98,7 +98,9 @@ def recommend_width(cables: list[dict], height_mm: float, fill_max: float) -> in
     return None
 
 
-PASS, FAIL, UNVERIFIED = "符合", "不符合", "規範值未驗證"
+# 穩定的 ASCII 狀態代碼（供報告/DXF/Revit 等下游使用）；中文僅為顯示標籤，改文案不影響下游
+PASS, FAIL, UNVERIFIED, CLASH = "PASS", "FAIL", "UNVERIFIED", "CLASH"
+LABELS = {PASS: "符合", FAIL: "不符合", UNVERIFIED: "規範值未驗證", CLASH: "衝突"}
 
 
 @dataclass
@@ -109,7 +111,7 @@ class Check:
     actual: float
     required: float
     status: str            # PASS | FAIL | UNVERIFIED
-    indicative: str        # 與規範值直接比較的結果（符合/不符合），僅供參考
+    indicative: str        # 與規範值直接比較的結果（PASS/FAIL），僅供參考
     code: str              # 決定該要求的規範
     clause: str
     verified: bool
