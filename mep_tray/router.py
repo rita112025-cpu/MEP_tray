@@ -19,6 +19,9 @@ OBSTACLE_RULE = {
 }
 
 
+NICE_CELLS = [0.25, 0.2, 0.1, 0.05]
+
+
 class RoutingError(RuntimeError):
     pass
 
@@ -37,6 +40,8 @@ class Route:
     bends: list[Vec]                      # 轉彎/分支節點
     length_m: float
     hangers: list[Vec] = field(default_factory=list)
+    cell_m: float = 0.0
+    snap_error_m: float = 0.0             # 起訖點吸附到格點的最大位移
 
 
 def clearance_m(kind: str, tray_type: str, rules: dict[str, Governing]) -> float:
@@ -50,10 +55,39 @@ def clearance_m(kind: str, tray_type: str, rules: dict[str, Governing]) -> float
     return (g.value if g else 0.0) / 1000.0
 
 
+@dataclass
+class RouteResult:
+    """路徑規劃結果：ok=False 時 route=None 並帶明確 error（不丟例外、不回空 list）。"""
+    ok: bool
+    route: "Route | None" = None
+    error: str = ""
+    cell_m: float = 0.0
+
+
+def auto_cell(tray_w_m: float, rules: dict[str, Governing], max_cell: float = 0.25) -> float:
+    """格距需 ≤ 最小非零淨距與橋架寬/2，避免窄通道被誤判無路；下限 0.05m。"""
+    cands = [max_cell, tray_w_m / 2]
+    cands += [g.value / 1000 for k, g in rules.items() if k.endswith("_mm") and 0 < g.value]
+    limit = min(cands)
+    # 只取易整除常見座標(5cm 倍數)的格距，降低端點吸附誤差
+    return next((c for c in NICE_CELLS if c <= limit + 1e-9), NICE_CELLS[-1])
+
+
+def try_route_tray(*a, **kw) -> RouteResult:
+    """route_tray 的非例外包裝，給 UI/報告流程使用。"""
+    try:
+        r = route_tray(*a, **kw)
+        return RouteResult(True, r, "", r.cell_m)
+    except RoutingError as e:
+        return RouteResult(False, None, str(e))
+
+
 def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle],
                tray_w_m: float, tray_h_m: float, tray_type: str,
-               rules: dict[str, Governing], cell: float = 0.25,
+               rules: dict[str, Governing], cell: float | None = None,
                bend_penalty: float = 4.0, vertical_penalty: float = 1.3) -> Route:
+    if cell is None:
+        cell = auto_cell(tray_w_m, rules)
     half = max(tray_w_m, tray_h_m) / 2
     sc = rules.get("structure_clear_mm")
     wall = (sc.value if sc else 0.0) / 1000.0 + half
@@ -97,7 +131,7 @@ def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle]
     junctions: list[Vec] = []
 
     # 由遠到近逐一接入網路：先成形長幹線，近端分支再接入，共幹較省
-    for end in sorted(ends, key=lambda e: -dist(start, e)):
+    for end in sorted(ends, key=lambda e: (-dist(start, e), e)):
         t_cell = to_cell(end)
         if not free(t_cell):
             raise RoutingError(f"終點 {end} 落在障礙/淨距範圍或牆邊禁區內")
@@ -116,7 +150,8 @@ def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle]
             segs.append((a, b))
         bends.extend(wp[1:-1])
     length = sum(dist(a, b) for a, b in segs)
-    return Route(waypoints, segs, _uniq(bends), length)
+    snap = max(dist(p, to_pos(to_cell(p))) for p in [start, *ends])
+    return Route(waypoints, segs, _uniq(bends), length, cell_m=cell, snap_error_m=snap)
 
 
 def _astar(sources: set, goal, free, bend_penalty, vertical_penalty):
@@ -126,7 +161,7 @@ def _astar(sources: set, goal, free, bend_penalty, vertical_penalty):
     open_: list = []
     best: dict = {}
     parent: dict = {}
-    for s in sources:
+    for s in sorted(sources):
         st = (s, -1)
         best[st] = 0.0
         heapq.heappush(open_, (h(s), 0.0, s, -1))

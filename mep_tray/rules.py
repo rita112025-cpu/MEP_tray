@@ -22,9 +22,45 @@ class Governing:
     all_values: dict = field(default_factory=dict)  # {code: value}
 
 
+UNIT_SUFFIX = {"_mm": "mm", "_m": "m"}
+UNITS = {"ratio", "m", "mm", "xOD"}
+
+
+def validate_rules(rules: dict) -> dict:
+    """結構驗證：缺欄位、方向缺漏、單位不符、未知參數鍵、非數值，一律拋 ValueError。"""
+    errs: list[str] = []
+    params, codes = rules.get("params"), rules.get("codes")
+    if not isinstance(params, dict) or not isinstance(codes, dict) or not codes:
+        raise ValueError("rules 需含 params 與 codes")
+    for k, m in params.items():
+        if m.get("direction") not in ("min", "max"):
+            errs.append(f"param {k}: direction 必須為 min|max")
+        if m.get("unit") not in UNITS:
+            errs.append(f"param {k}: unit 未知 {m.get('unit')!r}")
+        for suf, u in UNIT_SUFFIX.items():
+            if k.endswith(suf) and m.get("unit") != u:
+                errs.append(f"param {k}: 單位應為 {u}（鍵名後綴）")
+        if "label" not in m:
+            errs.append(f"param {k}: 缺 label")
+    for c, info in codes.items():
+        for f in ("name", "values", "clause", "verified"):
+            if f not in info:
+                errs.append(f"code {c}: 缺欄位 {f}")
+        if not isinstance(info.get("verified"), bool):
+            errs.append(f"code {c}: verified 必須為布林")
+        for k, v in info.get("values", {}).items():
+            if k not in params:
+                errs.append(f"code {c}: 未知參數 {k}")
+            elif v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0):
+                errs.append(f"code {c}.{k}: 需為非負數或 null")
+    if errs:
+        raise ValueError("rules 驗證失敗:\n  " + "\n  ".join(errs))
+    return rules
+
+
 def load_rules(path: Path = RULES_PATH) -> dict:
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        return validate_rules(json.load(f))
 
 
 def merge_strictest(selected: list[str], rules: dict | None = None) -> dict[str, Governing]:
@@ -59,3 +95,29 @@ def recommend_width(cables: list[dict], height_mm: float, fill_max: float) -> in
         if fill_ratio(cables, w, height_mm) <= fill_max:
             return w
     return None
+
+
+PASS, FAIL, UNVERIFIED = "符合", "不符合", "規範值未驗證"
+
+
+@dataclass
+class Check:
+    key: str
+    label: str
+    unit: str
+    actual: float
+    required: float
+    status: str            # PASS | FAIL | UNVERIFIED
+    indicative: str        # 與規範值直接比較的結果（符合/不符合），僅供參考
+    code: str              # 決定該要求的規範
+    clause: str
+    verified: bool
+
+
+def evaluate(gov: Governing, actual: float, direction: str) -> Check:
+    """三態判定：規範值 verified=false 時一律回「規範值未驗證」，不得當作通過。"""
+    ok = actual >= gov.value - 1e-9 if direction == "min" else actual <= gov.value + 1e-9
+    ind = PASS if ok else FAIL
+    status = ind if gov.verified else UNVERIFIED
+    return Check(gov.key, gov.label, gov.unit, actual, gov.value, status, ind,
+                 gov.code, gov.clause, gov.verified)

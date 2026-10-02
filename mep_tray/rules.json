@@ -1,43 +1,163 @@
 {
-  "_notice": "所有數值為『設計預設值』，非逐條引用之精確條文。verified=false 表示尚未對照現行版次，正式出圖前須由技師核對並修改此檔。null 代表該規範未規定（不參與最嚴格合併）。",
+  "_notice": "所有數值為『設計預設值』，非逐條引用之精確條文。verified=false 表示尚未對照現行版次，正式出圖前須由技師核對並修改此檔。null 代表該規範未規定（不參與最嚴格合併）。 第5套規範經使用者確認為業主需求書附錄C；若要替換，改 codes 內該項即可（可用 --rules 指定自訂 rules 檔）。",
   "params": {
-    "fill_max":            {"label": "電纜填充率上限",           "unit": "ratio", "direction": "max"},
-    "span_max_m":          {"label": "吊架/支撐間距上限",         "unit": "m",     "direction": "max"},
-    "bend_radius_factor":  {"label": "電纜最小彎曲半徑倍數(×外徑)", "unit": "xOD",   "direction": "min"},
-    "fitting_radius_mm":   {"label": "橋架轉彎配件最小半徑",       "unit": "mm",    "direction": "min"},
-    "headroom_mm":         {"label": "橋架上方維護淨空",           "unit": "mm",    "direction": "min"},
-    "side_clear_mm":       {"label": "橋架側向作業淨空",           "unit": "mm",    "direction": "min"},
-    "structure_clear_mm":  {"label": "與結構/天花淨距",           "unit": "mm",    "direction": "min"},
-    "sep_power_signal_mm": {"label": "電力與訊號(SCADA)橋架間距",  "unit": "mm",    "direction": "min"},
-    "clear_water_mm":      {"label": "與水管淨距",               "unit": "mm",    "direction": "min"},
-    "clear_duct_mm":       {"label": "與風管淨距",               "unit": "mm",    "direction": "min"},
-    "clear_heat_mm":       {"label": "與熱源淨距",               "unit": "mm",    "direction": "min"}
+    "fill_max": {
+      "label": "電纜填充率上限",
+      "unit": "ratio",
+      "direction": "max"
+    },
+    "span_max_m": {
+      "label": "吊架/支撐間距上限",
+      "unit": "m",
+      "direction": "max"
+    },
+    "bend_radius_factor": {
+      "label": "電纜最小彎曲半徑倍數(×外徑)",
+      "unit": "xOD",
+      "direction": "min"
+    },
+    "fitting_radius_mm": {
+      "label": "橋架轉彎配件最小半徑",
+      "unit": "mm",
+      "direction": "min"
+    },
+    "headroom_mm": {
+      "label": "橋架上方維護淨空",
+      "unit": "mm",
+      "direction": "min"
+    },
+    "side_clear_mm": {
+      "label": "橋架側向作業淨空",
+      "unit": "mm",
+      "direction": "min"
+    },
+    "structure_clear_mm": {
+      "label": "與結構/天花淨距",
+      "unit": "mm",
+      "direction": "min"
+    },
+    "sep_power_signal_mm": {
+      "label": "電力與訊號(SCADA)橋架間距",
+      "unit": "mm",
+      "direction": "min"
+    },
+    "clear_water_mm": {
+      "label": "與水管淨距",
+      "unit": "mm",
+      "direction": "min"
+    },
+    "clear_duct_mm": {
+      "label": "與風管淨距",
+      "unit": "mm",
+      "direction": "min"
+    },
+    "clear_heat_mm": {
+      "label": "與熱源淨距",
+      "unit": "mm",
+      "direction": "min"
+    },
+    "tray_parallel_mm": {
+      "label": "兩組線架同高平行淨距",
+      "unit": "mm",
+      "direction": "min"
+    }
   },
   "codes": {
     "CNS": {
       "name": "CNS（中華民國國家標準，電纜架/電氣裝置相關）",
-      "values": {"fill_max": 0.40, "span_max_m": 2.0, "bend_radius_factor": 12, "fitting_radius_mm": 300, "headroom_mm": 300, "side_clear_mm": 150, "structure_clear_mm": 100, "sep_power_signal_mm": 300, "clear_water_mm": 300, "clear_duct_mm": 150, "clear_heat_mm": 500},
-      "clause": "CNS 電纜架相關標準（條號待核對）", "verified": false
+      "values": {
+        "fill_max": 0.4,
+        "span_max_m": 2.0,
+        "bend_radius_factor": 12,
+        "fitting_radius_mm": 300,
+        "headroom_mm": 300,
+        "side_clear_mm": 150,
+        "structure_clear_mm": 100,
+        "sep_power_signal_mm": 300,
+        "clear_water_mm": 300,
+        "clear_duct_mm": 150,
+        "clear_heat_mm": 500
+      },
+      "clause": "CNS 電纜架相關標準（條號待核對）",
+      "verified": false,
+      "source": "設計預設值，無逐條出處"
     },
     "IEC": {
       "name": "IEC（IEC 61537 電纜托架 / IEC 60364 / IEC 61918）",
-      "values": {"fill_max": 0.45, "span_max_m": 2.0, "bend_radius_factor": 12, "fitting_radius_mm": 200, "headroom_mm": 300, "side_clear_mm": 150, "structure_clear_mm": 100, "sep_power_signal_mm": 200, "clear_water_mm": null, "clear_duct_mm": null, "clear_heat_mm": 400},
-      "clause": "IEC 61537 / IEC 60364-5-52（條號待核對）", "verified": false
+      "values": {
+        "fill_max": 0.45,
+        "span_max_m": 2.0,
+        "bend_radius_factor": 12,
+        "fitting_radius_mm": 200,
+        "headroom_mm": 300,
+        "side_clear_mm": 150,
+        "structure_clear_mm": 100,
+        "sep_power_signal_mm": 200,
+        "clear_water_mm": null,
+        "clear_duct_mm": null,
+        "clear_heat_mm": 400
+      },
+      "clause": "IEC 61537 / IEC 60364-5-52（條號待核對）",
+      "verified": false,
+      "source": "設計預設值，無逐條出處"
     },
     "NEC": {
       "name": "NEC（NFPA 70 Article 392 Cable Trays）",
-      "values": {"fill_max": 0.50, "span_max_m": 3.0, "bend_radius_factor": 12, "fitting_radius_mm": 300, "headroom_mm": 300, "side_clear_mm": 300, "structure_clear_mm": 150, "sep_power_signal_mm": 300, "clear_water_mm": null, "clear_duct_mm": null, "clear_heat_mm": null},
-      "clause": "NEC 392.18 / 392.22 / 392.30 / 300.34（條號待核對）", "verified": false
+      "values": {
+        "fill_max": 0.5,
+        "span_max_m": 3.0,
+        "bend_radius_factor": 12,
+        "fitting_radius_mm": 300,
+        "headroom_mm": 300,
+        "side_clear_mm": 300,
+        "structure_clear_mm": 150,
+        "sep_power_signal_mm": 300,
+        "clear_water_mm": null,
+        "clear_duct_mm": null,
+        "clear_heat_mm": null
+      },
+      "clause": "NEC 392.18 / 392.22 / 392.30 / 300.34（條號待核對）",
+      "verified": false,
+      "source": "設計預設值，無逐條出處"
     },
     "TW_BUILDING": {
       "name": "建築技術規則（建築設備編/防火避難相關）",
-      "values": {"fill_max": null, "span_max_m": null, "bend_radius_factor": null, "fitting_radius_mm": null, "headroom_mm": null, "side_clear_mm": null, "structure_clear_mm": 100, "sep_power_signal_mm": null, "clear_water_mm": 300, "clear_duct_mm": 150, "clear_heat_mm": 500},
-      "clause": "建築技術規則 建築設備編（條號待核對）", "verified": false
+      "values": {
+        "fill_max": null,
+        "span_max_m": null,
+        "bend_radius_factor": null,
+        "fitting_radius_mm": null,
+        "headroom_mm": null,
+        "side_clear_mm": null,
+        "structure_clear_mm": 100,
+        "sep_power_signal_mm": null,
+        "clear_water_mm": 300,
+        "clear_duct_mm": 150,
+        "clear_heat_mm": 500
+      },
+      "clause": "建築技術規則 建築設備編（條號待核對）",
+      "verified": false,
+      "source": "設計預設值，無逐條出處"
     },
-    "TW_WIRING": {
-      "name": "屋內線路裝置規則（暫定第5套，見 MANUAL）",
-      "values": {"fill_max": 0.40, "span_max_m": 2.0, "bend_radius_factor": 10, "fitting_radius_mm": 250, "headroom_mm": 250, "side_clear_mm": 150, "structure_clear_mm": 100, "sep_power_signal_mm": 300, "clear_water_mm": 150, "clear_duct_mm": null, "clear_heat_mm": 300},
-      "clause": "屋內線路裝置規則 電纜架章節（條號待核對）", "verified": false
+    "MRT_APPX_C": {
+      "name": "業主需求書(四)附錄C 管線佈設及共同管架施作原則（汐東捷運）",
+      "values": {
+        "fill_max": null,
+        "span_max_m": null,
+        "bend_radius_factor": null,
+        "fitting_radius_mm": 300,
+        "headroom_mm": 300,
+        "side_clear_mm": 250,
+        "structure_clear_mm": 100,
+        "sep_power_signal_mm": 300,
+        "clear_water_mm": 400,
+        "clear_duct_mm": 150,
+        "clear_heat_mm": 500,
+        "tray_parallel_mm": 600
+      },
+      "clause": "附錄C §三/§四 C-6~C-8、附件A（水管水平400/交叉300 取較嚴400；上方淨空困難值150未採用）",
+      "source": "依 er4-appendix-c-utility-routing 技能之 PDF 文字抽取；附件A矩陣個別格值抽取錯位，須回查原檔",
+      "verified": false
     }
   }
 }
