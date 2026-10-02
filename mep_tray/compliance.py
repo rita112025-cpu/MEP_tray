@@ -62,12 +62,18 @@ def check_compliance(inp: Inputs, route: Route, gov: dict[str, Governing]) -> Re
     cab = gov["bend_radius_factor"].value * od if "bend_radius_factor" in gov else 0.0
     radius = max(fit, cab)
     rep.design["fitting_radius_mm_used"] = radius
-    if radius and "fitting_radius_mm" in gov:
-        need = Governing(**{**gov["fitting_radius_mm"].__dict__, "value": radius})
+    if radius and ("fitting_radius_mm" in gov or "bend_radius_factor" in gov):
+        # 規範依據歸屬：電纜彎曲半徑較大者主導時，引用 bend_radius_factor 的來源，而非配件半徑
+        by_cable = cab > fit
+        src = gov["bend_radius_factor"] if by_cable else gov["fitting_radius_mm"]
+        need = Governing(**{**src.__dict__, "value": radius, "unit": "mm", "direction": "min"})
+        basis = (f"電纜最小彎曲半徑（{gov['bend_radius_factor'].value:g}×外徑 {od:g} mm）" if by_cable
+                 else "橋架轉彎配件最小半徑")
+        rep.design["bend_radius_basis"] = basis
         for p, leg_m in check_bend_legs(route, radius / 1000):
             chk = evaluate(need, leg_m * 1000)
-            rep.push(from_check("bend", "轉彎/分支", p, chk,
-                                f"轉彎處邊長 {leg_m * 1000:.0f} mm 小於配件半徑 {radius:.0f} mm；"
+            rep.push(from_check("bend", f"轉彎/分支（{basis}）", p, chk,
+                                f"轉彎處邊長 {leg_m * 1000:.0f} mm 小於{basis} {radius:.0f} mm；"
                                 f"延長相鄰直段或減少轉彎"))
     rep.findings.sort(key=lambda f: (f.kind, f.subject, f.location))
     return rep

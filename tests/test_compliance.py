@@ -57,3 +57,18 @@ def test_default_cables_disclosed():
 def test_bend_leg_finding_and_radius_used():
     rep = check_compliance(inp(), manual((1, 1, 3), (1.2, 1, 3), (1.2, 5, 3)), GOV)
     assert kinds(rep, "bend") and rep.design["fitting_radius_mm_used"] >= 300
+
+
+def test_bend_basis_follows_whichever_radius_governs():
+    import dataclasses
+    gov = dict(GOV, bend_radius_factor=dataclasses.replace(
+        GOV["bend_radius_factor"], code="NEC", clause="NEC-bend-clause", verified=True))
+    route = manual((1, 1, 3), (1.2, 1, 3), (1.2, 5, 3))
+    big = check_compliance(inp(cables=[{"od_mm": 60, "count": 3, "kind": "power"}]), route, gov)
+    f = kinds(big, "bend")[0]
+    assert f.required == 720 and f.code == "NEC" and f.clause == "NEC-bend-clause"
+    assert "電纜最小彎曲半徑" in f.subject and f.unit == "mm" and f.status == FAIL   # verified=True
+    small = check_compliance(inp(cables=[{"od_mm": 20, "count": 3, "kind": "power"}]), route, gov)
+    g = kinds(small, "bend")[0]
+    assert g.required == 300 and g.clause == GOV["fitting_radius_mm"].clause
+    assert "配件" in g.subject and g.status == UNVERIFIED

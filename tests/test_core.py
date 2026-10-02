@@ -163,8 +163,8 @@ def test_route_deterministic_and_minimal_bends():
 
 def test_try_route_returns_explicit_error():
     full = Obstacle("slab", "structure", Box((5, -1, -1), (5.3, 7, 5)))
-    res = try_route_tray(ROOM, (1, 1, 3), [(10, 1, 3)], [full], 0.3, 0.1, "power", _rules())
-    assert res.ok is False and res.route is None and "路徑" in res.error
+    res = try_route_tray(ROOM, (1, 1, 3), [(10, 1, 3)], [full], 0.3, 0.1, "power", _rules(), cell=0.25)
+    assert res.ok is False and res.route is None and "找不到" in res.error
     ok = try_route_tray(ROOM, (1, 1, 3), [(10, 1, 3)], [], 0.3, 0.1, "power", _rules())
     assert ok.ok and ok.route.cell_m > 0
 
@@ -260,3 +260,12 @@ def test_governing_direction_is_required():
         Governing("k", "l", "mm", 1.0, "CNS", "c", True)           # 缺 direction
     g = Governing("k", "l", "mm", 1.0, "CNS", "c", True, "min")
     assert g.direction == "min" and g.all_values == {}
+
+
+def test_grid_size_guard_is_checked_before_search():
+    huge = Box((0, 0, 0), (100, 100, 10))
+    res = try_route_tray(huge, (1, 1, 3), [(90, 90, 3)], [], 0.3, 0.1, "power", _rules(), cell=0.05)
+    assert res.ok is False and "格點總數" in res.error
+    res2 = try_route_tray(ROOM, (1, 1, 3), [(10, 1, 3)], [], 0.3, 0.1, "power", _rules(),
+                          cell=0.25, max_cells=10)
+    assert res2.ok is False and "格點總數" in res2.error

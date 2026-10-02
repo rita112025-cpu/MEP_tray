@@ -49,6 +49,7 @@ def check_route(inp: Inputs, route: Route, gov: dict[str, Governing]) -> Report:
     w, h = inp.tray_w_mm / 1000, inp.tray_h_mm / 1000
     boxes = [(a, b, segment_box(a, b, w, h)) for a, b in route.segments]
     if not boxes:
+        rep.design["note_empty_route"] = "路徑無任何線段（起點等於終點？），未做障礙物/房間檢查"
         return rep
 
     # 1) 障礙物：衝突 / 淨距（每個障礙物取最小間距的一段，避免重複）

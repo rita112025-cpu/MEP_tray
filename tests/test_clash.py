@@ -167,3 +167,13 @@ def test_to_dict_stable_codes_schema_json_and_determinism():
         assert f["status"] in LABELS and f["indicative"] in LABELS
         assert f["status_label"] == LABELS[f["status"]] and f["kind"].isascii()
         assert all(isinstance(v, float) for v in f["location"])
+
+
+def test_empty_route_start_equals_end_does_not_raise_and_is_disclosed():
+    i = Inputs(start=(1, 1, 3), ends=[(1, 1, 3)], obstacles=[ob("w", "water", [5, 0, 0], [5.3, 4, 3.2])])
+    r = route_tray(i.room_box(), i.start, i.ends, i.obstacle_objs(), 0.3, 0.1, "power", GOV, cell=0.25)
+    assert r.segments == []
+    rep = check_route(i, r, GOV)
+    assert rep.findings == [] and "note_empty_route" in rep.design
+    from mep_tray.compliance import check_compliance
+    check_compliance(i, r, GOV)          # 亦不得拋例外

@@ -99,7 +99,7 @@ def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle]
                tray_w_m: float, tray_h_m: float, tray_type: str,
                rules: dict[str, Governing], cell: float | None = None,
                bend_penalty: float = 4.0, vertical_penalty: float = 1.3,
-               max_expansions: int = 2_000_000) -> Route:
+               max_expansions: int = 300_000, max_cells: int = 3_000_000) -> Route:
     origin = room.lo
     if cell is None:
         cell = auto_cell(tray_w_m, rules, [start, *ends], origin)
@@ -112,6 +112,9 @@ def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle]
     wall = (sc.value if sc else 0.0) / 1000.0 + half
     top = max(sc.value if sc else 0.0, hr.value if hr else 0.0) / 1000.0 + half   # 天花：結構淨距與上方維護淨空取大
     n = tuple(int(math.floor((room.hi[i] - room.lo[i]) / cell)) + 1 for i in range(3))
+    total = n[0] * n[1] * n[2]
+    if total > max_cells:    # 確定性防護：建格前即報錯，不必跑 A*
+        raise RoutingError(f"格點總數 {total:,} 超過上限 {max_cells:,}，請放大格距或縮小場景")
 
     def to_cell(p: Vec):
         return tuple(int(round((p[i] - origin[i]) / cell)) for i in range(3))
