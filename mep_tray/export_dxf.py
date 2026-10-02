@@ -86,15 +86,25 @@ def _setup(doc, kinds) -> None:
         blk.add_attdef(tag, (0, -150 * (i + 1)), dxfattribs={"height": 80, "invisible": 1, "layer": "MEP-NOTE"})
 
 
-def _mtext(msp, text: str, at, layer: str, h: float = 120.0, width: float = 3000.0) -> None:
-    msp.add_mtext(text, dxfattribs={"layer": layer, "style": "MEP", "char_height": h,
-                                    "insert": at, "width": width})
+def _esc(text: str) -> str:
+    """跳脫 MTEXT 控制碼（反斜線、大括號），使用者輸入/規範文字不會被當成格式碼。"""
+    return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
 
 
-def disclosure_notes(inp: Inputs, gov: dict, extra: list[str] = ()) -> list[str]:
+def _mtext(msp, lines, at, layer: str, h: float = 120.0, width: float = 3000.0) -> None:
+    """lines: 字串或字串清單（每項跳脫後以 MTEXT 換行碼 反斜線+P 串接）。"""
+    lines = [lines] if isinstance(lines, str) else list(lines)
+    msp.add_mtext("\\P".join(_esc(x) for x in lines), dxfattribs={
+        "layer": layer, "style": "MEP", "char_height": h, "insert": at, "width": width})
+
+
+def disclosure_notes(inp: Inputs, gov: dict, reports=(), extra: list[str] = ()) -> list[str]:
     """圖面揭露文字：座標約定、規範值未驗證清單、預設電纜、未實機驗證。"""
     notes = ["座標 = 公尺×1000 (mm)，原點 = 輸入座標系原點（不平移）"]
     bad = sorted({g.code for g in gov.values() if not g.verified})
+    n_unv = sum(1 for rep in reports for f in rep.checks if f.status == "UNVERIFIED")
+    if n_unv:     # 自 checks（不只 findings）統計：零 finding 的「乾淨」圖也必須揭露
+        notes.append(f"本圖有 {n_unv} 項檢查所依規範值尚未核對條文（verified=false），不得視為合規")
     if bad:
         notes.append("規範值未驗證 (verified=false)：" + ", ".join(bad) + "；結果不得視為合規依據")
     if inp.cables_defaulted:
@@ -112,7 +122,7 @@ def export_dxf(inp: Inputs, route: Route, reports: list, gov: dict, run_id: str,
     path = out_path(run_id, name or f"tray_{run_id}.dxf")
     if path.exists() and not overwrite:
         raise FileExistsError(f"輸出檔已存在，拒絕覆寫: {path.name}")
-    notes = disclosure_notes(inp, gov, notes)
+    notes = disclosure_notes(inp, gov, reports, notes)
     doc = ezdxf.new("R2010", setup=False)
     _setup(doc, None)
     msp = doc.modelspace()
@@ -149,9 +159,9 @@ def export_dxf(inp: Inputs, route: Route, reports: list, gov: dict, run_id: str,
                      f"實際 {f.actual:.0f} / 要求 {f.required:.0f} {f.unit}",
                      f"依據: {f.code or '—'} {f.clause}" + ("" if f.verified else "（規範值未驗證）"),
                      f"建議: {f.suggestion}"]
-            _mtext(msp, "\\P".join(lines), (loc[0] + CLASH_R_MM, loc[1] + CLASH_R_MM, loc[2]), "MEP-CLASH")
+            _mtext(msp, lines, (loc[0] + CLASH_R_MM, loc[1] + CLASH_R_MM, loc[2]), "MEP-CLASH")
     lo = _pt(inp.room_box().lo)
-    _mtext(msp, "\\P".join([f"RUN {run_id}", *notes]), (lo[0], lo[1] - 600, lo[2]), "MEP-NOTE", h=150, width=8000)
+    _mtext(msp, [f"RUN {run_id}", *notes], (lo[0], lo[1] - 600, lo[2]), "MEP-NOTE", h=150, width=8000)
 
     doc.saveas(path)
     dwg, note = (None, "未要求 DWG")

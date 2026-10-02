@@ -263,7 +263,18 @@ def test_oda_timeout_degrades_with_reason(tmp_path):
     assert dwg is None and "失敗" in note
 
 
-def test_ezdxf_import_falls_back_only_after_failure(monkeypatch):
+@pytest.fixture
+def keep_ezdxf_modules():
+    """降級路徑會清 sys.modules 的 ezdxf*；測試後必須還原，否則後續匯入會得到第二份 ezdxf（類別身分錯亂）。"""
+    import sys
+    saved = {k: v for k, v in sys.modules.items() if k == "ezdxf" or k.startswith("ezdxf.")}
+    yield
+    for k in [k for k in sys.modules if k == "ezdxf" or k.startswith("ezdxf.")]:
+        del sys.modules[k]
+    sys.modules.update(saved)
+
+
+def test_ezdxf_import_falls_back_only_after_failure(monkeypatch, keep_ezdxf_modules):
     calls = []
 
     class Fake:
@@ -283,3 +294,43 @@ def test_ezdxf_import_falls_back_only_after_failure(monkeypatch):
     assert X.load_ezdxf(lambda n: Fake) is Fake and os.environ.get("EZDXF_DISABLE_C_EXT") is None
     with pytest.raises(ImportError, match="INSTALL.md"):
         X.load_ezdxf(lambda n: (_ for _ in ()).throw(ImportError("boom")))
+
+
+def _clean_scene():
+    i = Inputs(start=(1, 1, 3), ends=[(10, 1, 3)])
+    r = route_tray(i.room_box(), i.start, i.ends, [], 0.3, 0.1, "power", GOV, cell=0.25)
+    place_hangers(r, GOV["span_max_m"].value)
+    return i, r
+
+
+def _note_text(res):
+    doc = ezdxf.readfile(res.dxf)
+    return "\n".join(m.text for m in ents(doc, "MTEXT") if m.dxf.layer == "MEP-NOTE")
+
+
+def test_clean_drawing_with_zero_findings_still_discloses_unverified_count():
+    import dataclasses
+    i, r = _clean_scene()
+    reps = [check_route(i, r, GOV), check_compliance(i, r, GOV)]
+    assert not [f for rep in reps for f in rep.findings]                    # 看似乾淨
+    n = sum(1 for rep in reps for f in rep.checks if f.status == "UNVERIFIED")
+    assert n >= 3
+    res = X.export_dxf(i, r, reps, GOV, "clean1", convert_dwg=False)
+    text = _note_text(res)
+    assert f"本圖有 {n} 項檢查所依規範值尚未核對條文" in text and "不得視為合規" in text
+    ver = {k: dataclasses.replace(g, verified=True) for k, g in GOV.items()}
+    reps2 = [check_route(i, r, ver), check_compliance(i, r, ver)]
+    text2 = _note_text(X.export_dxf(i, r, reps2, ver, "clean2", convert_dwg=False))
+    assert "尚未核對條文" not in text2 and "未於 AutoCAD 實機驗證" in text2
+
+
+def test_mtext_control_codes_in_user_text_are_escaped():
+    BS = chr(92)
+    name = "{" + BS + "C1;}x" + BS + "Ptail"
+    i, r = _clean_scene()
+    i.obstacles.append({"name": name, "kind": "other", "lo": [5, 3, 0], "hi": [5.2, 3.2, 1]})
+    res = X.export_dxf(i, r, [], GOV, "esc2", convert_dwg=False)
+    doc = ezdxf.readfile(res.dxf)
+    m = [e for e in ents(doc, "MTEXT") if e.dxf.layer == "MEP-OBST-other"][0]
+    assert BS + "{" in m.text and BS + "}" in m.text and (BS * 2 + "C1;") in m.text   # 已跳脫
+    assert m.plain_text() == name                                                      # 還原為字面字串
