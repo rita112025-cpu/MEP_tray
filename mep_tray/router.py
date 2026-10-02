@@ -94,7 +94,8 @@ def try_route_tray(*a, **kw) -> RouteResult:
 def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle],
                tray_w_m: float, tray_h_m: float, tray_type: str,
                rules: dict[str, Governing], cell: float | None = None,
-               bend_penalty: float = 4.0, vertical_penalty: float = 1.3) -> Route:
+               bend_penalty: float = 4.0, vertical_penalty: float = 1.3,
+               max_expansions: int = 2_000_000) -> Route:
     origin = room.lo
     if cell is None:
         cell = auto_cell(tray_w_m, rules, [start, *ends], origin)
@@ -171,7 +172,8 @@ def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle]
         t_cell = to_cell(end)
         if not free(t_cell):
             raise RoutingError(f"終點 {end} 落在障礙/淨距範圍或牆邊禁區內")
-        path = _astar(network, t_cell, free, edge_free, bend_penalty, vertical_penalty)
+        path = _astar(network, t_cell, free, edge_free, bend_penalty, vertical_penalty,
+                      max_expansions)
         if path is None:
             raise RoutingError(f"找不到通往終點 {end} 的可行路徑（淨距/障礙過嚴？）")
         if path[0] != s_cell and len(network) > 1:
@@ -189,7 +191,7 @@ def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle]
     return Route(waypoints, segs, _uniq(bends), length, cell_m=cell, junctions=junctions)
 
 
-def _astar(sources: set, goal, free, edge_free, bend_penalty, vertical_penalty):
+def _astar(sources: set, goal, free, edge_free, bend_penalty, vertical_penalty, max_expansions):
     def h(c):
         return abs(c[0] - goal[0]) + abs(c[1] - goal[1]) + abs(c[2] - goal[2])
 
@@ -200,10 +202,14 @@ def _astar(sources: set, goal, free, edge_free, bend_penalty, vertical_penalty):
         st = (s, -1)
         best[st] = 0.0
         heapq.heappush(open_, (h(s), 0.0, s, -1))
+    expanded = 0
     while open_:
         _, g, c, d = heapq.heappop(open_)
         if g > best.get((c, d), 1e18):
             continue
+        expanded += 1
+        if expanded > max_expansions:
+            raise RoutingError("超過搜尋上限，請放大格距或縮小場景")
         if c == goal:
             out = [c]
             st = (c, d)
@@ -293,4 +299,10 @@ def check_bend_legs(route: Route, radius_m: float) -> list[tuple[Vec, float]]:
 
 
 def _on_segment(p: Vec, a: Vec, b: Vec) -> bool:
-    return all(min(a[i], b[i]) - 1e-9 <= p[i] <= max(a[i], b[i]) + 1e-9 for i in range(3)) and         sum(1 for i in range(3) if abs(a[i] - b[i]) > 1e-9) == 1 and         sum(1 for i in range(3) if abs(p[i] - a[i]) > 1e-9 and abs(a[i] - b[i]) <= 1e-9) == 0
+    """p 是否落在軸向線段 a-b 上。"""
+    axes = [i for i in range(3) if abs(a[i] - b[i]) > 1e-9]
+    if len(axes) != 1:
+        return False
+    ax = axes[0]
+    on_line = all(abs(p[i] - a[i]) <= 1e-9 for i in range(3) if i != ax)
+    return on_line and min(a[ax], b[ax]) - 1e-9 <= p[ax] <= max(a[ax], b[ax]) + 1e-9

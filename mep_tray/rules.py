@@ -20,6 +20,7 @@ class Governing:
     clause: str
     verified: bool
     all_values: dict = field(default_factory=dict)  # {code: value}
+    direction: str = "min"        # min=值為下限(越大越嚴) | max=值為上限(越小越嚴)
 
 
 UNIT_SUFFIX = {"_mm": "mm", "_m": "m"}
@@ -80,7 +81,7 @@ def merge_strictest(selected: list[str], rules: dict | None = None) -> dict[str,
         pick = (min if meta["direction"] == "max" else max)(vals, key=vals.get)
         info = rules["codes"][pick]
         out[key] = Governing(key, meta["label"], meta["unit"], vals[pick], pick,
-                             info["clause"], info["verified"], vals)
+                             info["clause"], info["verified"], vals, meta["direction"])
     return out
 
 
@@ -114,9 +115,9 @@ class Check:
     verified: bool
 
 
-def evaluate(gov: Governing, actual: float, direction: str) -> Check:
+def evaluate(gov: Governing, actual: float) -> Check:
     """三態判定：規範值 verified=false 時一律回「規範值未驗證」，不得當作通過。"""
-    ok = actual >= gov.value - 1e-9 if direction == "min" else actual <= gov.value + 1e-9
+    ok = actual >= gov.value - 1e-9 if gov.direction == "min" else actual <= gov.value + 1e-9
     ind = PASS if ok else FAIL
     status = ind if gov.verified else UNVERIFIED
     return Check(gov.key, gov.label, gov.unit, actual, gov.value, status, ind,

@@ -45,13 +45,13 @@ def _rules():
 
 
 def test_route_straight_when_free():
-    r = route_tray(ROOM, (1, 1, 3), [(10, 1, 3)], [], 0.3, 0.1, "power", _rules())
+    r = route_tray(ROOM, (1, 1, 3), [(10, 1, 3)], [], 0.3, 0.1, "power", _rules(), cell=0.25)
     assert len(r.waypoints[0]) == 2 and r.length_m == pytest.approx(9)
 
 
 def test_route_avoids_obstacle_with_clearance():
     wall = Obstacle("water", "water", Box((5, 0, 0), (5.3, 4, 3.2)))
-    r = route_tray(ROOM, (1, 1, 3), [(10, 1, 3)], [wall], 0.3, 0.1, "power", _rules())
+    r = route_tray(ROOM, (1, 1, 3), [(10, 1, 3)], [wall], 0.3, 0.1, "power", _rules(), cell=0.25)
     req = _rules()["clear_water_mm"].value / 1000
     for a, b in r.segments:
         assert segment_box(a, b, 0.3, 0.1).gap(wall.box) >= req - 1e-6
@@ -61,7 +61,7 @@ def test_route_avoids_obstacle_with_clearance():
 def test_route_blocked_raises():
     full = Obstacle("slab", "structure", Box((5, -1, -1), (5.3, 7, 5)))
     with pytest.raises(RoutingError):
-        route_tray(ROOM, (1, 1, 3), [(10, 1, 3)], [full], 0.3, 0.1, "power", _rules())
+        route_tray(ROOM, (1, 1, 3), [(10, 1, 3)], [full], 0.3, 0.1, "power", _rules(), cell=0.25)
 
 
 def _hangers_on(hs, a, b):
@@ -73,13 +73,13 @@ def _hangers_on(hs, a, b):
 
 
 def test_branches_share_trunk():
-    r = route_tray(ROOM, (1, 1, 3), [(10, 1, 3), (6, 5, 3)], [], 0.3, 0.1, "power", _rules())
+    r = route_tray(ROOM, (1, 1, 3), [(10, 1, 3), (6, 5, 3)], [], 0.3, 0.1, "power", _rules(), cell=0.25)
     assert len(r.waypoints) == 2
     assert r.length_m == pytest.approx(13.0)
 
 
 def test_hangers_span_and_near_ends():
-    r = route_tray(ROOM, (1, 1, 3), [(10, 1, 3), (6, 5, 3)], [], 0.3, 0.1, "power", _rules())
+    r = route_tray(ROOM, (1, 1, 3), [(10, 1, 3), (6, 5, 3)], [], 0.3, 0.1, "power", _rules(), cell=0.25)
     hs = place_hangers(r, 2.0, near_bend_m=0.3)
     for a, b in r.segments:
         on, axis = _hangers_on(hs, a, b)
@@ -146,22 +146,18 @@ def test_rules_validation_rejects_bad_files():
 
 def test_unverified_never_reported_as_pass():
     g = merge_strictest(ALL)
-    chk = evaluate(g["span_max_m"], 1.0, "max")
+    chk = evaluate(g["span_max_m"], 1.0)
     assert chk.status == UNVERIFIED and chk.indicative == PASS
-    assert evaluate(g["span_max_m"], 9.0, "max").indicative == FAIL
-    v = copy.replace(g["span_max_m"], verified=True) if hasattr(copy, "replace") else None
-    if v:
-        assert evaluate(v, 1.0, "max").status == PASS
-        assert evaluate(v, 9.0, "max").status == FAIL
+    assert evaluate(g["span_max_m"], 9.0).indicative == FAIL
 
 
 def test_route_deterministic_and_minimal_bends():
     obs = [Obstacle("w", "water", Box((5, 0, 0), (5.3, 4, 3.2))),
            Obstacle("d", "duct", Box((8, 2, 0), (8.5, 6, 3.2)))]
-    runs = [route_tray(ROOM, (1, 1, 3), [(10, 1, 3), (6, 5, 3)], obs, 0.3, 0.1, "power", _rules())
+    runs = [route_tray(ROOM, (1, 1, 3), [(10, 1, 3), (6, 5, 3)], obs, 0.3, 0.1, "power", _rules(), cell=0.25)
             for _ in range(3)]
     assert runs[0].waypoints == runs[1].waypoints == runs[2].waypoints
-    straight = route_tray(ROOM, (1, 1, 3), [(10, 1, 3)], [], 0.3, 0.1, "power", _rules())
+    straight = route_tray(ROOM, (1, 1, 3), [(10, 1, 3)], [], 0.3, 0.1, "power", _rules(), cell=0.25)
     assert straight.bends == []
 
 
@@ -235,3 +231,24 @@ def test_bend_check_covers_junction_legs():
     assert not check_bend_legs(r, 0.3)
     near = route_tray(ROOM, (1, 1, 3), [(10, 1, 3), (1.1, 5, 3)], [], 0.3, 0.1, "power", _rules())
     assert any(abs(p[0] - 1.1) < 1e-6 for p, _ in check_bend_legs(near, 0.5))
+
+
+def test_evaluate_reads_direction_from_governing():
+    import dataclasses
+    g = merge_strictest(ALL)
+    assert g["span_max_m"].direction == "max" and g["headroom_mm"].direction == "min"
+    for verified in (True, False):
+        mx = dataclasses.replace(g["span_max_m"], verified=verified)   # 上限 2.0m
+        mn = dataclasses.replace(g["headroom_mm"], verified=verified)  # 下限 300mm
+        ok_mx, bad_mx = evaluate(mx, 1.5), evaluate(mx, 2.5)
+        ok_mn, bad_mn = evaluate(mn, 350), evaluate(mn, 250)
+        assert (ok_mx.indicative, bad_mx.indicative) == (PASS, FAIL)
+        assert (ok_mn.indicative, bad_mn.indicative) == (PASS, FAIL)
+        want = (PASS, FAIL) if verified else (UNVERIFIED, UNVERIFIED)
+        assert (ok_mx.status, bad_mx.status) == want and (ok_mn.status, bad_mn.status) == want
+
+
+def test_search_limit_returns_explicit_error():
+    res = try_route_tray(ROOM, (1, 1, 3), [(10, 5, 1)], [], 0.3, 0.1, "power", _rules(),
+                         cell=0.25, max_expansions=5)
+    assert res.ok is False and "超過搜尋上限" in res.error
