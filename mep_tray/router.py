@@ -44,14 +44,18 @@ class Route:
     junctions: list = field(default_factory=list)   # [(點, 分支索引)]
 
 
-def clearance_m(kind: str, tray_type: str, rules: dict[str, Governing]) -> float:
-    """障礙物類型對應之規範淨距（公尺）；規範未規定則採側向作業淨空或 0。"""
+def rule_key(kind: str, tray_type: str, rules: dict[str, Governing]) -> str:
+    """障礙物類型 → 適用的規則鍵。同類橋架優先用 tray_parallel_mm（若有規範給值），否則側向淨空。"""
     if kind in ("tray_power", "tray_signal"):
-        other = kind.split("_")[1]
-        key = "sep_power_signal_mm" if other != tray_type else "side_clear_mm"
-    else:
-        key = OBSTACLE_RULE.get(kind, "side_clear_mm")
-    g = rules.get(key)
+        if kind.split("_")[1] != tray_type:
+            return "sep_power_signal_mm"
+        return "tray_parallel_mm" if "tray_parallel_mm" in rules else "side_clear_mm"
+    return OBSTACLE_RULE.get(kind, "side_clear_mm")
+
+
+def clearance_m(kind: str, tray_type: str, rules: dict[str, Governing]) -> float:
+    """障礙物對應之規範淨距（公尺）；規範未規定則為 0。"""
+    g = rules.get(rule_key(kind, tray_type, rules))
     return (g.value if g else 0.0) / 1000.0
 
 
@@ -104,7 +108,9 @@ def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle]
             f"起訖座標未對齊格距 {cell} m（相對房間原點需為其整數倍）；請調整座標或指定可整除的格距")
     half = max(tray_w_m, tray_h_m) / 2
     sc = rules.get("structure_clear_mm")
+    hr = rules.get("headroom_mm")
     wall = (sc.value if sc else 0.0) / 1000.0 + half
+    top = max(sc.value if sc else 0.0, hr.value if hr else 0.0) / 1000.0 + half   # 天花：結構淨距與上方維護淨空取大
     n = tuple(int(math.floor((room.hi[i] - room.lo[i]) / cell)) + 1 for i in range(3))
 
     def to_cell(p: Vec):
@@ -116,7 +122,8 @@ def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle]
     # 可行範圍（中心線需離牆/結構一定距離）
     def in_bounds(c) -> bool:
         p = to_pos(c)
-        return all(room.lo[i] + wall - 1e-9 <= p[i] <= room.hi[i] - wall + 1e-9 for i in range(3))
+        hi = (room.hi[0] - wall, room.hi[1] - wall, room.hi[2] - top)
+        return all(room.lo[i] + wall - 1e-9 <= p[i] <= hi[i] + 1e-9 for i in range(3))
 
     blocked: set = set()
     blocked_edges: set = set()

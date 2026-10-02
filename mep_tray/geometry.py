@@ -47,3 +47,20 @@ def segment_box(p: Vec, q: Vec, width_m: float, height_m: float) -> Box:
 
 def dist(a: Vec, b: Vec) -> float:
     return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
+def nearest_points(a: Box, b: Box) -> tuple[Vec, Vec]:
+    """兩盒間最近的一對點（相交時為重疊區中心，兩點相同）。"""
+    pa, pb = [], []
+    for i in range(3):
+        lo, hi = max(a.lo[i], b.lo[i]), min(a.hi[i], b.hi[i])
+        if lo <= hi:
+            pa.append((lo + hi) / 2)
+            pb.append((lo + hi) / 2)
+        elif a.hi[i] < b.lo[i]:
+            pa.append(a.hi[i])
+            pb.append(b.lo[i])
+        else:
+            pa.append(a.lo[i])
+            pb.append(b.hi[i])
+    return tuple(pa), tuple(pb)
