@@ -1,4 +1,4 @@
-"""版本管理：manifest、完整性驗證、列出版本、三層差異比對。
+"""版本管理：manifest、完整性檢查、列出版本、三層差異比對。
 
 一個「版本」就是 output/<run_id>/ 資料夾；其中的 manifest.json 由管線在暫存資料夾內最後寫入、
 隨整個資料夾 rename 發佈，所以「有 manifest 的資料夾」必定是完整版本。本模組沒有任何修改/刪除既有版本的函式。
@@ -10,6 +10,12 @@
 - result_sha256  = result 區段。明確排除：run_id、所有路徑、environment、created_at、disclosures、
                    DXF/DWG/JSON 檔案位元組（有 AutoCAD 時 DXF 多一行稽核結果，DWG 帶 AutoCAD 自身時間戳）。
 manifest 內所有字串先經 sanitize.scrub（脫敏）再計算雜湊，確保載入時重算一致。
+
+【完整性檢查 ≠ 防竄改】manifest 與雜湊可被同時重算，所以這只能偵測「損壞/誤改」，不防刻意竄改，
+不是簽章，也不應被當成稽核證據。manifest 內的 run_id 與檔名一律視為不可信輸入（見 load_version）。
+
+result 區段進雜湊的 finding 欄位精確定義為 (kind, subject, code) 為鍵，值為 (actual, required, status)
+（固定位數）；不含 suggestion、location、clause、disclosures。subject 不得內嵌座標或序號等不穩定文字。
 """
 from __future__ import annotations
 
@@ -22,16 +28,20 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from functools import lru_cache
+
 from . import RESULT_ALGO, __version__
-from .paths import RUN_ID_RE, output_root, run_dir
+from .paths import ALLOWED_EXT, NAME_RE, RUN_ID_RE, output_root, run_dir
 from .sanitize import scrub
 
 SCHEMA_VERSION = 1
 MANIFEST_NAME = "manifest.json"
 MAX_MANIFEST_BYTES = 5_000_000
 FILE_KEYS = ("dxf", "dwg", "revit_json")
-DETERMINISM = {"revit_json": "always", "dxf": "no-cad-environment-only", "dwg": "never"}
-SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+# 語意：「相同輸入 + 相同 run_id」下檔案位元組是否相同（檔案內嵌 run_id，不同 run_id 本來就不同）。
+DETERMINISM = {"revit_json": "same-run-id", "dxf": "same-run-id-no-cad", "dwg": "never"}
+# 影響「結果」的模組原始碼；其雜湊進 engine.code_sha256，讓引擎變動不必靠人記得遞增 RESULT_ALGO。
+ENGINE_MODULES = ("router.py", "clash.py", "compliance.py", "rules.py", "geometry.py", "export_revit.py")
 REQUIRED = ("schema_version", "run_id", "created_at", "engine", "inputs", "codes", "options",
             "rules", "result", "hashes", "files")
 
@@ -59,6 +69,21 @@ def canonical_json(o) -> str:
 
 def hash_obj(o) -> str:
     return hashlib.sha256(canonical_json(o).encode("utf-8")).hexdigest()
+
+
+def _code_hash(base: Path, modules) -> str:
+    """模組原始碼雜湊（換行正規化為 LF，避免 git autocrlf 造成跨機器的假差異；檔名也進雜湊）。"""
+    h = hashlib.sha256()
+    for name in sorted(modules):
+        data = (Path(base) / name).read_bytes().replace(b"\r\n", b"\n")
+        h.update(name.encode("utf-8") + b"\0" + hashlib.sha256(data).digest())
+    return h.hexdigest()
+
+
+@lru_cache(maxsize=1)
+def code_sha256() -> str:
+    """影響結果的模組原始碼的雜湊，進 manifest 的 engine.code_sha256。"""
+    return _code_hash(Path(__file__).resolve().parent, ENGINE_MODULES)
 
 
 def file_sha256(path: Path) -> str:
@@ -145,7 +170,7 @@ def build_manifest(*, run_id: str, created_at: str, inp, codes, type_name=None, 
                           "determinism": DETERMINISM[key]}
     return {
         "schema_version": SCHEMA_VERSION, "run_id": run_id, "created_at": created_at,
-        "engine": {"version": __version__, "result_algo": RESULT_ALGO},
+        "engine": {"version": __version__, "result_algo": RESULT_ALGO, "code_sha256": code_sha256()},
         **material,
         "rules": {"sha256": hash_obj(rules), "snapshot": snapshot},
         "result": result,
@@ -197,6 +222,12 @@ def _is_real_dir(p: Path) -> bool:
     return p.is_dir() and not p.is_symlink() and not os.path.isjunction(p)
 
 
+def _safe_file_name(name) -> bool:
+    """manifest 內的檔名是不可信輸入：必須是單純檔名（不含目錄成分）、字元白名單、副檔名白名單。"""
+    return (isinstance(name, str) and bool(NAME_RE.match(name)) and not name.startswith(".") and ".." not in name
+            and Path(name).suffix.lower() in ALLOWED_EXT and Path(name).name == name)
+
+
 def load_version(run_id: str, *, verify_files: bool = True) -> LoadResult:
     """載入並驗證版本。任何問題都回結構化錯誤（不拋、不當作空）。"""
     try:
@@ -205,6 +236,8 @@ def load_version(run_id: str, *, verify_files: bool = True) -> LoadResult:
         return _err("invalid_run_id", str(e), str(run_id))
     if not _is_real_dir(d):
         return _err("missing_version", f"版本不存在: {run_id}", run_id)
+    if d.resolve().parent != output_root():                 # 必須是輸出根目錄的直接子層（run_dir 已拒絕逸出者）
+        return _err("invalid_run_id", "版本資料夾不在輸出根目錄的直接子層", run_id)
     mp = d / MANIFEST_NAME
     if not mp.is_file():
         return _err("missing_manifest", "找不到 manifest.json（不是完整版本）", run_id)
@@ -212,7 +245,7 @@ def load_version(run_id: str, *, verify_files: bool = True) -> LoadResult:
         return _err("corrupt_manifest", "manifest 過大", run_id)
     try:
         m = json.loads(mp.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError, MemoryError) as e:
         return _err("corrupt_manifest", f"manifest 無法解析: {type(e).__name__}", run_id)
     if not isinstance(m, dict):
         return _err("corrupt_manifest", "manifest 不是物件", run_id)
@@ -233,19 +266,20 @@ def load_version(run_id: str, *, verify_files: bool = True) -> LoadResult:
                 return _err("hash_mismatch", f"{name} 與 manifest 內容不符（內容遭修改或損毀）", run_id)
         if h.get("rules_sha256") != m["rules"].get("sha256"):
             return _err("hash_mismatch", "rules_sha256 前後不一致", run_id)
-    except (KeyError, TypeError, ValueError, AttributeError) as e:
+    except (KeyError, TypeError, ValueError, AttributeError, RecursionError) as e:
         return _err("corrupt_manifest", f"manifest 結構不完整: {type(e).__name__}", run_id)
     if not isinstance(m["files"], dict):
         return _err("corrupt_manifest", "files 欄位不是物件", run_id)
     if verify_files:
         for key, ent in m["files"].items():
-            if key not in FILE_KEYS or not isinstance(ent, dict) or not SAFE_NAME.match(str(ent.get("name", ""))):
+            name = ent.get("name", "") if isinstance(ent, dict) else ""
+            if key not in FILE_KEYS or not _safe_file_name(name):
                 return _err("corrupt_manifest", f"files 項目不合法: {key!r}", run_id)
-            fp = d / ent["name"]
+            fp = d / name
             if not fp.is_file() or fp.is_symlink():
-                return _err("missing_file", f"缺少產出檔: {ent['name']}", run_id)
+                return _err("missing_file", f"缺少產出檔: {name}", run_id)
             if fp.stat().st_size != ent.get("bytes") or file_sha256(fp) != ent.get("sha256"):
-                return _err("file_tampered", f"產出檔內容與 manifest 不符: {ent['name']}", run_id)
+                return _err("file_tampered", f"產出檔內容與 manifest 不符（完整性檢查失敗，偵測損壞，不防刻意竄改）: {name}", run_id)
     return LoadResult(True, m, None)
 
 
@@ -262,16 +296,33 @@ class VersionInfo:
                 "result_sha256": self.result_sha256, "error": None if self.error is None else self.error.to_dict()}
 
 
-def list_versions() -> list[VersionInfo]:
-    """只掃輸出根目錄下符合 run_id 規則的真實資料夾；忽略 .stage- 前綴、非目錄、沒有 manifest.json 者。
-    manifest 存在但損毀/竄改者「列出並帶 error」（不隱藏）。檔案不逐一雜湊（列表要快）；完整驗證用 load_version。
+@dataclass
+class ScanResult:
+    versions: list
+    ignored: list            # 輸出根目錄下「不是版本」的項目名稱（沒有 manifest 的資料夾、非 run_id 命名、一般檔案…）
+    stage_leftovers: int     # .stage- 暫存資料夾數（通常是被中斷的執行殘留，只佔磁碟）
+
+    def to_dict(self) -> dict:
+        return {"versions": [v.to_dict() for v in self.versions], "ignored": list(self.ignored),
+                "stage_leftovers": self.stage_leftovers}
+
+
+def scan_versions() -> ScanResult:
+    """只掃輸出根目錄的直接子項；只讀 manifest，不開啟/雜湊產出檔（列表要快；完整性檢查留給 load_version/compare 按需執行）。
+    - 有 manifest.json 的 run_id 資料夾 → 列出；manifest 存在但損毀/不符 → 仍列出並帶 error（不隱藏）。
+    - 其餘（沒有 manifest 的資料夾、非 run_id 命名者、檔案）→ 不列出，但名稱記在 ignored，讓使用者知道有東西沒被列出。
+    - .stage- 前綴者只計數。
     排序 = (created_at, run_id)；讀不到建立時間的損毀版本 created_at 為空字串，因此排在最前面。"""
     root = output_root()
     if not root.is_dir():
-        return []
-    out = []
-    for p in root.iterdir():
+        return ScanResult([], [], 0)
+    out, ignored, stages = [], [], 0
+    for p in sorted(root.iterdir(), key=lambda q: q.name):
+        if p.name.startswith(".stage-"):
+            stages += 1
+            continue
         if not RUN_ID_RE.match(p.name) or not _is_real_dir(p) or not (p / MANIFEST_NAME).is_file():
+            ignored.append(p.name)
             continue
         r = load_version(p.name, verify_files=False)
         if r.ok:
@@ -280,7 +331,11 @@ def list_versions() -> list[VersionInfo]:
                                    m["hashes"]["result_sha256"]))
         else:
             out.append(VersionInfo(p.name, "", error=r.error))
-    return sorted(out, key=lambda v: (v.created_at, v.run_id))
+    return ScanResult(sorted(out, key=lambda v: (v.created_at, v.run_id)), ignored, stages)
+
+
+def list_versions() -> list[VersionInfo]:
+    return scan_versions().versions
 
 
 # ───────────────────────── run_id ─────────────────────────

@@ -44,8 +44,17 @@ def digest(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
+def file_digest_ignoring_created_at(p: Path) -> str:
+    """manifest.json 內的 created_at 只是描述欄位（不同時間執行必然不同），比對整個資料夾時要排除。"""
+    if p.name != "manifest.json":
+        return digest(p)
+    m = json.loads(p.read_text(encoding="utf-8"))
+    m.pop("created_at", None)
+    return hashlib.sha256(json.dumps(m, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
 def tree_digest(d: Path) -> dict:
-    return {str(p.relative_to(d)): digest(p) for p in sorted(d.rglob("*")) if p.is_file()}
+    return {str(p.relative_to(d)): file_digest_ignoring_created_at(p) for p in sorted(d.rglob("*")) if p.is_file()}
 
 
 # ---------- 基本成功路徑 ----------

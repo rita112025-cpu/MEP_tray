@@ -24,11 +24,14 @@ import tempfile
 import threading
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
+from . import acad
 from . import export_dxf as X
 from . import export_revit as R
+from . import versioning as V
 from .clash import check_route
 from .compliance import check_compliance
 from .disclosure import base_notes
@@ -69,11 +72,12 @@ class RunResult:
     gov: dict | None = None
     route: Route | None = None
     reports: dict = field(default_factory=dict)          # {"clash": Report, "compliance": Report}
-    files: dict = field(default_factory=lambda: {"dxf": None, "dwg": None, "revit_json": None})
+    files: dict = field(default_factory=lambda: {"dxf": None, "dwg": None, "revit_json": None, "manifest": None})
     dwg_note: str = ""
     acad_audit: int | None = None
     disclosures: list = field(default_factory=list)
     stats: dict = field(default_factory=dict)
+    manifest: dict | None = None
 
     def to_summary_dict(self) -> dict:
         """可 json.dumps(allow_nan=False) 的摘要；檔案為相對輸出根目錄的路徑（<run_id>/檔名），不含本機絕對路徑。"""
@@ -84,6 +88,7 @@ class RunResult:
             "files": {k: relative_to_output(v) for k, v in self.files.items()},
             "dwg_note": self.dwg_note, "acad_audit": self.acad_audit,
             "disclosures": list(self.disclosures), "stats": self.stats,
+            "hashes": None if self.manifest is None else dict(self.manifest["hashes"]),
         }
 
 
@@ -151,6 +156,25 @@ def _stats(route: Route, reports: dict, model: dict, span_m: float, span_source:
     }
 
 
+def _build_manifest(inp, codes, run_id, type_name, basis, notes, gov, rules_d, route, reports, model,
+                    span, span_source, dxf, jpath, disclosures, make_dwg, now) -> dict:
+    """環境只在「允許使用 CAD」時才探測（make_dwg=False 承諾絕不碰外部程式，連偵測也不做 → 記為 None=未探測）。"""
+    if make_dwg is not False:
+        env = {"acad_available": acad.find_accore() is not None, "acad_version": dxf.acad_version,
+               "oda_available": X.find_oda() is not None, "ezdxf_version": X.ezdxf.__version__}
+    else:
+        env = {"acad_available": None, "acad_version": None, "oda_available": None,
+               "ezdxf_version": X.ezdxf.__version__}
+    created = ((now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
+               .isoformat().replace("+00:00", "Z"))
+    return V.build_manifest(
+        run_id=run_id, created_at=created, inp=inp, codes=codes, type_name=type_name, basis=basis,
+        notes=list(notes), gov=gov, rules=rules_d, route=route, reports=reports, joints=len(model["joints"]),
+        span_m=span, span_source=span_source,
+        files={"dxf": dxf.dxf, "dwg": dxf.dwg, "revit_json": jpath}, dwg_note=dxf.dwg_note,
+        acad_audit=dxf.acad_audit, disclosures=disclosures, environment=env)
+
+
 def _dedupe(codes) -> list:
     seen, out = set(), []
     for c in codes:
@@ -162,7 +186,8 @@ def _dedupe(codes) -> list:
 
 def run(inputs: Inputs, codes: Sequence[str], run_id: str, *, type_name: str | None = None,
         basis: str = "UNSPECIFIED", make_dwg: bool | None = True, rules: dict | None = None,
-        notes: Sequence[str] = (), cell_m: float | None = None) -> RunResult:
+        notes: Sequence[str] = (), cell_m: float | None = None,
+        now: datetime | None = None) -> RunResult:
     """執行完整管線。make_dwg: True/None=偵測到 AutoCAD/ODA 才轉 DWG；False=絕不啟動外部程式。
     codes 去重並保序；大小寫不正規化（未知代號會被明確拒絕，如 "cns"）。
     cell_m 不為 None 時覆寫 inputs.cell_m（呼叫端如 UI 不必改 Inputs 就能控制格距）；None=沿用 inputs.cell_m
@@ -244,7 +269,10 @@ def run(inputs: Inputs, codes: Sequence[str], run_id: str, *, type_name: str | N
             else:
                 dxf = X.export_dxf(inp, route, rep_list, gov, run_id, notes=extra, convert_dwg=False,
                                    base=stage)
-            R.write_model(model, run_id, base=stage)
+            jpath = R.write_model(model, run_id, base=stage)
+            manifest = _build_manifest(inp, codes, run_id, type_name, basis, notes, gov, rules_d, route, reports,
+                                       model, span, span_source, dxf, jpath, disclosures, make_dwg, now)
+            V.write_manifest(stage / run_id, manifest)             # 最後寫入；整個資料夾隨 rename 一起發佈
             err = _publish(stage / run_id, final)
         except FileExistsError as e:
             err = PipelineError("output", "file_exists", str(e))
@@ -261,10 +289,11 @@ def run(inputs: Inputs, codes: Sequence[str], run_id: str, *, type_name: str | N
         return _fail(run_id, inp, codes, err.stage, err.code, err.message, gov, residue)
 
     files = {"dxf": final / dxf.dxf.name, "dwg": (final / dxf.dwg.name) if dxf.dwg else None,
-             "revit_json": final / f"tray_{run_id}.json"}
+             "revit_json": final / f"tray_{run_id}.json", "manifest": final / V.MANIFEST_NAME}
     result = RunResult(True, run_id, None, inp, codes, gov, route, reports, files,
                        sanitize_text(dxf.dwg_note), dxf.acad_audit, disclosures,
                        _scrub(_stats(route, reports, model, span, span_source)))
+    result.manifest = manifest
     if residue:                                           # 成功但暫存殘留：不靜默
         result.disclosures.append(sanitize_text(residue))
     return result

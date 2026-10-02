@@ -14,23 +14,14 @@ from mep_tray.paths import RUN_ID_RE, output_root
 from mep_tray.rules import load_rules
 from tests.test_pipeline import ALL, isolate, sample  # noqa: F401  (isolate 為 autouse fixture)
 
-ENV = {"acad_available": False, "acad_version": "", "oda_available": False, "ezdxf_version": "test"}
-
-
 def mk(run_id, inp=None, codes=ALL, *, rules=None, created_at="2026-01-01T00:00:00Z", type_name=None,
-       basis="UNSPECIFIED", notes=(), environment=None):
-    """執行管線並為已發佈的資料夾補上 manifest（模擬管線整合；之後整合進 pipeline 後只需換成 P.run）。"""
-    inp = inp or sample()
-    r = P.run(inp, codes, run_id, make_dwg=False, rules=rules, type_name=type_name, basis=basis, notes=notes)
+       basis="UNSPECIFIED", notes=()):
+    """執行管線（manifest 由管線在暫存資料夾內寫入）；回傳 (RunResult, manifest)。"""
+    now = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    r = P.run(inp or sample(), codes, run_id, make_dwg=False, rules=rules, type_name=type_name, basis=basis,
+              notes=notes, now=now)
     assert r.ok, r.error
-    m = V.build_manifest(
-        run_id=run_id, created_at=created_at, inp=r.inputs, codes=r.codes, type_name=type_name, basis=basis,
-        notes=list(notes), gov=r.gov, rules=rules if rules is not None else load_rules(), route=r.route,
-        reports=r.reports, joints=r.stats["joints"], span_m=r.stats["hanger_span_m"],
-        span_source=r.stats["hanger_span_source"], files=r.files, dwg_note=r.dwg_note,
-        acad_audit=r.acad_audit, disclosures=r.disclosures, environment=environment or ENV)
-    V.write_manifest(r.files["dxf"].parent, m)
-    return r, m
+    return r, r.manifest
 
 
 def with_rules(fn):
@@ -365,8 +356,9 @@ def test_manifest_strings_never_contain_home_tmp_or_absolute_paths(isolate):
     text = "\n".join(string_leaves(m))
     assert home.lower() not in text.lower() and tmp.lower() not in text.lower()
     assert not re.search(r"[A-Za-z]:[\\/]", text) and "Program Files" not in text
-    # 脫敏後仍可自洽：寫出後載入雜湊重算一致
-    V.write_manifest(r.files["dxf"].parent, m)
+    # 管線實際寫出的 manifest 也一樣乾淨，且脫敏後仍自洽（載入時雜湊重算一致）
+    pipe_text = "\n".join(string_leaves(r.manifest))
+    assert home.lower() not in pipe_text.lower() and "secret" not in pipe_text
     assert V.load_version("san1").ok
 
 
