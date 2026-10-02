@@ -9,27 +9,46 @@
 from __future__ import annotations
 
 import glob
+import importlib
 import os
+import sys
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-# 本機部分環境 ezdxf 的 C 擴充 DLL 載入失敗；純 Python 路徑對本工具輸出量足夠快
-os.environ.setdefault("EZDXF_DISABLE_C_EXT", "1")
-import ezdxf  # noqa: E402
+
+
+def load_ezdxf(importer=importlib.import_module):
+    """先正常匯入（保留 C 擴充）；僅在 ImportError（如 Windows 'DLL load failed'）時
+    改設 EZDXF_DISABLE_C_EXT=1 並重試一次，仍失敗才拋出明確錯誤。"""
+    try:
+        return importer("ezdxf")
+    except ImportError as first:
+        for k in [k for k in sys.modules if k == "ezdxf" or k.startswith("ezdxf.")]:
+            del sys.modules[k]                     # 清掉半載入狀態
+        os.environ["EZDXF_DISABLE_C_EXT"] = "1"
+        try:
+            return importer("ezdxf")
+        except ImportError as second:
+            raise ImportError(f"無法載入 ezdxf：{first}；停用 C 擴充後仍失敗：{second}。"
+                              f"請參閱 INSTALL.md「ezdxf 匯入失敗」") from second
+
+
+ezdxf = load_ezdxf()
 
 from .geometry import Box, segment_box  # noqa: E402
 from .model import Inputs  # noqa: E402
-from .paths import out_path  # noqa: E402
+from .paths import check_run_id, out_path  # noqa: E402
 from .router import Route  # noqa: E402
 from .rules import LABELS  # noqa: E402
 
 S = 1000.0                       # m → mm
 BLOCK = "TRAY_SEG"
+TRAY_SEG_TAGS = ("ID", "WIDTH_MM", "HEIGHT_MM", "TYPE", "LENGTH_MM")   # 固定 ASCII；SCADA 端依此讀屬性，勿改
 CLASH_R_MM = 300.0
-LAYER_COLOR = {"MEP-TRAY-PWR": 6, "MEP-TRAY-SIG": 3, "MEP-HANGER": 2, "MEP-CLASH": 1,
+LAYER_COLOR = {"MEP-TRAY-PWR": 6, "MEP-TRAY-SIG": 3, "MEP-TRAY-BODY": 8, "MEP-HANGER": 2, "MEP-CLASH": 1,
                "MEP-NOTE": 7, "MEP-OBST-water": 5, "MEP-OBST-duct": 4, "MEP-OBST-heat": 30,
                "MEP-OBST-structure": 8, "MEP-OBST-tray_power": 6, "MEP-OBST-tray_signal": 3,
                "MEP-OBST-other": 9}
@@ -57,12 +76,13 @@ def _box_faces(b: Box):
 def _setup(doc, kinds) -> None:
     for name, color in LAYER_COLOR.items():
         doc.layers.add(name, color=color)
-    doc.styles.add("MEP", font="msjh.ttc")      # 繁中字型（無字型時 AutoCAD 以預設替代）
+    st = doc.styles.add("MEP", font="msjh.ttc")   # 繁中 TrueType（預設 txt.shx 無 CJK 字形會變 ???）
+    st.set_extended_font_data("Microsoft JhengHei")
     doc.header["$INSUNITS"] = 4                 # mm
     doc.header["$MEASUREMENT"] = 1
     blk = doc.blocks.new(BLOCK)
     blk.add_circle((0, 0), 50, dxfattribs={"layer": "MEP-NOTE"})
-    for i, tag in enumerate(("ID", "WIDTH_MM", "HEIGHT_MM", "TYPE", "LENGTH_M")):
+    for i, tag in enumerate(TRAY_SEG_TAGS):
         blk.add_attdef(tag, (0, -150 * (i + 1)), dxfattribs={"height": 80, "invisible": 1, "layer": "MEP-NOTE"})
 
 
@@ -71,9 +91,28 @@ def _mtext(msp, text: str, at, layer: str, h: float = 120.0, width: float = 3000
                                     "insert": at, "width": width})
 
 
-def export_dxf(inp: Inputs, route: Route, reports: list, notes: list[str], run_id: str,
-               name: str | None = None, convert_dwg: bool = True) -> DxfResult:
-    """reports: [clash.Report, compliance.Report…]；notes: 要印在圖面的揭露文字。"""
+def disclosure_notes(inp: Inputs, gov: dict, extra: list[str] = ()) -> list[str]:
+    """圖面揭露文字：座標約定、規範值未驗證清單、預設電纜、未實機驗證。"""
+    notes = ["座標 = 公尺×1000 (mm)，原點 = 輸入座標系原點（不平移）"]
+    bad = sorted({g.code for g in gov.values() if not g.verified})
+    if bad:
+        notes.append("規範值未驗證 (verified=false)：" + ", ".join(bad) + "；結果不得視為合規依據")
+    if inp.cables_defaulted:
+        notes.append("未輸入電纜資料，填充率以預設電纜計算")
+    notes.append("本圖未於 AutoCAD 實機驗證（僅以 ezdxf 回讀與稽核）")
+    return notes + list(extra)
+
+
+def export_dxf(inp: Inputs, route: Route, reports: list, gov: dict, run_id: str,
+               notes: list[str] = (), name: str | None = None, convert_dwg: bool = True,
+               overwrite: bool = False) -> DxfResult:
+    """reports: [clash.Report, compliance.Report…]；gov: merge_strictest 結果（用於揭露文字）。
+    run_id 由本函式自行驗證；目標檔已存在時預設拒絕覆寫（FileExistsError）。"""
+    check_run_id(run_id)
+    path = out_path(run_id, name or f"tray_{run_id}.dxf")
+    if path.exists() and not overwrite:
+        raise FileExistsError(f"輸出檔已存在，拒絕覆寫: {path.name}")
+    notes = disclosure_notes(inp, gov, notes)
     doc = ezdxf.new("R2010", setup=False)
     _setup(doc, None)
     msp = doc.modelspace()
@@ -84,14 +123,14 @@ def export_dxf(inp: Inputs, route: Route, reports: list, notes: list[str], run_i
         if len(wp) >= 2:
             msp.add_polyline3d([_pt(p) for p in wp], dxfattribs={"layer": tray_layer})
     for i, (a, b) in enumerate(route.segments, 1):                # 橋架實體外框 + 屬性塊
-        for face in _box_faces(segment_box(a, b, w, h)):
-            msp.add_3dface(face, dxfattribs={"layer": tray_layer})
+        for face in _box_faces(segment_box(a, b, w, h)):        # 外框盒獨立圖層，可凍結/關閉
+            msp.add_3dface(face, dxfattribs={"layer": "MEP-TRAY-BODY"})
         mid = tuple((x + y) / 2 for x, y in zip(a, b))
         length = sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
         ref = msp.add_blockref(BLOCK, _pt(mid), dxfattribs={"layer": tray_layer})
         ref.add_auto_attribs({            # 屬性直接掛在 INSERT（SCADA/AutoCAD 可讀）；不用 add_auto_blockref 的外殼區塊
             "ID": f"SEG-{i:03d}", "WIDTH_MM": f"{inp.tray_w_mm:g}", "HEIGHT_MM": f"{inp.tray_h_mm:g}",
-            "TYPE": inp.tray_type, "LENGTH_M": f"{length:.3f}"})
+            "TYPE": inp.tray_type, "LENGTH_MM": f"{length * S:.1f}"})
     for p in route.hangers:
         msp.add_point(_pt(p), dxfattribs={"layer": "MEP-HANGER"})
     for ob in inp.obstacle_objs():
@@ -106,7 +145,7 @@ def export_dxf(inp: Inputs, route: Route, reports: list, notes: list[str], run_i
             n += 1
             loc = _pt(f.location)
             msp.add_circle(loc, CLASH_R_MM, dxfattribs={"layer": "MEP-CLASH"})
-            lines = [f"#{n} [{LABELS[f.status]}] {f.kind}: {f.subject}",
+            lines = [f"#{n} {f.status} {f.kind} {f.code}  {LABELS[f.status]}：{f.subject}",   # ASCII 代碼在前，字型缺失仍可辨識
                      f"實際 {f.actual:.0f} / 要求 {f.required:.0f} {f.unit}",
                      f"依據: {f.code or '—'} {f.clause}" + ("" if f.verified else "（規範值未驗證）"),
                      f"建議: {f.suggestion}"]
@@ -114,7 +153,6 @@ def export_dxf(inp: Inputs, route: Route, reports: list, notes: list[str], run_i
     lo = _pt(inp.room_box().lo)
     _mtext(msp, "\\P".join([f"RUN {run_id}", *notes]), (lo[0], lo[1] - 600, lo[2]), "MEP-NOTE", h=150, width=8000)
 
-    path = out_path(run_id, name or f"tray_{run_id}.dxf")
     doc.saveas(path)
     dwg, note = (None, "未要求 DWG")
     if convert_dwg:

@@ -4,10 +4,9 @@ from pathlib import Path
 
 import pytest
 
-os.environ.setdefault("EZDXF_DISABLE_C_EXT", "1")
-import ezdxf  # noqa: E402
-
 from mep_tray import export_dxf as X  # noqa: E402
+
+ezdxf = X.ezdxf
 from mep_tray.clash import check_route  # noqa: E402
 from mep_tray.compliance import check_compliance  # noqa: E402
 from mep_tray.model import Inputs  # noqa: E402
@@ -37,7 +36,7 @@ def scene(with_clash=False):
 def build(run_id="t1", with_clash=False, **kw):
     i, r = scene(with_clash)
     reps = [check_route(i, r, GOV), check_compliance(i, r, GOV)]
-    return i, r, reps, X.export_dxf(i, r, reps, ["測試揭露"], run_id, convert_dwg=False, **kw)
+    return i, r, reps, X.export_dxf(i, r, reps, GOV, run_id, notes=["測試揭露"], convert_dwg=False, **kw)
 
 
 def ents(doc, t):
@@ -53,6 +52,8 @@ def test_dxf_roundtrip_audit_layers_counts_units():
         assert layer in doc.layers
     assert len(ents(doc, "POLYLINE")) == len(r.waypoints)
     assert len(ents(doc, "3DFACE")) == 6 * (len(r.segments) + len(i.obstacles))
+    body = [e for e in ents(doc, "3DFACE") if e.dxf.layer == "MEP-TRAY-BODY"]
+    assert len(body) == 6 * len(r.segments)
     assert len(ents(doc, "POINT")) == len(r.hangers)
     assert len(ents(doc, "INSERT")) == len(r.segments)
 
@@ -66,15 +67,21 @@ def test_coordinates_are_millimetres_and_attribs_present():
     ins = ents(doc, "INSERT")[0]
     vals = {a.dxf.tag: a.dxf.text for a in ins.attribs}
     assert vals["WIDTH_MM"] == "300" and vals["TYPE"] == "power" and vals["ID"].startswith("SEG-")
+    assert set(vals) == set(X.TRAY_SEG_TAGS) == {"ID", "WIDTH_MM", "HEIGHT_MM", "TYPE", "LENGTH_MM"}
+    a, b = r.segments[0]
+    assert float(vals["LENGTH_MM"]) == pytest.approx(sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5 * 1000, abs=0.1)
+    got = {x.dxf.get("insert") and tuple(x.dxf.insert) for x in ents(doc, "INSERT")}
+    assert len(got) == len(r.segments)
 
 
 def test_findings_are_annotated_with_basis_and_disclosure():
     i, r, reps, res = build(with_clash=True)
     doc = ezdxf.readfile(res.dxf)
     nfind = sum(len(x.findings) for x in reps)
-    assert nfind >= 1 and len(ents(doc, "CIRCLE")) >= nfind        # 另有 block 內圓不計入 modelspace
+    assert nfind >= 1 and len(ents(doc, "CIRCLE")) == nfind        # block 內的圓不在 modelspace
     text = "\n".join(m.text for m in ents(doc, "MTEXT"))
     assert "衝突" in text and "建議" in text and "RUN t1" in text and "測試揭露" in text
+    assert "CLASH clash" in text and "UNVERIFIED" in text           # ASCII 代碼在前
 
 
 def test_unverified_basis_is_disclosed_on_drawing():
@@ -156,3 +163,123 @@ def test_oda_failure_degrades(tmp_path):
     def boom(a, **k):
         raise subprocess.TimeoutExpired(a, 60)
     assert X.to_dwg(res.dxf, oda=fake, runner=boom)[0] is None
+
+
+def test_text_style_is_cjk_truetype_and_mtext_uses_it():
+    i, r, reps, res = build(with_clash=True)
+    doc = ezdxf.readfile(res.dxf)
+    st = doc.styles.get("MEP")
+    assert not st.dxf.font.lower().endswith(".shx") and "txt" not in st.dxf.font.lower()
+    assert all(m.dxf.style == "MEP" for m in ents(doc, "MTEXT"))
+
+
+def test_exact_millimetre_coordinates_no_float_noise():
+    i = Inputs(start=(1.1, 1, 3), ends=[(6.1, 1, 3)])
+    from mep_tray.router import Route
+    r = Route([[(1.1, 1.0, 3.0), (6.1, 1.0, 3.0)]], [((1.1, 1.0, 3.0), (6.1, 1.0, 3.0))], [], 5.0)
+    res = X.export_dxf(i, r, [], GOV, "exact", convert_dwg=False)
+    poly = ents(ezdxf.readfile(res.dxf), "POLYLINE")[0]
+    assert [tuple(v.dxf.location) for v in poly.vertices] == [(1100.0, 1000.0, 3000.0), (6100.0, 1000.0, 3000.0)]
+
+
+def test_empty_route_and_zero_findings_still_valid_dxf_with_disclosures():
+    i = Inputs(start=(1, 1, 3), ends=[(1, 1, 3)])
+    r = route_tray(i.room_box(), i.start, i.ends, [], 0.3, 0.1, "power", GOV, cell=0.25)
+    reps = [check_route(i, r, GOV), check_compliance(i, r, GOV)]
+    res = X.export_dxf(i, r, reps, GOV, "empty1", convert_dwg=False)
+    doc = ezdxf.readfile(res.dxf)
+    assert not doc.audit().has_errors
+    text = "\n".join(m.text for m in ents(doc, "MTEXT"))
+    assert "規範值未驗證" in text and "未於 AutoCAD 實機驗證" in text and "原點" in text
+    assert not ents(doc, "CIRCLE") and not ents(doc, "INSERT")
+
+
+def test_unverified_gov_disclosure_absent_when_all_verified():
+    import dataclasses
+    ver = {k: dataclasses.replace(g, verified=True) for k, g in GOV.items()}
+    notes = X.disclosure_notes(Inputs(cables=[{"od_mm": 20, "count": 1, "kind": "power"}]), ver)
+    assert not any("規範值未驗證" in n for n in notes) and any("實機" in n for n in notes)
+
+
+def test_existing_output_is_not_silently_overwritten():
+    build("dup1")
+    with pytest.raises(FileExistsError):
+        build("dup1")
+    i, r, reps, _ = build("dup2")
+    X.export_dxf(i, r, reps, GOV, "dup2", convert_dwg=False, overwrite=True)    # 明確允許才可覆寫
+
+
+def test_export_validates_run_id_itself():
+    i, r = scene()
+    for bad in ("../evil", "", "x" * 41, "中文"):
+        with pytest.raises(ValueError):
+            X.export_dxf(i, r, [], GOV, bad, convert_dwg=False)
+
+
+def test_symlink_escape_rejected(out_root, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside")
+    link = out_root / "esc1"
+    try:
+        os.symlink(outside, link, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        # Windows 無權限建 symlink 時改用 junction（不需系統管理員）
+        r = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+                           capture_output=True, shell=False) if os.name == "nt" else None
+        if r is None or r.returncode != 0:
+            pytest.skip("此環境無法建立 symlink/junction")
+    with pytest.raises(ValueError):
+        out_path("esc1", "tray_esc1.dxf")
+    assert not list(outside.iterdir())
+
+
+def test_oda_uses_folder_interface_with_single_dxf_input(tmp_path):
+    i, r, reps, res = build("oda1")
+    (res.dxf.parent / "other.json").write_text("{}")             # 同資料夾的其他檔不得被送去轉
+    fake = tmp_path / "ODAFileConverter.exe"
+    fake.write_text("x")
+    seen = {}
+
+    def runner(args, **kw):
+        tin, tout = Path(args[1]), Path(args[2])
+        assert tin.is_dir() and tout.is_dir() and tin != res.dxf.parent and tout != res.dxf.parent
+        seen["in"] = sorted(p.name for p in tin.iterdir())
+        seen["out_before"] = sorted(p.name for p in tout.iterdir())
+        (tout / res.dxf.with_suffix(".dwg").name).write_bytes(b"DWG")
+        return subprocess.CompletedProcess(args, 0)
+
+    dwg, _ = X.to_dwg(res.dxf, oda=fake, runner=runner)
+    assert seen["in"] == [res.dxf.name] and seen["out_before"] == []
+    assert dwg is not None and sorted(p.name for p in res.dxf.parent.iterdir()) ==         sorted([res.dxf.name, dwg.name, "other.json"])
+
+
+def test_oda_timeout_degrades_with_reason(tmp_path):
+    i, r, reps, res = build("oda2")
+    fake = tmp_path / "oda.exe"
+    fake.write_text("x")
+
+    def hang(args, **kw):
+        raise subprocess.TimeoutExpired(args, kw["timeout"])
+    dwg, note = X.to_dwg(res.dxf, oda=fake, runner=hang)
+    assert dwg is None and "失敗" in note
+
+
+def test_ezdxf_import_falls_back_only_after_failure(monkeypatch):
+    calls = []
+
+    class Fake:
+        __version__ = "fake"
+
+    def importer(name):
+        calls.append(os.environ.get("EZDXF_DISABLE_C_EXT"))
+        if len(calls) == 1:
+            raise ImportError("DLL load failed while importing matrix44")
+        return Fake
+
+    monkeypatch.delenv("EZDXF_DISABLE_C_EXT", raising=False)
+    assert X.load_ezdxf(importer) is Fake
+    assert calls == [None, "1"]                                   # 第一次未設環境變數，失敗後才設
+    monkeypatch.delenv("EZDXF_DISABLE_C_EXT", raising=False)
+    calls.clear()
+    assert X.load_ezdxf(lambda n: Fake) is Fake and os.environ.get("EZDXF_DISABLE_C_EXT") is None
+    with pytest.raises(ImportError, match="INSTALL.md"):
+        X.load_ezdxf(lambda n: (_ for _ in ()).throw(ImportError("boom")))

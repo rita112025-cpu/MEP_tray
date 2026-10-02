@@ -25,8 +25,8 @@ def check_run_id(run_id: str) -> str:
 
 
 def _inside(root: Path, p: Path) -> Path:
-    p = p.resolve()
-    if root != p and root not in p.parents:
+    p = p.resolve()                       # 跟隨 symlink/junction，逸出者會落在根目錄之外
+    if p != root and not p.is_relative_to(root):
         raise ValueError(f"路徑逸出輸出目錄: {p}")
     return p
 
