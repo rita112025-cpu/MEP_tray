@@ -40,8 +40,11 @@ MAX_MANIFEST_BYTES = 5_000_000
 FILE_KEYS = ("dxf", "dwg", "revit_json")
 # 語意：「相同輸入 + 相同 run_id」下檔案位元組是否相同（檔案內嵌 run_id，不同 run_id 本來就不同）。
 DETERMINISM = {"revit_json": "same-run-id", "dxf": "same-run-id-no-cad", "dwg": "never"}
-# 影響「結果」的模組原始碼；其雜湊進 engine.code_sha256，讓引擎變動不必靠人記得遞增 RESULT_ALGO。
-ENGINE_MODULES = ("router.py", "clash.py", "compliance.py", "rules.py", "geometry.py", "export_revit.py")
+# engine.code_sha256 = 套件內「所有 .py 扣掉下列明確的非結果模組」的原始碼雜湊（fail-safe：日後新增的模組預設就被納入，
+# 不必靠人記得；model.py 的 DEFAULT_CABLE、pipeline.py 的 DEFAULT_SPAN_M、findings.py 都會影響結果，所以必須在內）。
+# 版本常數放在 __init__.py 並另記於 engine.version，故 __init__.py 排除。
+ENGINE_EXCLUDED = frozenset({"__init__.py", "sanitize.py", "versioning.py", "acad.py", "export_dxf.py",
+                             "paths.py", "disclosure.py", "report.py", "webui.py"})
 REQUIRED = ("schema_version", "run_id", "created_at", "engine", "inputs", "codes", "options",
             "rules", "result", "hashes", "files")
 
@@ -71,6 +74,10 @@ def hash_obj(o) -> str:
     return hashlib.sha256(canonical_json(o).encode("utf-8")).hexdigest()
 
 
+def engine_files(base: Path) -> list[str]:
+    return sorted(p.name for p in Path(base).glob("*.py") if p.name not in ENGINE_EXCLUDED)
+
+
 def _code_hash(base: Path, modules) -> str:
     """模組原始碼雜湊（換行正規化為 LF，避免 git autocrlf 造成跨機器的假差異；檔名也進雜湊）。"""
     h = hashlib.sha256()
@@ -83,7 +90,8 @@ def _code_hash(base: Path, modules) -> str:
 @lru_cache(maxsize=1)
 def code_sha256() -> str:
     """影響結果的模組原始碼的雜湊，進 manifest 的 engine.code_sha256。"""
-    return _code_hash(Path(__file__).resolve().parent, ENGINE_MODULES)
+    base = Path(__file__).resolve().parent
+    return _code_hash(base, engine_files(base))
 
 
 def file_sha256(path: Path) -> str:
@@ -388,6 +396,8 @@ class DiffResult:
     error: VersionError | None = None
     source: str = ""                 # inputs | rules | both | none | engine | unexplained（none 且結果不同時才細分）
     results_equal: bool = True
+    engine_changed: bool = False      # 兩版引擎（version/result_algo/code_sha256 任一）不同；獨立於 source，永遠要揭露
+    engine: dict = field(default_factory=dict)     # {欄位: [舊, 新]}，只含有差異者
     inputs: dict = field(default_factory=dict)
     rules: dict = field(default_factory=dict)
     result: dict = field(default_factory=dict)
@@ -395,6 +405,7 @@ class DiffResult:
     def to_dict(self) -> dict:
         return {"ok": self.ok, "error": None if self.error is None else self.error.to_dict(),
                 "source": self.source, "results_equal": self.results_equal,
+                "engine_changed": self.engine_changed, "engine": self.engine,
                 "inputs": self.inputs, "rules": self.rules, "result": self.result}
 
 
@@ -471,7 +482,9 @@ def compare_manifests(a: dict, b: dict) -> DiffResult:
         source = "none"
     else:                               # 輸入與生效規則都相同、結果卻不同
         source = "engine" if a["engine"] != b["engine"] else "unexplained"
-    return DiffResult(True, None, source, equal, inputs, rules, result)
+    ea, eb = a["engine"], b["engine"]
+    engine = {k: [ea.get(k), eb.get(k)] for k in sorted(set(ea) | set(eb)) if ea.get(k) != eb.get(k)}
+    return DiffResult(True, None, source, equal, bool(engine), engine, inputs, rules, result)
 
 
 def compare(run_a: str, run_b: str) -> DiffResult:

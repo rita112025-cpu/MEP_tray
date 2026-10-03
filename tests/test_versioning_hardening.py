@@ -163,7 +163,10 @@ def test_manifest_records_code_hash_and_engine_modules_exist(isolate):
     _, m = mk("eng0")
     assert m["engine"]["code_sha256"] == V.code_sha256() and len(m["engine"]["code_sha256"]) == 64
     base = Path(V.__file__).resolve().parent
-    assert all((base / n).is_file() for n in V.ENGINE_MODULES)
+    files = V.engine_files(base)
+    assert {"router.py", "clash.py", "compliance.py", "rules.py", "geometry.py", "export_revit.py",
+            "model.py", "pipeline.py", "findings.py"} <= set(files)           # 含預設值所在檔案
+    assert not (set(files) & V.ENGINE_EXCLUDED)
 
 
 def test_code_hash_change_makes_source_engine_and_same_engine_makes_it_unexplained(isolate):
@@ -272,3 +275,92 @@ def test_manifest_ordering_is_stable_and_file_is_strict_json(isolate):
     assert json.loads(text, parse_constant=lambda c: pytest.fail("NaN/Infinity")) == r.manifest
     keys = list(json.loads(text).keys())
     assert keys == sorted(keys)
+
+
+# ───────────── 補充：engine_changed 獨立於 source ─────────────
+def test_engine_change_is_reported_next_to_inputs_source(isolate):
+    _, a = mk("ec-a")
+    _, b = mk("ec-b", inp=sample(tray_w_mm=400))
+    b = copy.deepcopy(b)
+    b["engine"]["code_sha256"] = "0" * 64                    # 兩版引擎程式碼不同
+    d = V.compare_manifests(a, b)
+    assert d.source == "inputs" and d.engine_changed is True                      # 不被「輸入變了」掩蓋
+    assert d.engine == {"code_sha256": [a["engine"]["code_sha256"], "0" * 64]}
+    assert d.to_dict()["engine_changed"] is True and d.to_dict()["engine"]["code_sha256"][1] == "0" * 64
+    n = copy.deepcopy(b)
+    n["engine"]["version"] = "9.9.9"
+    assert set(V.compare_manifests(a, n).engine) == {"code_sha256", "version"}
+
+
+def test_same_inputs_and_rules_with_different_engine_is_source_engine_and_flagged(isolate):
+    _, a = mk("ee-a")
+    b = copy.deepcopy(a)
+    b["engine"]["code_sha256"] = "f" * 64
+    b["result"]["segment_count"] += 1
+    b["hashes"]["result_sha256"] = V.hash_obj(b["result"])
+    d = V.compare_manifests(a, b)
+    assert d.source == "engine" and d.engine_changed is True
+
+
+def test_engine_changed_is_false_when_engines_match(isolate):
+    mk("en-a")
+    mk("en-b", inp=sample(tray_w_mm=400))
+    d = V.compare("en-a", "en-b")
+    assert d.source == "inputs" and d.engine_changed is False and d.engine == {}
+
+
+# ───────────── 補充：原始碼雜湊的範圍（fail-safe）─────────────
+def package_copy(tmp_path):
+    import shutil
+    dst = tmp_path / "pkg"
+    dst.mkdir()
+    for p in Path(V.__file__).resolve().parent.glob("*.py"):
+        shutil.copy2(p, dst / p.name)
+    return dst
+
+
+def hash_of(pkg):
+    return V._code_hash(pkg, V.engine_files(pkg))
+
+
+def test_code_hash_changes_when_default_cable_or_default_span_source_changes(tmp_path):
+    pkg = package_copy(tmp_path)
+    base = hash_of(pkg)
+    model = pkg / "model.py"
+    src = model.read_text(encoding="utf-8")
+    assert '"od_mm": 20.0' in src
+    model.write_text(src.replace('"od_mm": 20.0', '"od_mm": 25.0'), encoding="utf-8")           # DEFAULT_CABLE
+    assert hash_of(pkg) != base
+    model.write_text(src, encoding="utf-8")
+    assert hash_of(pkg) == base
+    pipe = pkg / "pipeline.py"
+    psrc = pipe.read_text(encoding="utf-8")
+    assert "DEFAULT_SPAN_M = 2.0" in psrc
+    pipe.write_text(psrc.replace("DEFAULT_SPAN_M = 2.0", "DEFAULT_SPAN_M = 2.5"), encoding="utf-8")
+    assert hash_of(pkg) != base
+    pipe.write_text(psrc, encoding="utf-8")
+    findings = pkg / "findings.py"
+    fsrc = findings.read_text(encoding="utf-8")
+    findings.write_text(fsrc + "\n# changed\n", encoding="utf-8")
+    assert hash_of(pkg) != base
+
+
+def test_code_hash_includes_new_modules_by_default_but_not_explicitly_excluded_ones(tmp_path):
+    pkg = package_copy(tmp_path)
+    base = hash_of(pkg)
+    (pkg / "brand_new_module.py").write_text("X = 1\n", encoding="utf-8")                          # 不在排除清單 → 納入
+    with_new = hash_of(pkg)
+    assert with_new != base and "brand_new_module.py" in V.engine_files(pkg)
+    for name in ("report.py", "webui.py"):                                                         # 排除清單內（尚未存在也可建立）
+        (pkg / name).write_text("Y = 2\n", encoding="utf-8")
+    assert hash_of(pkg) == with_new
+    for name in ("sanitize.py", "versioning.py", "acad.py", "export_dxf.py", "paths.py", "disclosure.py", "__init__.py"):
+        p = pkg / name
+        p.write_text(p.read_text(encoding="utf-8") + "\n# touched\n", encoding="utf-8")
+    assert hash_of(pkg) == with_new
+
+
+def test_excluded_list_is_explicit_and_contains_only_non_result_modules():
+    assert V.ENGINE_EXCLUDED == {"__init__.py", "sanitize.py", "versioning.py", "acad.py", "export_dxf.py",
+                                 "paths.py", "disclosure.py", "report.py", "webui.py"}
+    assert not ({"model.py", "pipeline.py", "findings.py", "router.py"} & V.ENGINE_EXCLUDED)
