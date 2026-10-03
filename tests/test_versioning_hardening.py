@@ -236,7 +236,7 @@ def test_pipeline_writes_manifest_last_and_it_loads_clean(isolate):
     assert lr.ok and lr.manifest == json.loads(r.files["manifest"].read_text(encoding="utf-8"))
     assert r.to_summary_dict()["hashes"]["result_sha256"] == r.manifest["hashes"]["result_sha256"]
     assert sorted(p.name for p in (isolate / "pm1").iterdir()) == sorted(
-        ["manifest.json", "tray_pm1.dxf", "tray_pm1.json"])
+        ["manifest.json", "report_pm1.html", "tray_pm1.dxf", "tray_pm1.json"])
 
 
 def test_failed_runs_never_leave_a_manifest_or_a_folder(isolate, monkeypatch):

@@ -81,7 +81,7 @@ def test_disclosure_is_first_section_even_when_all_unverified_and_zero_findings(
     check_html(doc)
     body = doc[doc.index("<body>"):]
     assert body.index('<section id="disclosure"') < body.index('<section id="inputs"')
-    assert body.index('<section id="disclosure"') < body.index("零問題。")             # 揭露在零問題訊息之前
+    assert body.index('<section id="disclosure"') < body.index("零問題（僅涵蓋")       # 揭露在零問題訊息之前
     assert R.BANNER_FIXED in doc and "不得視為合規" in doc and "零問題不代表合規" in doc
     fnd = doc[doc.index('<section id="findings"'):doc.index('<section id="compliance"')]
     assert "零問題" in fnd and "符合規範" not in fnd
@@ -332,3 +332,242 @@ def test_report_never_contains_local_paths(isolate):
 def test_fmt_is_locale_free_and_normalises_negative_zero_and_none():
     assert R.fmt(-0.0) == "0" and R.fmt(1.23456) == "1.235" and R.fmt(300.0) == "300" and R.fmt(None) == "—"
     assert R.fmt([1.0, 2.5]) == "1, 2.5" and R.fmt(True) == "是" and R.fmt(7) == "7"
+
+
+# ───────────── 固定句單一來源 / 機器可讀版 ─────────────
+def test_fixed_sentences_come_from_disclosure_module_single_source():
+    from mep_tray import disclosure as D
+    assert R.BANNER_FIXED is D.BANNER_FIXED and R.ENGINE_CHANGED_NOTE is D.ENGINE_CHANGED_NOTE
+    assert "不得視為合規" in D.BANNER_FIXED and "引擎版本亦不同" in D.ENGINE_CHANGED_NOTE
+    assert D.REVIT_STATUS in R.render_report_data(R.ReportData(
+        "r", __import__("mep_tray.model", fromlist=["Inputs"]).Inputs(), ["CNS"], {},
+        __import__("mep_tray.router", fromlist=["Route"]).Route([], [], [], 0.0, cell_m=0.25),
+        {}, {"unverified_checks": 0}, {"hashes": {"input_sha256": "a", "rules_sha256": "b", "rules_snapshot_sha256": "c",
+                                                  "result_sha256": "d"}, "engine": {}, "files": {}, "options": {}}, []))
+
+
+# ───────────── 審查補強：控制字元、長度、總計、全 verified、屬性白名單、大小 ─────────────
+def manual_data(findings=(), checks=None, obstacles=(), run_id="m1", unverified=1, manifest=None):
+    from mep_tray.model import Inputs
+    from mep_tray.router import Route
+    rep = Report(findings=list(findings), checks=list(findings if checks is None else checks))
+    return R.ReportData(run_id, Inputs(obstacles=list(obstacles)), ["CNS"], {},
+                        Route([], [], [], 0.0, cell_m=0.25), {"clash": rep}, {"unverified_checks": unverified},
+                        manifest, ["x"])
+
+
+def test_control_and_bidi_characters_are_made_visible_never_emitted_raw(isolate):
+    bad = [chr(0x202E), chr(0x202A), chr(0x2066), chr(0x2069), chr(0), chr(13), chr(0x7F), chr(0x200F), chr(0xFEFF),
+           chr(0x2028), chr(1), chr(0x9F)]
+    name = "A" + "".join(bad) + "B"
+    r = run_ok("ctl1", inp=sample(obstacles=[{"name": name, "kind": "water", "lo": [5, 0, 0], "hi": [5.3, 4, 3.2]}]),
+               notes=["note" + chr(0x202E) + "x"])
+    doc = R.render_report(r)
+    check_html(doc)
+    for ch in bad + [chr(0x202E)]:
+        assert ch not in doc, hex(ord(ch))
+    bs = chr(92)
+    assert bs + "u202E" in doc and bs + "u0000" in doc and bs + "u000D" in doc               # 以可見的字面值取代
+    assert R.clean("a" + chr(9) + "b") == "a" + chr(9) + "b" and R.clean("a" + chr(10) + "b") == "a" + chr(10) + "b"  # \n \t 保留
+
+
+def test_overlong_names_and_notes_are_truncated_with_ellipsis(isolate):
+    long = "N" * 5000 + "TAIL"
+    r = run_ok("long1", inp=sample(obstacles=[{"name": long, "kind": "water", "lo": [5, 0, 0], "hi": [5.3, 4, 3.2]}]),
+               notes=["M" * 5000 + "ENDNOTE"])
+    doc = R.render_report(r)
+    assert "TAIL" not in doc and "ENDNOTE" not in doc and "N" * R.MAX_CELL not in doc and "…" in doc
+    assert len(doc.encode("utf-8")) < 200_000
+    assert R.clean("x" * R.MAX_CELL) == "x" * R.MAX_CELL and len(R.clean("x" * (R.MAX_CELL + 1))) == R.MAX_CELL
+
+
+def synthetic_findings(n):
+    out = []
+    for i in range(n):
+        kind, status = [("clearance", "FAIL"), ("fill", "UNVERIFIED"), ("bend", "FAIL")][i % 3]
+        out.append(Finding(kind, status, "FAIL", f"s{i}", (0, 0, 0), 1.0, 2.0, "mm", "CNS", "c", status != "UNVERIFIED"))
+    return out
+
+
+def test_totals_are_printed_untruncated_before_a_truncated_table(isolate):
+    n = R.MAX_FINDINGS + 201
+    doc = R.render_report_data(manual_data(synthetic_findings(n), run_id="tot1"))
+    check_html(doc)
+    fnd = doc[doc.index('<section id="findings"'):doc.index('<section id="compliance"')]
+    assert fnd.index("總計（未截斷）") < fnd.index("<table>")                       # 總計在表格之前
+    assert f"共 {n} 筆問題" in fnd
+    assert f"僅顯示前 {R.MAX_FINDINGS} 筆問題，共 {n} 筆" in fnd and "tray_tot1.json" in fnd and "DXF 標註" in fnd
+    by = {k: sum(1 for i in range(n) if i % 3 == j) for j, k in enumerate(["clearance", "fill", "bend"])}
+    assert f"clearance／不符合：{by['clearance']}" in fnd and f"fill／規範值未驗證：{by['fill']}" in fnd
+    assert f"規範值未驗證 {by['fill']} 筆問題" in fnd
+    assert fnd.count("<tr><td>") == R.MAX_FINDINGS                                   # 表格確實只有上限列
+
+
+def test_revit_json_carries_status_and_fix_so_truncated_findings_are_recoverable(isolate):
+    import json
+    r = run_ok("rj1")
+    m = json.loads(r.files["revit_json"].read_text(encoding="utf-8"))
+    assert m["findings"] and all("status" in f and "fix" in f and "subject" in f for f in m["findings"])
+
+
+def all_verified_rules():
+    rules = load_rules()
+    for c in rules["codes"].values():
+        c["verified"] = True
+    return rules
+
+
+def test_scope_note_always_present_and_unverified_warning_only_when_needed(isolate):
+    from mep_tray import disclosure as D
+    from mep_tray.model import Inputs
+    ver = run_ok("allv", inp=Inputs(cell_m=0.25), rules=all_verified_rules())
+    assert ver.stats["unverified_checks"] == 0
+    doc = R.render_report(ver)
+    check_html(doc)
+    assert D.SCOPE_NOTE in doc and "不得視為合規" not in doc and D.BANNER_FIXED not in doc
+    assert "未驗證" not in doc.split('<section id="governing"')[0]                    # 揭露章節沒有亂報未驗證
+    unv = R.render_report(run_ok("somev", inp=Inputs(cell_m=0.25)))
+    assert D.SCOPE_NOTE in unv and D.BANNER_FIXED in unv
+    assert "不得視為合規" not in D.SCOPE_NOTE
+
+
+def test_attribute_names_and_values_are_internal_literals_only(isolate):
+    obs = [{"name": '"><b id="evil" class="x" onclick="1">', "kind": "water", "lo": [5, 0, 0], "hi": [5.3, 4, 3.2]}]
+    r = run_ok("attr1", inp=sample(obstacles=obs), type_name='" onmouseover="x')
+    seen = []
+
+    class Attrs(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            seen.extend((tag, k, v) for k, v in attrs)
+
+    a = Attrs()
+    a.feed(R.render_report(r, diff=V.compare("attr1", "attr1")))
+    names = {k for _, k, _ in seen}
+    assert names <= {"id", "class", "lang", "charset", "http-equiv", "content", "name"}, names
+    ids = {v for _, k, v in seen if k == "id"}
+    assert ids <= set(SECTION_IDS) | {"diff"}
+    classes = {v for _, k, v in seen if k == "class"}
+    assert classes <= {"banner", "note", "warn", "mono", "badge ok", "badge unv", "badge bad"}, classes
+    fixed = {("html", "lang", "zh-Hant"), ("meta", "charset", "utf-8"), ("meta", "name", "viewport"),
+             ("meta", "http-equiv", "Content-Security-Policy")}
+    assert fixed <= set(seen)
+    assert all(v in ("width=device-width, initial-scale=1",) or "default-src 'none'" in v
+               for t, k, v in seen if k == "content")
+
+
+def test_report_size_is_bounded_for_worst_case_synthetic_input(isolate):
+    obs = [{"name": f"obstacle-{i}-" + "z" * 250, "kind": "other", "lo": [1, 1, 1], "hi": [2, 2, 2]} for i in range(1000)]
+    doc = R.render_report_data(manual_data(synthetic_findings(3000), obstacles=obs))
+    assert len(doc.encode("utf-8")) < 2_000_000
+    check_html(doc)
+
+
+def test_diff_section_is_rendered_by_one_shared_function(isolate, monkeypatch):
+    monkeypatch.setattr(R, "diff_body", lambda diff, a="A", b="B": Raw_marker)
+    run_ok("sh-a")
+    r = run_ok("sh-b", inp=sample(tray_w_mm=400))
+    d = V.compare("sh-a", "sh-b")
+    assert Raw_marker in R.render_report(r, diff=d) and Raw_marker in R.render_diff_report(d, "A", "B")
+
+
+Raw_marker = "<p>SHARED-DIFF-BODY-MARKER</p>"
+
+
+# ───────────── 整合：報告存進版本資料夾並進 manifest ─────────────
+def flip_byte(p):
+    b = bytearray(p.read_bytes())
+    b[len(b) // 2] ^= 1
+    p.write_bytes(bytes(b))
+
+
+def test_pipeline_stores_report_in_version_folder_and_lists_it_in_the_manifest(isolate):
+    r = run_ok("pr1")
+    rp = isolate / "pr1" / "report_pr1.html"
+    assert r.files["report"] == rp and rp.is_file()
+    ent = r.manifest["files"]["report"]
+    assert ent["name"] == "report_pr1.html" and ent["determinism"] == "same-run-id-no-cad"
+    assert ent["sha256"] == V.file_sha256(rp) and ent["bytes"] == rp.stat().st_size
+    check_html(rp.read_text(encoding="utf-8"))
+    assert V.load_version("pr1").ok
+    assert r.to_summary_dict()["files"]["report"] == "pr1/report_pr1.html"
+
+
+def test_report_inside_the_version_matches_a_fresh_render_of_the_same_run(isolate):
+    r = run_ok("pr2")
+    stored = (isolate / "pr2" / "report_pr2.html").read_text(encoding="utf-8")
+    again = R.render_report(r)
+    # 已存檔的報告渲染自「尚未含報告」的 manifest，所以檔案表不列報告本身；其餘內容必須一致
+    assert 'id="files"' in stored and "report_pr2.html" not in stored.split('<section id="files"')[1]
+    assert stored.split('<section id="files"')[0] == again.split('<section id="files"')[0]
+
+
+def test_tampered_or_missing_report_is_detected_by_version_load(isolate):
+    r = run_ok("pr3")
+    flip_byte(isolate / "pr3" / "report_pr3.html")
+    assert V.load_version("pr3").error.code == "file_tampered"
+    (isolate / "pr3" / "report_pr3.html").unlink()
+    assert V.load_version("pr3").error.code == "missing_file"
+
+
+def test_old_manifests_without_a_report_entry_still_load(isolate):
+    import json
+    r = run_ok("pr4")
+    mp = isolate / "pr4" / V.MANIFEST_NAME
+    m = json.loads(mp.read_text(encoding="utf-8"))
+    del m["files"]["report"]                                # 模擬舊版（報告功能之前）的 manifest
+    mp.write_text(json.dumps(m), encoding="utf-8")
+    lr = V.load_version("pr4")
+    assert lr.ok and "report" not in lr.manifest["files"]
+    assert V.compare("pr4", "pr4").ok
+
+
+def test_report_entry_with_unsafe_name_is_rejected(isolate):
+    import json
+    run_ok("pr5")
+    mp = isolate / "pr5" / V.MANIFEST_NAME
+    m = json.loads(mp.read_text(encoding="utf-8"))
+    m["files"]["report"]["name"] = "../../evil.html"
+    mp.write_text(json.dumps(m), encoding="utf-8")
+    assert V.load_version("pr5").error.code == "corrupt_manifest"
+
+
+def test_failed_runs_leave_no_report_and_no_folder(isolate, monkeypatch):
+    monkeypatch.setattr(P.RP, "render_report_data", lambda *a, **k: (_ for _ in ()).throw(OSError(28, "disk full")))
+    r = P.run(sample(), ALL, "pr6", make_dwg=False)
+    assert r.ok is False and r.error.code == "os_error" and not (isolate / "pr6").exists()
+    assert V.scan_versions().stage_leftovers == 0
+
+
+def test_report_bytes_are_deterministic_through_the_pipeline_for_same_run_id(isolate, monkeypatch, tmp_path):
+    import time
+    a = run_ok("pr7")
+    time.sleep(1.1)
+    monkeypatch.setenv("MEP_OUTPUT_ROOT", str(tmp_path / "other"))
+    b = run_ok("pr7")
+    assert a.files["report"].read_bytes() == b.files["report"].read_bytes()
+    assert a.manifest["files"]["report"]["sha256"] == b.manifest["files"]["report"]["sha256"]
+
+
+def test_rendering_cost_is_bounded_by_the_row_limits_not_by_input_size(isolate):
+    import time
+    small = manual_data(synthetic_findings(R.MAX_FINDINGS))
+    big = manual_data(synthetic_findings(50_000))
+    t0 = time.perf_counter()
+    R.render_report_data(small)
+    t_small = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    doc = R.render_report_data(big)
+    t_big = time.perf_counter() - t0
+    assert "共 50000 筆問題" in doc and len(doc.encode("utf-8")) < 2_000_000
+    assert t_big < max(5.0, 4 * t_small + 1.0)               # 輸入放大 100 倍，成本不得跟著放大（只剩總計統計）
+
+
+def test_sanitize_cache_follows_environment_changes(isolate, monkeypatch, tmp_path):
+    from mep_tray.sanitize import sanitize_text
+    bs = chr(92)
+    a, b = tmp_path / "rootA", tmp_path / "rootB"
+    monkeypatch.setenv("MEP_OUTPUT_ROOT", str(a))
+    assert sanitize_text(f"x {a}{bs}f.dxf") == "x <OUT>" + bs + "f.dxf" or "<OUT>" in sanitize_text(f"x {a}{bs}f.dxf")
+    monkeypatch.setenv("MEP_OUTPUT_ROOT", str(b))
+    t = sanitize_text(f"x {b}{bs}f.dxf")
+    assert str(b) not in t and "<OUT>" in t

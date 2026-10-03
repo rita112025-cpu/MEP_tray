@@ -9,9 +9,11 @@
 from __future__ import annotations
 
 import html
+import re
+from collections import Counter
 from dataclasses import dataclass
 
-from .disclosure import REVIT_STATUS
+from .disclosure import BANNER_FIXED, ENGINE_CHANGED_NOTE, REVIT_STATUS, SCOPE_NOTE
 from .rules import LABELS
 from .sanitize import scrub
 
@@ -19,9 +21,11 @@ MAX_FINDINGS = 500
 MAX_SEGMENTS = 200
 MAX_OBSTACLES = 200
 MAX_DIFF_ROWS = 200
+MAX_CELL = 300          # 單一儲存格/說明文字的字元上限（超過截斷並加「…」），避免使用者輸入撐爆頁面
+# 移除/可見化的字元：C0/C1 控制字元（保留 \n \t）、零寬與雙向控制（LRM/RLM/ALM、U+202A–202E、U+2066–2069）、
+# 行/段分隔符、BOM。障礙物名稱含 U+202E 之類會把相鄰文字視覺上倒轉，可用來偽裝揭露。
+_CTRL = re.compile("[\u0000-\u0008\u000b-\u001f\u007f-\u009f؜​-‏ -‮⁠-⁯﻿]")
 
-BANNER_FIXED = "規範值未驗證，不得視為合規；零問題不代表合規。"
-ENGINE_CHANGED_NOTE = "引擎版本亦不同，差異可能包含引擎變動"
 
 BADGE = {"CLASH": ("✖", "衝突"), "FAIL": ("✖", "不符合"), "UNVERIFIED": ("？", "規範值未驗證"),
          "PASS": ("✔", "符合")}
@@ -63,11 +67,17 @@ def fmt(v) -> str:
     return str(v)
 
 
+def clean(s: str, cap: int = MAX_CELL) -> str:
+    """控制/雙向覆寫字元改為可見的 \\uXXXX 字面；超過長度上限截斷並加「…」。"""
+    s = _CTRL.sub(lambda m: "\\u%04X" % ord(m.group()), s)
+    return s if len(s) <= cap else s[:cap - 1] + "…"
+
+
 def esc(v) -> str:
-    """脫敏 + 跳脫。Raw 原樣通過。"""
+    """脫敏 → 控制字元可見化與長度上限 → HTML 跳脫。Raw 原樣通過。"""
     if isinstance(v, Raw):
         return str(v)
-    return html.escape(scrub(fmt(v)), quote=True)
+    return html.escape(clean(scrub(fmt(v))), quote=True)
 
 
 def badge(status: str) -> Raw:
@@ -87,10 +97,10 @@ def table(headers, rows, caption: str | None = None) -> str:
     return "\n".join(out)
 
 
-def limited(rows: list, n: int, noun: str) -> tuple[list, str]:
+def limited(rows: list, n: int, noun: str, hint: str = "完整資料請見 manifest／JSON") -> tuple[list, str]:
     if len(rows) <= n:
         return rows, ""
-    return rows[:n], f'<p class="warn">僅顯示前 {n} 筆{esc(noun)}，共 {len(rows)} 筆；完整資料請見 manifest／JSON。</p>'
+    return rows[:n], f'<p class="warn">僅顯示前 {n} 筆{esc(noun)}，共 {len(rows)} 筆；{esc(hint)}。</p>'
 
 
 def section(sid: str, title: str, body: str) -> str:
@@ -123,6 +133,8 @@ def _disclosure(d: ReportData) -> str:
     parts = []
     if unverified:
         parts.append(f'<div class="banner"><strong>{esc(BANNER_FIXED)}</strong></div>')
+    # 範圍聲明永遠印（含全部規範值已驗證時），否則零 finding 的報告會被讀成「全部合規」
+    parts.append(f'<div class="banner"><strong>{esc(SCOPE_NOTE)}</strong></div>')
     items = "".join(f"<li>{esc(x)}</li>" for x in d.disclosures)
     parts.append(f'<div class="banner"><ul>{items}</ul></div>' if items else "")
     return section("disclosure", "揭露事項", "\n".join(p for p in parts if p))
@@ -166,29 +178,40 @@ def _finding_row(f: dict) -> list:
             f"{fmt(f['actual'])} / {fmt(f['required'])} {f['unit']}", basis, f["suggestion"] or "—", fix_txt]
 
 
+def _totals(items: list[dict], unit: str) -> str:
+    """不截斷的總計（表格被截斷時，使用者仍看得到真正的數量）。"""
+    by = Counter(f"{x['kind']}／{LABELS.get(x['status'], x['status'])}" for x in items)
+    parts = "；".join(f"{k}：{n}" for k, n in sorted(by.items())) or "無"
+    unv = sum(1 for x in items if x["status"] == "UNVERIFIED")
+    return (f'<p class="note"><strong>總計（未截斷）：共 {len(items)} {esc(unit)}</strong>；規範值未驗證 {unv} {esc(unit)}；'
+            f"依類型／狀態：{esc(parts)}。</p>")
+
+
 def _findings(d: ReportData) -> str:
     fs = [f.to_dict() for key in ("clash", "compliance") if key in d.reports for f in d.reports[key].findings]
     if not fs:
         unv = d.stats.get("unverified_checks", 0) > 0
-        msg = "零問題。" + ("但所依規範值尚未驗證，零問題不代表合規。" if unv else "")
+        msg = "零問題（僅涵蓋本工具已實作之檢查項）。" + ("但所依規範值尚未驗證，零問題不代表合規。" if unv else "")
         return section("findings", "問題清單", f"<p>{esc(msg)}</p>")
-    rows, note = limited([_finding_row(f) for f in fs], MAX_FINDINGS, "問題")
+    hint = f"完整清單見 tray_{d.run_id}.json（含 status 與 fix）及 DXF 標註"
+    _, note = limited(fs, MAX_FINDINGS, "問題", hint)                      # 先切片再建列：工作量被上限擋住
+    rows = [_finding_row(f) for f in fs[:MAX_FINDINGS]]
     body = table(["狀態", "類型", "對象", "位置 (m)", "實際 / 要求", "規範依據", "建議", "建議位移（fix）"], rows,
                  f"共 {len(fs)} 筆")
-    return section("findings", "問題清單", body + note)
+    return section("findings", "問題清單", _totals(fs, "筆問題") + body + note)
 
 
 def _compliance(d: ReportData) -> str:
     cs = [c.to_dict() for key in ("clash", "compliance") if key in d.reports for c in d.reports[key].checks]
     rows = []
-    for c in cs:
+    for c in cs[:MAX_FINDINGS]:                                              # 先切片再建列
         basis = f"{c['code'] or '—'}：{c['clause'] or '—'}"
         rows.append([badge(c["status"]), c["kind"], c["subject"], f"{fmt(c['actual'])} / {fmt(c['required'])} {c['unit']}",
                      basis, "規範值未驗證" if not c["verified"] else "已驗證"])
-    rows, note = limited(rows, MAX_FINDINGS, "檢查項")
+    _, note = limited(cs, MAX_FINDINGS, "檢查項", f"完整清單見 tray_{d.run_id}.json 與 DXF 標註")
     body = table(["狀態", "類型", "對象", "實際 / 要求", "規範依據", "規範值狀態"], rows,
                  "全部已驗算項（含符合與規範值未驗證）") if rows else "<p>無檢查項。</p>"
-    return section("compliance", "合規表", body + note)
+    return section("compliance", "合規表", (_totals(cs, "項檢查") if cs else "") + body + note)
 
 
 def _route(d: ReportData) -> str:

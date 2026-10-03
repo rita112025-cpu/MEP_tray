@@ -31,12 +31,13 @@ from typing import Sequence
 from . import acad
 from . import export_dxf as X
 from . import export_revit as R
+from . import report as RP
 from . import versioning as V
 from .clash import check_route
 from .compliance import check_compliance
 from .disclosure import base_notes
 from .model import Inputs
-from .paths import check_run_id, output_root, run_dir
+from .paths import check_run_id, out_path, output_root, run_dir
 from .router import Route, place_hangers, try_route_tray
 from .rules import load_rules, merge_strictest, validate_rules
 from .sanitize import relative_to_output, sanitize_text
@@ -72,7 +73,8 @@ class RunResult:
     gov: dict | None = None
     route: Route | None = None
     reports: dict = field(default_factory=dict)          # {"clash": Report, "compliance": Report}
-    files: dict = field(default_factory=lambda: {"dxf": None, "dwg": None, "revit_json": None, "manifest": None})
+    files: dict = field(default_factory=lambda: {"dxf": None, "dwg": None, "revit_json": None, "report": None,
+                                                 "manifest": None})
     dwg_note: str = ""
     acad_audit: int | None = None
     disclosures: list = field(default_factory=list)
@@ -156,8 +158,13 @@ def _stats(route: Route, reports: dict, model: dict, span_m: float, span_source:
     }
 
 
+def _created_iso(now) -> str:
+    return ((now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
+            .isoformat().replace("+00:00", "Z"))
+
+
 def _build_manifest(inp, codes, run_id, type_name, basis, notes, gov, rules_d, route, reports, model,
-                    span, span_source, dxf, jpath, disclosures, make_dwg, now) -> dict:
+                    span, span_source, dxf, jpath, disclosures, make_dwg, created, report_path=None) -> dict:
     """環境只在「允許使用 CAD」時才探測（make_dwg=False 承諾絕不碰外部程式，連偵測也不做 → 記為 None=未探測）。"""
     if make_dwg is not False:
         env = {"acad_available": acad.find_accore() is not None, "acad_version": dxf.acad_version,
@@ -165,13 +172,12 @@ def _build_manifest(inp, codes, run_id, type_name, basis, notes, gov, rules_d, r
     else:
         env = {"acad_available": None, "acad_version": None, "oda_available": None,
                "ezdxf_version": X.ezdxf.__version__}
-    created = ((now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
-               .isoformat().replace("+00:00", "Z"))
     return V.build_manifest(
         run_id=run_id, created_at=created, inp=inp, codes=codes, type_name=type_name, basis=basis,
         notes=list(notes), gov=gov, rules=rules_d, route=route, reports=reports, joints=len(model["joints"]),
         span_m=span, span_source=span_source,
-        files={"dxf": dxf.dxf, "dwg": dxf.dwg, "revit_json": jpath}, dwg_note=dxf.dwg_note,
+        files={"dxf": dxf.dxf, "dwg": dxf.dwg, "revit_json": jpath, "report": report_path},
+        dwg_note=dxf.dwg_note,
         acad_audit=dxf.acad_audit, disclosures=disclosures, environment=env)
 
 
@@ -250,6 +256,7 @@ def run(inputs: Inputs, codes: Sequence[str], run_id: str, *, type_name: str | N
     rep_list = [reports["clash"], reports["compliance"]]
     model = R.build_model(inp, route, rep_list, gov, run_id, type_name=type_name, basis=basis, notes=extra)
     disclosures = [sanitize_text(n) for n in base_notes(inp, gov, rep_list, extra)]
+    stats = _scrub(_stats(route, reports, model, span, span_source))
 
     # ── output：暫存資料夾組裝 → 全部成功才 rename ──
     root = output_root()
@@ -270,9 +277,17 @@ def run(inputs: Inputs, codes: Sequence[str], run_id: str, *, type_name: str | N
                 dxf = X.export_dxf(inp, route, rep_list, gov, run_id, notes=extra, convert_dwg=False,
                                    base=stage)
             jpath = R.write_model(model, run_id, base=stage)
-            manifest = _build_manifest(inp, codes, run_id, type_name, basis, notes, gov, rules_d, route, reports,
-                                       model, span, span_source, dxf, jpath, disclosures, make_dwg, now)
-            V.write_manifest(stage / run_id, manifest)             # 最後寫入；整個資料夾隨 rename 一起發佈
+            created = _created_iso(now)                             # 兩次建立 manifest 共用同一個建立時間
+            common = (inp, codes, run_id, type_name, basis, notes, gov, rules_d, route, reports, model,
+                      span, span_source, dxf, jpath, disclosures, make_dwg, created)
+            m0 = _build_manifest(*common)                           # 尚未含報告：報告的檔案表列的就是這些
+            rpath = out_path(run_id, f"report_{run_id}.html", stage)
+            doc = RP.render_report_data(RP.ReportData(run_id, inp, codes, gov, route, reports, stats, m0,
+                                                      disclosures, sanitize_text(dxf.dwg_note), dxf.acad_audit))
+            with open(rpath, "x", encoding="utf-8", newline="\n") as fh:
+                fh.write(doc)
+            manifest = _build_manifest(*common, report_path=rpath)  # 最終 manifest：files 含報告，最後寫入
+            V.write_manifest(stage / run_id, manifest)             # 整個資料夾隨 rename 一起發佈
             err = _publish(stage / run_id, final)
         except FileExistsError as e:
             err = PipelineError("output", "file_exists", str(e))
@@ -289,10 +304,11 @@ def run(inputs: Inputs, codes: Sequence[str], run_id: str, *, type_name: str | N
         return _fail(run_id, inp, codes, err.stage, err.code, err.message, gov, residue)
 
     files = {"dxf": final / dxf.dxf.name, "dwg": (final / dxf.dwg.name) if dxf.dwg else None,
-             "revit_json": final / f"tray_{run_id}.json", "manifest": final / V.MANIFEST_NAME}
+             "revit_json": final / f"tray_{run_id}.json", "report": final / f"report_{run_id}.html",
+             "manifest": final / V.MANIFEST_NAME}
     result = RunResult(True, run_id, None, inp, codes, gov, route, reports, files,
                        sanitize_text(dxf.dwg_note), dxf.acad_audit, disclosures,
-                       _scrub(_stats(route, reports, model, span, span_source)))
+                       stats)
     result.manifest = manifest
     if residue:                                           # 成功但暫存殘留：不靜默
         result.disclosures.append(sanitize_text(residue))

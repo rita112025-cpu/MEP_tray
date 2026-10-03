@@ -19,6 +19,13 @@ def base_notes(inp: Inputs, gov: dict, reports=(), extra=()) -> list[str]:
     return notes + list(extra)
 
 
+# 報告/UI 共用的固定句（單一來源；report.py、webui 都從這裡取，避免措辭漂移）。
+BANNER_FIXED = "規範值未驗證，不得視為合規；零問題不代表合規。"
+ENGINE_CHANGED_NOTE = "引擎版本亦不同，差異可能包含引擎變動"
+# 永遠印出（含全部規範值皆已驗證時）：零 finding 的報告不能被讀成「全部合規」。不得含「不得視為合規」字樣——
+# 那句只在有未驗證規範值時才出現，已驗證的結果不該被亂報。
+SCOPE_NOTE = "本報告僅涵蓋本工具已實作之檢查項，不等同於完整法規合規審查。"
+
 # 不把過往 session 的敘述當作本版本實機驗證證據。
 REVIT_STATUS = ("未於 Revit 驗證（UNVERIFIED，實機操作待確認）；Revit 2025／2027 相容性尚未驗證；"
                 "未提供 .rfa（Cable Tray 為系統族）。")

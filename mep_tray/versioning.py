@@ -37,9 +37,10 @@ from .sanitize import scrub
 SCHEMA_VERSION = 1
 MANIFEST_NAME = "manifest.json"
 MAX_MANIFEST_BYTES = 5_000_000
-FILE_KEYS = ("dxf", "dwg", "revit_json")
+FILE_KEYS = ("dxf", "dwg", "revit_json", "report")
 # 語意：「相同輸入 + 相同 run_id」下檔案位元組是否相同（檔案內嵌 run_id，不同 run_id 本來就不同）。
-DETERMINISM = {"revit_json": "same-run-id", "dxf": "same-run-id-no-cad", "dwg": "never"}
+DETERMINISM = {"revit_json": "same-run-id", "dxf": "same-run-id-no-cad", "dwg": "never",
+               "report": "same-run-id-no-cad"}
 # engine.code_sha256 = 套件內「所有 .py 扣掉下列明確的非結果模組」的原始碼雜湊（fail-safe：日後新增的模組預設就被納入，
 # 不必靠人記得；model.py 的 DEFAULT_CABLE、pipeline.py 的 DEFAULT_SPAN_M、findings.py 都會影響結果，所以必須在內）。
 # 版本常數放在 __init__.py 並另記於 engine.version，故 __init__.py 排除。

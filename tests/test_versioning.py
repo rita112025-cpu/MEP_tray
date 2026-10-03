@@ -226,7 +226,7 @@ def flip_one_byte(p: Path):
 def test_valid_version_loads_and_verifies_files(isolate):
     mk("ok1")
     r = V.load_version("ok1")
-    assert r.ok and r.error is None and set(r.manifest["files"]) == {"dxf", "revit_json"}
+    assert r.ok and r.error is None and set(r.manifest["files"]) == {"dxf", "revit_json", "report"}
 
 
 def test_tampering_one_byte_of_an_output_file_is_detected_and_blocks_compare(isolate):

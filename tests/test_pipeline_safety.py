@@ -44,7 +44,7 @@ def test_summary_dict_is_strict_json_relative_paths_and_no_local_paths(isolate, 
     d = r.to_summary_dict()
     text = json.dumps(d, ensure_ascii=False, allow_nan=False)
     assert d["files"] == {"dxf": "sum1/tray_sum1.dxf", "dwg": None, "revit_json": "sum1/tray_sum1.json",
-                          "manifest": "sum1/manifest.json"}
+                          "report": "sum1/report_sum1.html", "manifest": "sum1/manifest.json"}
     assert set(d["hashes"]) == {"input_sha256", "rules_sha256", "rules_snapshot_sha256", "result_sha256"}
     for leak in (str(tmp_path), str(Path.home()), tempfile.gettempdir()):
         assert leak.lower() not in text.lower()

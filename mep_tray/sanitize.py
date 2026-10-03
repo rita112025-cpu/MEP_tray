@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+from functools import lru_cache
 from pathlib import Path
 
 from .paths import output_root
@@ -35,16 +36,24 @@ def _variants(p: Path) -> list[str]:
     return sorted((v for v in out if v), key=len, reverse=True)
 
 
-def _replace_ci(text: str, needle: str, repl: str) -> str:
-    return re.sub(re.escape(needle), lambda m: repl, text, flags=re.IGNORECASE)
+@lru_cache(maxsize=16)
+def _base_patterns(out_env: str | None, tmp: str, home: str) -> tuple:
+    """已知根目錄的比對式（編譯後快取）。快取鍵是會影響結果的三個環境值，所以環境改變時自動重算；
+    否則每個字串都要重新 resolve 路徑並重編正則，大報告（數萬個儲存格）會慢到不可用。"""
+    out = []
+    for base, label in ((output_root(), "<OUT>"), (Path(tmp), "<TMP>"), (Path(home), "<HOME>")):
+        for v in _variants(base):
+            out.append((re.compile(re.escape(v), re.IGNORECASE), label))
+    return tuple(out)
 
 
 def sanitize_text(text: str) -> str:
     if not isinstance(text, str) or not text:
         return text
-    for base, label in ((output_root(), "<OUT>"), (Path(tempfile.gettempdir()), "<TMP>"), (Path.home(), "<HOME>")):
-        for v in _variants(base):
-            text = _replace_ci(text, v, label)
+    if "\\" not in text and "/" not in text:          # 所有比對式都需要路徑分隔字元；沒有就不可能含路徑
+        return text
+    for rx, label in _base_patterns(os.environ.get("MEP_OUTPUT_ROOT"), tempfile.gettempdir(), str(Path.home())):
+        text = rx.sub(lambda m, _l=label: _l, text)
     text = _Q_PATH.sub("<PATH>", text)
     text = _EXT_PATH.sub("<PATH>", text)
     text = _WIN_ABS.sub("<PATH>", text)
