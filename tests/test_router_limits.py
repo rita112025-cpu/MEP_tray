@@ -124,3 +124,54 @@ def test_router_and_grid_helper_agree_on_the_max_cells_boundary_for_random_rooms
         assert lo.ok is False and lo.code == "grid_too_large", (room, cell, total)
         ok = try_route_tray(room, room.lo, [room.lo], [], 0.3, 0.1, "power", GOV, cell=cell, max_cells=total)
         assert ok.code != "grid_too_large", (room, cell, total)             # 恰在上限不被 grid 規則擋下
+
+
+# ───────────── 真實規模：預設格距下預算不得誤擋 ─────────────
+def realistic_obstacles(n=30):
+    """30×15×5 m 房間內約 30 個 0.3～0.6 m 的水管/風管/熱源（決定性分佈，避開起訖點）。"""
+    out, kinds = [], ("water", "duct", "heat")
+    for i in range(n):
+        x, y = 3 + (i % 10) * 2.5, 2 + (i // 10) * 5
+        s = 0.3 + 0.1 * (i % 4)                                        # 0.3, 0.4, 0.5, 0.6
+        out.append({"name": f"o{i}", "kind": kinds[i % 3], "lo": [x, y, 1.0 + (i % 3) * 0.8],
+                    "hi": [x + s, y + 3.0, 1.0 + (i % 3) * 0.8 + s]})   # 長 3 m 的管段
+    return out
+
+
+def test_realistic_scene_at_default_cell_is_far_below_the_obstacle_budget():
+    obs = [Obstacle(o["name"], o["kind"], Box(tuple(o["lo"]), tuple(o["hi"]))) for o in realistic_obstacles()]
+    assert len(obs) == 30
+    w = estimate_obstacle_work(BIG_ROOM, obs, 0.3, 0.1, "power", GOV, 0.25)
+    assert 0 < w < MAX_OBSTACLE_WORK * 0.2, (w, MAX_OBSTACLE_WORK)         # 不會誤擋（< 預算的 20%）
+
+
+def test_realistic_scene_routes_through_the_pipeline_without_hitting_any_budget(isolate):
+    inp = Inputs(room=((0, 0, 0), (30, 15, 5)), start=(1, 7, 3), ends=[(29, 7, 3)], cell_m=0.25,
+                 obstacles=realistic_obstacles())
+    t0 = time.perf_counter()
+    r = P.run(inp, ALL, "real1", make_dwg=False)
+    assert r.ok, r.error
+    assert r.error is None and time.perf_counter() - t0 < 30
+
+
+def test_realistic_scene_is_accepted_by_the_web_validation_with_the_default_cell():
+    from mep_tray import webui as W
+    body = {"room": {"x": 30, "y": 15, "z": 5}, "tray": {"width_mm": 300, "height_mm": 100, "kind": "power"},
+            "start": {"x": 1, "y": 7, "z": 3}, "ends": [{"x": 29, "y": 7, "z": 3}], "codes": ["CNS", "MRT_APPX_C"],
+            "obstacles": realistic_obstacles()}                              # 沒給 cell_m → 預設 0.25
+    inp, _ = W.validate_request(body)
+    assert inp.cell_m == 0.25 and len(inp.obstacles) == 30
+
+
+def test_budget_error_messages_tell_the_user_to_enlarge_the_cell():
+    from mep_tray import webui as W
+    res = try_route_tray(BIG_ROOM, (1, 7, 3), [(29, 7, 3)], [whole_room()], 0.3, 0.1, "power", GOV, cell=0.1)
+    assert "放大格距" in res.error
+    hint = W.HUMAN[("route", "obstacle_work_limit")][1]
+    assert "放大格距" in hint
+    with pytest.raises(W.ApiError) as ei:
+        W.validate_request({"room": {"x": 30, "y": 15, "z": 5}, "tray": {"width_mm": 300, "height_mm": 100, "kind": "power"},
+                            "start": {"x": 1, "y": 7, "z": 3}, "ends": [{"x": 29, "y": 7, "z": 3}], "codes": ["CNS"],
+                            "cell_m": 0.1, "obstacles": [{"name": "w", "kind": "structure", "lo": [-1, -1, -1],
+                                                          "hi": [31, 16, 6]}]})
+    assert ei.value.code == "obstacle_work_limit" and "放大格距" in ei.value.message
