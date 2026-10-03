@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,10 +22,53 @@ class Governing:
     verified: bool
     direction: str                 # 必填：min=值為下限(越大越嚴) | max=值為上限(越小越嚴)
     all_values: dict = field(default_factory=dict)  # {code: value}
+    sources: list = field(default_factory=list)     # 勝出規範對該參數的出處（可選 metadata；無則空）
 
 
 UNIT_SUFFIX = {"_mm": "mm", "_m": "m"}
 UNITS = {"ratio", "m", "mm", "xOD"}
+SOURCE_STRENGTHS = {"MUST", "SHOULD"}          # 條文強度：必須 / 宜
+SOURCE_RULE_ID_RE = re.compile(r"^C-\d{3}$")
+SOURCE_FIELDS = ("rule_id", "pdf_page", "appendix_page", "strength", "note")
+
+
+def _check_sources(c: str, info: dict, params: dict, errs: list) -> None:
+    """code.sources（可選）：{參數鍵: [出處, ...]}。沒有 sources 欄位＝合法（向下相容）。"""
+    srcs = info.get("sources")
+    if srcs is None:
+        return
+    if not isinstance(srcs, dict):
+        errs.append(f"code {c}: sources 需為物件")
+        return
+    values = info.get("values", {})
+    for k, lst in srcs.items():
+        if k not in params:
+            errs.append(f"code {c}.sources: 未知參數 {k}")
+            continue
+        if values.get(k) is None:
+            errs.append(f"code {c}.sources.{k}: 該參數沒有值，不可附出處")
+        if not isinstance(lst, list) or not lst:
+            errs.append(f"code {c}.sources.{k}: 需為非空清單")
+            continue
+        for i, src in enumerate(lst):
+            w = f"code {c}.sources.{k}[{i}]"
+            if not isinstance(src, dict):
+                errs.append(f"{w}: 需為物件")
+                continue
+            for f in SOURCE_FIELDS:
+                if f not in src:
+                    errs.append(f"{w}: 缺欄位 {f}")
+            rid, pg, ap, st, note = (src.get(f) for f in SOURCE_FIELDS)
+            if "rule_id" in src and not (isinstance(rid, str) and SOURCE_RULE_ID_RE.match(rid)):
+                errs.append(f"{w}.rule_id: 格式需為 C-001")
+            if "pdf_page" in src and (isinstance(pg, bool) or not isinstance(pg, int) or pg <= 0):
+                errs.append(f"{w}.pdf_page: 需為正整數")
+            if "appendix_page" in src and not (isinstance(ap, str) and ap.strip()):
+                errs.append(f"{w}.appendix_page: 需為非空字串")
+            if "strength" in src and st not in SOURCE_STRENGTHS:
+                errs.append(f"{w}.strength: 需為 {sorted(SOURCE_STRENGTHS)}")
+            if "note" in src and not isinstance(note, str):
+                errs.append(f"{w}.note: 需為字串")
 
 
 def validate_rules(rules: dict) -> dict:
@@ -54,6 +98,7 @@ def validate_rules(rules: dict) -> dict:
                 errs.append(f"code {c}: 未知參數 {k}")
             elif v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0):
                 errs.append(f"code {c}.{k}: 需為非負數或 null")
+        _check_sources(c, info, params, errs)
     if errs:
         raise ValueError("rules 驗證失敗:\n  " + "\n  ".join(errs))
     return rules
@@ -81,7 +126,8 @@ def merge_strictest(selected: list[str], rules: dict | None = None) -> dict[str,
         pick = (min if meta["direction"] == "max" else max)(vals, key=vals.get)
         info = rules["codes"][pick]
         out[key] = Governing(key, meta["label"], meta["unit"], vals[pick], pick,
-                             info["clause"], info["verified"], meta["direction"], vals)
+                             info["clause"], info["verified"], meta["direction"], vals,
+                             list((info.get("sources") or {}).get(key, [])))
     return out
 
 

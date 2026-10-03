@@ -30,7 +30,7 @@ def _vec_pair(v, what: str) -> tuple:
 
 
 DEFAULT_CABLE = {"od_mm": 20.0, "count": 10, "kind": "power"}
-OBSTACLE_KINDS = {"water", "duct", "heat", "structure", "tray_power", "tray_signal", "other"}
+OBSTACLE_KINDS = {"water", "duct", "heat", "heat_bare", "structure", "tray_power", "tray_signal", "other"}
 
 
 @dataclass

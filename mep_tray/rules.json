@@ -56,6 +56,11 @@
       "unit": "mm",
       "direction": "min"
     },
+    "clear_heat_bare_mm": {
+      "label": "與無保溫熱源淨距",
+      "unit": "mm",
+      "direction": "min"
+    },
     "tray_parallel_mm": {
       "label": "兩組線架同高平行淨距",
       "unit": "mm",
@@ -76,7 +81,8 @@
         "sep_power_signal_mm": 300,
         "clear_water_mm": 300,
         "clear_duct_mm": 150,
-        "clear_heat_mm": 500
+        "clear_heat_mm": 500,
+        "clear_heat_bare_mm": null
       },
       "clause": "CNS 電纜架相關標準（條號待核對）",
       "verified": false,
@@ -95,7 +101,8 @@
         "sep_power_signal_mm": 200,
         "clear_water_mm": null,
         "clear_duct_mm": null,
-        "clear_heat_mm": 400
+        "clear_heat_mm": 400,
+        "clear_heat_bare_mm": null
       },
       "clause": "IEC 61537 / IEC 60364-5-52（條號待核對）",
       "verified": false,
@@ -114,7 +121,8 @@
         "sep_power_signal_mm": 300,
         "clear_water_mm": null,
         "clear_duct_mm": null,
-        "clear_heat_mm": null
+        "clear_heat_mm": null,
+        "clear_heat_bare_mm": null
       },
       "clause": "NEC 392.18 / 392.22 / 392.30 / 300.34（條號待核對）",
       "verified": false,
@@ -133,7 +141,8 @@
         "sep_power_signal_mm": null,
         "clear_water_mm": 300,
         "clear_duct_mm": 150,
-        "clear_heat_mm": 500
+        "clear_heat_mm": 500,
+        "clear_heat_bare_mm": null
       },
       "clause": "建築技術規則 建築設備編（條號待核對）",
       "verified": false,
@@ -149,15 +158,115 @@
         "headroom_mm": 300,
         "side_clear_mm": 250,
         "structure_clear_mm": 100,
-        "sep_power_signal_mm": 300,
+        "sep_power_signal_mm": 500,
         "clear_water_mm": 400,
         "clear_duct_mm": 150,
         "clear_heat_mm": 500,
+        "clear_heat_bare_mm": 1000,
         "tray_parallel_mm": 600
       },
       "clause": "附錄C §三/§四 C-6~C-8、附件A（水管水平400/交叉300 取較嚴400；上方淨空困難值150未採用）",
       "source": "依 er4-appendix-c-utility-routing 技能之 PDF 文字抽取；附件A矩陣個別格值抽取錯位，須回查原檔",
-      "verified": false
+      "verified": false,
+      "sources": {
+        "fitting_radius_mm": [
+          {
+            "rule_id": "C-050",
+            "pdf_page": 8,
+            "appendix_page": "C-7",
+            "strength": "SHOULD",
+            "note": "內側彎曲半徑不宜小於 0.3 m。這是 SHOULD（宜），不是強制 MUST。"
+          }
+        ],
+        "headroom_mm": [
+          {
+            "rule_id": "C-037",
+            "pdf_page": 8,
+            "appendix_page": "C-7",
+            "strength": "MUST",
+            "note": "一般值 ≥300 mm；困難條件可為 150 mm。工具目前採一般值 300，不建模困難條件。"
+          }
+        ],
+        "clear_water_mm": [
+          {
+            "rule_id": "C-042",
+            "pdf_page": 8,
+            "appendix_page": "C-7",
+            "strength": "MUST",
+            "note": "水平 400 mm、交叉 300 mm。目前工具未區分方向，故採較嚴 400 mm。弱電線槽另有 C-054（150/100），不得混用。"
+          }
+        ],
+        "tray_parallel_mm": [
+          {
+            "rule_id": "C-044",
+            "pdf_page": 8,
+            "appendix_page": "C-7",
+            "strength": "MUST",
+            "note": "同高度平行間距 ≥600 mm。"
+          }
+        ],
+        "structure_clear_mm": [
+          {
+            "rule_id": "C-045",
+            "pdf_page": 8,
+            "appendix_page": "C-7",
+            "strength": "MUST",
+            "note": "條文為距牆柱「大於 100 mm」而非「大於等於 100 mm」。目前數值模型無法表達 strict greater-than，保留 100 並揭露此限制。相關疑點：Q-07。"
+          }
+        ],
+        "clear_duct_mm": [
+          {
+            "rule_id": "C-055",
+            "pdf_page": 9,
+            "appendix_page": "C-8",
+            "strength": "MUST",
+            "note": "只涵蓋線架上方垂直淨距，且為困難條件最小值；不是所有方向的風管淨距。"
+          }
+        ],
+        "side_clear_mm": [
+          {
+            "rule_id": "C-010",
+            "pdf_page": 6,
+            "appendix_page": "C-5",
+            "strength": "MUST",
+            "note": "單層單側檢修空間 ≥250 mm。這是檢修空間，不是一般障礙物 clearance；目前映射屬設計判斷。"
+          }
+        ],
+        "clear_heat_mm": [
+          {
+            "rule_id": "C-040",
+            "pdf_page": 8,
+            "appendix_page": "C-7",
+            "strength": "MUST",
+            "note": "只適用「有保溫熱力管」平行配置。無保溫熱力管另見 C-041。"
+          }
+        ],
+        "clear_heat_bare_mm": [
+          {
+            "rule_id": "C-041",
+            "pdf_page": 8,
+            "appendix_page": "C-7",
+            "strength": "MUST",
+            "note": "無保溫熱力管平行 1000 mm、交叉 500 mm。目前引擎未區分平行／交叉，因此採較嚴 1000 mm。"
+          }
+        ],
+        "sep_power_signal_mm": [
+          {
+            "rule_id": "C-048",
+            "pdf_page": 8,
+            "appendix_page": "C-7",
+            "strength": "MUST",
+            "note": "弱電與電力電纜多層配置時 500 mm；有屏蔽蓋時可降為 300 mm。目前沒有建模屏蔽蓋與多層配置狀態，採未附屏蔽蓋的較嚴值 500 mm。"
+          },
+          {
+            "rule_id": "C-049",
+            "pdf_page": 8,
+            "appendix_page": "C-7",
+            "strength": "MUST",
+            "note": "通信線架對其他線架水平／垂直 300 mm。"
+          }
+        ]
+      }
     }
   }
 }

@@ -132,7 +132,9 @@ def input_hash(inp, codes, **opts) -> str:
 
 def gov_snapshot(gov: dict) -> dict:
     return {k: {"label": g.label, "unit": g.unit, "direction": g.direction, "value": g.value,
-                "code": g.code, "clause": g.clause, "verified": g.verified} for k, g in sorted(gov.items())}
+                "code": g.code, "clause": g.clause, "verified": g.verified,
+                "sources": [{f: src.get(f) for f in ("rule_id", "pdf_page", "appendix_page", "strength")}
+                            for src in g.sources]} for k, g in sorted(gov.items())}
 
 
 def normalized_segments(route) -> list:

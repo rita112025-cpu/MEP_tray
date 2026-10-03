@@ -56,7 +56,7 @@ BLOCK = "TRAY_SEG"
 TRAY_SEG_TAGS = ("ID", "WIDTH_MM", "HEIGHT_MM", "TYPE", "LENGTH_MM")   # 固定 ASCII；SCADA 端依此讀屬性，勿改
 CLASH_R_MM = 300.0
 LAYER_COLOR = {"MEP-TRAY-PWR": 6, "MEP-TRAY-SIG": 3, "MEP-TRAY-BODY": 8, "MEP-HANGER": 2, "MEP-CLASH": 1,
-               "MEP-NOTE": 7, "MEP-OBST-water": 5, "MEP-OBST-duct": 4, "MEP-OBST-heat": 30,
+               "MEP-NOTE": 7, "MEP-OBST-water": 5, "MEP-OBST-duct": 4, "MEP-OBST-heat": 30, "MEP-OBST-heat_bare": 10,
                "MEP-OBST-structure": 8, "MEP-OBST-tray_power": 6, "MEP-OBST-tray_signal": 3,
                "MEP-OBST-other": 9}
 

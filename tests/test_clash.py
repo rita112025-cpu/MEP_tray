@@ -89,7 +89,7 @@ def test_same_type_tray_uses_parallel_rule_and_other_type_uses_separation():
     sig = ob("trayS", "tray_signal", [1, 1.35, 2.95], [10, 1.65, 3.05])      # 淨距 200 < 300
     f2 = [x for x in check_route(inp([sig], tray_type="power"), STRAIGHT, GOV).findings
           if x.subject.startswith("trayS")][0]
-    assert f2.required == 300
+    assert f2.required == 500                 # ALL 含 MRT_APPX_C（C-048 未附屏蔽蓋 500）；CNS/NEC 為 300
 
 
 # ---------- 房間 ----------

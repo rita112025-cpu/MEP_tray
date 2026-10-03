@@ -34,7 +34,7 @@ class RoutingError(RuntimeError):
 @dataclass
 class Obstacle:
     name: str
-    kind: str          # water|duct|heat|structure|tray_power|tray_signal|other
+    kind: str          # water|duct|heat|heat_bare|structure|tray_power|tray_signal|other
     box: Box
 
 
@@ -55,6 +55,8 @@ def rule_key(kind: str, tray_type: str, rules: dict[str, Governing]) -> str:
         if kind.split("_")[1] != tray_type:
             return "sep_power_signal_mm"
         return "tray_parallel_mm" if "tray_parallel_mm" in rules else "side_clear_mm"
+    if kind == "heat_bare":                       # 無保溫熱源：有規範給值才用專用鍵，否則退回一般熱源淨距
+        return "clear_heat_bare_mm" if "clear_heat_bare_mm" in rules else "clear_heat_mm"
     return OBSTACLE_RULE.get(kind, "side_clear_mm")
 
 

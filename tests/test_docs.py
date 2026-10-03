@@ -102,7 +102,7 @@ def test_historical_records_carry_the_superseded_banner_at_the_top(name):
 def test_manual_rules_table_lists_exactly_the_codes_in_rules_json():
     import json
     codes = set(json.loads((ROOT / "mep_tray" / "rules.json").read_text(encoding="utf-8"))["codes"])
-    sec = text("MANUAL.md").split("## 規範表")[1].split("\n## ")[0]
+    sec = text("MANUAL.md").split("## 規範表")[1].split("\n## ")[0].split("\n### ")[0]
     rows = set(re.findall(r"^\| `(\w+)` \|", sec, re.M))
     assert rows == codes
     assert "回查原檔" in sec and "MRT_APPX_C" in text("MANUAL.md").split("## 8. 限制")[1]
@@ -119,4 +119,11 @@ def test_manual_discloses_routing_and_clearance_scope_limits():
     t = text("MANUAL.md")
     for kw in ("greedy shared-trunk", "不保證全域最佳解", "JSON 軸對齊 box",
                "clear_water_mm", "單軸最小位移"):
+        assert kw in t, kw
+
+
+def test_manual_documents_the_mrt_appendix_c_decisions():
+    t = text("MANUAL.md")
+    for kw in ("C-041", "1000", "C-048", "500", "屏蔽", "檢修空間", "heat_bare", "C-050", "SHOULD", "大於 100", "易燃爆氣體管",
+               "用電設備交越", "交叉 300", "PDF 頁碼"):
         assert kw in t, kw

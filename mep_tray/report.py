@@ -159,13 +159,19 @@ def _inputs(d: ReportData) -> str:
     return section("inputs", "輸入摘要", "\n".join(body))
 
 
+def _sources_text(g) -> str:
+    """勝出規範對該參數的出處：規則編號、PDF 頁、附錄頁、強度；多筆全部保留。無出處則「—」。"""
+    return "；".join(f"{s['rule_id']} PDF p.{s['pdf_page']}（{s['appendix_page']}，{s['strength']}）"
+                     for s in g.sources) or "—"
+
+
 def _governing(d: ReportData) -> str:
     rows = []
     for key, g in sorted(d.gov.items()):
         vals = "；".join(f"{c}={fmt(v)}" for c, v in g.all_values.items())
         rows.append((key, g.label, "下限（≥）" if g.direction == "min" else "上限（≤）", f"{fmt(g.value)} {g.unit}",
-                     g.code, g.clause, "已驗證" if g.verified else "未驗證", vals))
-    body = table(["參數", "名稱", "方向", "生效值", "勝出規範", "條文", "規範值狀態", "各規範原值"], rows,
+                     g.code, g.clause, "已驗證" if g.verified else "未驗證", vals, _sources_text(g)))
+    body = table(["參數", "名稱", "方向", "生效值", "勝出規範", "條文", "規範值狀態", "各規範原值", "出處"], rows,
                  "各參數採用最嚴格條件；勝出者為「生效值」的來源")
     return section("governing", "規範勝出表", body)
 
