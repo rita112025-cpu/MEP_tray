@@ -22,6 +22,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -129,17 +130,38 @@ def _remove_stage(stage: Path) -> str | None:
     return None
 
 
+# Windows 上，防毒/索引服務/剛關閉的檔案控制代碼可能「暫時」鎖住剛寫好的資料夾，使 os.rename 拋
+# PermissionError（WinError 5/32）。這是暫時性的，所以有限次重試（指數退避）；重試用盡才當成 io 錯誤。
+# 注意：「目的地已存在」不是暫時性的，每一輪都先檢查，絕不被重試吞掉。
+RENAME_ATTEMPTS = 5
+RENAME_BACKOFF_S = 0.05          # 第 n 次失敗後等待 0.05 * 2**n 秒（0.05, 0.1, 0.2, 0.4）
+_sleep = time.sleep              # 測試可替換，避免真的等待
+
+
+def _exists_error(final: Path) -> PipelineError:
+    return PipelineError("output", "run_exists", f"run_id 已存在，拒絕覆寫: {final.name}")
+
+
 def _publish(src: Path, final: Path) -> PipelineError | None:
-    """把組裝好的資料夾改名為 output/<run_id>。目的地已存在 → run_exists（既有資料夾不被改動）。"""
-    if os.path.lexists(final):
-        return PipelineError("output", "run_exists", f"run_id 已存在，拒絕覆寫: {final.name}")
-    try:
-        os.rename(src, final)
-    except OSError:
-        if os.path.lexists(final):                       # 競態：別人剛好先認領
-            return PipelineError("output", "run_exists", f"run_id 已存在，拒絕覆寫: {final.name}")
-        raise
-    return None
+    """把組裝好的資料夾改名為 output/<run_id>。目的地已存在 → run_exists（既有資料夾不被改動）。
+    暫時性的 PermissionError 有限次重試；其他 OSError 與重試用盡則往上拋（由呼叫端轉成 io 錯誤）。"""
+    for attempt in range(RENAME_ATTEMPTS):
+        if os.path.lexists(final):
+            return _exists_error(final)
+        try:
+            os.rename(src, final)
+            return None
+        except PermissionError:
+            if os.path.lexists(final):                   # 目的地出現（別人先認領）→ 不是暫時性鎖定
+                return _exists_error(final)
+            if attempt == RENAME_ATTEMPTS - 1:
+                raise
+            _sleep(RENAME_BACKOFF_S * (2 ** attempt))
+        except OSError:
+            if os.path.lexists(final):                   # 競態：別人剛好先認領
+                return _exists_error(final)
+            raise
+    return None                                          # 不會到這裡（最後一輪必定 return 或 raise）
 
 
 def _stats(route: Route, reports: dict, model: dict, span_m: float, span_source: str) -> dict:

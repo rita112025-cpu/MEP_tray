@@ -378,3 +378,56 @@ def test_determinism_holds_after_ezdxf_fallback_reimport(isolate, monkeypatch, t
         for k in [k for k in sys.modules if k == "ezdxf" or k.startswith("ezdxf.")]:
             del sys.modules[k]
         sys.modules.update(saved)
+
+
+# ---------- rename 暫時性 PermissionError 的有限重試 ----------
+def test_transient_permission_error_on_rename_is_retried_then_succeeds(isolate, monkeypatch):
+    real, calls, sleeps = os.rename, [], []
+
+    def flaky(src, dst):
+        calls.append(1)
+        if len(calls) <= 2:
+            raise PermissionError(5, "拒絕存取（模擬防毒暫時鎖定）")
+        return real(src, dst)
+
+    monkeypatch.setattr(P.os, "rename", flaky)
+    monkeypatch.setattr(P, "_sleep", sleeps.append)
+    r = P.run(sample(), ALL, "rt1", make_dwg=False)
+    assert r.ok and (isolate / "rt1" / "manifest.json").is_file()
+    assert len(calls) == 3 and sleeps == [P.RENAME_BACKOFF_S, P.RENAME_BACKOFF_S * 2]       # 指數退避
+    assert stages(isolate) == []
+
+
+def test_persistent_permission_error_gives_io_error_after_bounded_attempts_and_cleans_stage(isolate, monkeypatch):
+    calls, sleeps = [], []
+    monkeypatch.setattr(P.os, "rename", lambda s, d: (calls.append(1), boom(PermissionError(32, "locked"))())[1])
+    monkeypatch.setattr(P, "_sleep", sleeps.append)
+    r = P.run(sample(), ALL, "rt2", make_dwg=False)
+    assert r.ok is False and (r.error.stage, r.error.code) == ("io", "os_error")
+    assert len(calls) == P.RENAME_ATTEMPTS and len(sleeps) == P.RENAME_ATTEMPTS - 1
+    assert not (isolate / "rt2").exists() and stages(isolate) == [] and r.error.cleanup_failed is False
+
+
+def test_destination_appearing_during_retries_is_run_exists_and_not_retried_further(isolate, monkeypatch):
+    real, calls = os.rename, []
+
+    def appears(src, dst):
+        calls.append(1)
+        Path(dst).mkdir()
+        (Path(dst) / "theirs.txt").write_text("x")
+        raise PermissionError(5, "拒絕存取")                 # 與「暫時鎖定」長得一樣，但目的地已被別人認領
+
+    monkeypatch.setattr(P.os, "rename", appears)
+    monkeypatch.setattr(P, "_sleep", lambda s: pytest.fail("目的地已存在時不得重試/等待"))
+    r = P.run(sample(), ALL, "rt3", make_dwg=False)
+    assert r.ok is False and (r.error.stage, r.error.code) == ("output", "run_exists")
+    assert len(calls) == 1 and [p.name for p in (isolate / "rt3").iterdir()] == ["theirs.txt"]
+    assert stages(isolate) == []
+
+
+def test_non_permission_oserror_is_not_retried(isolate, monkeypatch):
+    calls = []
+    monkeypatch.setattr(P.os, "rename", lambda s, d: (calls.append(1), boom(OSError(28, "disk full"))())[1])
+    monkeypatch.setattr(P, "_sleep", lambda s: pytest.fail("非 PermissionError 不得重試"))
+    r = P.run(sample(), ALL, "rt4", make_dwg=False)
+    assert r.ok is False and r.error.code == "os_error" and len(calls) == 1 and stages(isolate) == []

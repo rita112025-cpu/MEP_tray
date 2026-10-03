@@ -90,7 +90,8 @@ SEALED = [{"name": "slab", "kind": "structure", "lo": [5, -1, -1], "hi": [5.3, 7
     ("bad type name", sample, ALL, {"type_name": "a" * 201}, "validate", "invalid_type_name"),
     ("misaligned", lambda: sample(start=(1.03, 1, 3)), ALL, {}, "route", "misaligned"),
     ("sealed, coarse grid", lambda: sample(obstacles=SEALED), ALL, {}, "route", "no_route"),
-    ("sealed, fine grid hits search cap", lambda: sample(obstacles=SEALED, cell_m=None), ALL, {}, "route", "search_limit"),
+    pytest.param("sealed, fine grid hits search cap", lambda: sample(obstacles=SEALED, cell_m=None), ALL, {},
+                 "route", "search_limit", marks=pytest.mark.slow),     # 自動格距掃完整個空間才放棄，約 8 秒
     ("grid too large", lambda: sample(room=((0, 0, 0), (100, 100, 10)), ends=[(90, 90, 3)], cell_m=0.05),
      ALL, {}, "route", "grid_too_large"),
     ("endpoint blocked", lambda: sample(obstacles=[{"name": "b", "kind": "structure", "lo": [9, 0, 2],
@@ -238,5 +239,6 @@ def test_dwg_conversions_are_serialised_across_concurrent_runs(monkeypatch, tmp_
     ts = [threading.Thread(target=work, args=(f"cc{i}",)) for i in range(3)]
     [t.start() for t in ts]
     [t.join() for t in ts]
-    assert all(r.ok and r.files["dwg"] is not None for r in results.values())
+    errors = {rid: (r.error.to_dict() if r.error else None) for rid, r in results.items()}    # 失敗時印出真因
+    assert all(r.ok and r.files["dwg"] is not None for r in results.values()), errors
     assert peak[0] == 1 and len(calls) == 6                    # 每個 run 兩趟，且從未同時執行
