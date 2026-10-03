@@ -1,3 +1,5 @@
+> **歷史紀錄。** 現況以 [MANUAL 第 8 節](MANUAL.md) 與 [INSTALL](INSTALL.md) 為準；本檔日期之後的 A–E 輪新增了網頁介面、版本管理與報告，下文凡寫「沒有 Web UI／未 commit／未 push」者已過時。
+
 # Revit manual acceptance update - 2026-10-03 (Asia/Taipei)
 
 Revit 2025.5 (25.5.0.57): installed add-in load, command invocation, Straight / Elbow / Tee / Cross creation and commit PASS. Four local reports have no Abort or warnings and fitting results are OK. Missing CableTrayType correctly aborts without creating elements.

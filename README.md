@@ -1,46 +1,25 @@
 # MEP Tray
 
-既有橋架路由與匯出專案：Python 核心負責 3D 正交路由、避障、共幹、吊架、幾何及規範檢查、DXF/DWG 匯出；`revit/` 提供 Cable Tray 匯入外掛。此 repo 目前沒有 Web UI、API server 或完整的使用者操作入口。
+MEP 電纜橋架智慧設計與衝突偵測工具（Python）：3D 正交路由、避障、共幹與分支、吊架間距、五套規範取最嚴格值檢查、碰撞與淨距、DXF／DWG 與 Revit 系統族匯入檔輸出、版本管理與比對、HTML 報告，並提供本機網頁介面。`revit/` 是 Revit Cable Tray 系統族建模匯入器（不是 .rfa）。
 
-## 開發與驗證
+> 規範值未驗證，不得視為合規；零問題不代表合規。
+> 本報告僅涵蓋本工具已實作之檢查項，不等同於完整法規合規審查。
 
-Python 3.12，依賴列於 `requirements.txt`；測試另需 pytest。
+## 快速開始（PowerShell 5.1）
 
 ```powershell
-python -m pip install -r requirements.txt pytest
-python -m pytest
-python -m pytest -m autocad
-python -m pytest -m revit
-python -m tests.benchmark
+python -m pip install -r requirements.txt
+python -m mep_tray.webui
 ```
 
-預設 pytest 排除 AutoCAD/Revit 整合測試。AutoCAD 測試會實際啟動本機 accoreconsole，並確認稽核及 DWG 檔頭；Revit marker 目前只有 C# 核心建置與跨語言 SelfTest，**不代表 Revit GUI 已驗證**。Windows 沙箱若限制暫存目錄，需要可寫的測試暫存目錄及相應執行權限；不要把權限錯誤當作測試通過。
+開啟終端機印出的網址即可操作。
 
-## 模組與單位
+## 文件
 
-- `model.py`：輸入資料；場景座標用公尺，橋架尺寸用毫米。
-- `rules.py` / `rules.json`：規範值與最嚴格合併；`verified=false` 只能回報 UNVERIFIED，不得視為合規。
-- `router.py` / `geometry.py`：路由、避障、共幹及吊架。
-- `clash.py` / `compliance.py`：幾何與規範檢查。
-- `export_dxf.py` / `acad.py`：DXF 與本機 AutoCAD/ODA 轉檔。
-- `export_revit.py`：毫米座標模型及接頭分類；`Fields.g.cs` 必須與 Python 產生器一致。
-- `paths.py`：限制輸出路徑，預設為 `output/<run_id>/`，拒絕路徑逸出及預設覆寫。
+- [安裝（INSTALL）](docs/INSTALL.md)：需求、測試分級、常見問題。
+- [使用手冊（MANUAL）](docs/MANUAL.md)：操作、障礙物格式、錯誤碼、報告讀法、規範表與限制。
+- [架構（ARCHITECTURE）](docs/ARCHITECTURE.md)：資料流、決定性、安全邊界、擴充點。
+- [驗證狀態（VERIFICATION）](docs/VERIFICATION.md)：Revit／AutoCAD 實機驗證紀錄（歷史紀錄）。
+- [交接（HANDOFF）](docs/HANDOFF.md)：早期交接與 benchmark（歷史紀錄）。
 
-## Revit acceptance status
-
-2026-10-03: Revit 2025.5 (25.5.0.57) add-in load, command invocation and Straight / Elbow / Tee / Cross creation/commit PASS. Save, close and reopen persistence PASS by human confirmation and screenshot. Missing CableTrayType error handling PASS.
-
-Numerical dimensions, endpoints and Comments readback, Project Base Point, additional rollback/error paths and Revit 2027 remain UNVERIFIED. Independent Core SelfTest remains BLOCKED by the previously recorded Code Integrity error; successful Revit imports do not substitute for that test. The installed artifact retains its earlier conservative disclosure text; current acceptance evidence is recorded in [VERIFICATION.md](docs/VERIFICATION.md).
-
-Earlier automated validation: Python 134 tests, AutoCAD integration 4 tests, compileall and C# builds passed. Shared Coordinates, Survey Point, Link transform and arbitrary model transforms remain unsupported.
-
-
-外掛的正式入口為 `ImportCommand`，使用檔案選擇器匯入模型。需有開啟的 Revit 專案、Level 與模型指定的 CableTrayType；未指定座標基準時由使用者選擇。Shared coordinates 尚未支援；非零模型原點、非標準座標軸及旋轉會在驗證階段拒絕。
-
-已實作的座標處理僅有：`INTERNAL_ORIGIN` 把毫米換成英呎並直接使用內部座標；`PROJECT_BASE_POINT` 在同樣換算後加上 `BasePoint.Position`，只做位置平移，保持內部軸向，不套用 Project North／True North 旋轉。兩條 Revit runtime 路徑均尚未實機驗證。此能力不是完整 Revit coordinate transform 支援。
-
-建置需本機 .NET SDK 與 Revit API，依安裝目錄 runtimeconfig 選擇目標框架，不能用已存在的 DLL 證明新版可以執行。正式使用 `MepTray.addin`；`MepTray.AutoRun.addin` 與 `tests/revit_live.py` 僅供專用實機測試，會建立暫時外掛、啟動並關閉 Revit，不應直接安裝到日常工作環境。
-
-本輪接手證據、測試限制與 benchmark 見 [docs/HANDOFF.md](docs/HANDOFF.md)。
-
-本輪 verification matrix、null/topology 覆蓋範圍、blocked binary 證據及可直接重跑的 Windows 命令見 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
+Revit 只驗證到 2025.5 的建立與儲存重開；尺寸／端點／Comments 讀回與 Revit 2027 為未驗證，詳見 VERIFICATION。

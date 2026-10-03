@@ -31,7 +31,7 @@ pip install -r requirements.txt
 python -m pytest -q
 ```
 
-預期：全數通過；有一個測試會因本機不支援符號連結而 skip。
+預期：全數通過；在不支援符號連結的機器上會有一個測試 skip。
 
 ## 3. 啟動網頁介面
 

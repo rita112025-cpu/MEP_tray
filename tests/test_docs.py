@@ -80,3 +80,36 @@ def test_architecture_mentions_every_module_and_existing_tests():
         assert f.stem in t, f.stem
     for ref in set(re.findall(r"`(tests/[\w./]+\.py)`", t)):
         assert (ROOT / ref).exists(), ref
+
+
+# ───────────── README、歷史紀錄橫幅、規範表 ─────────────
+def test_readme_is_a_current_entry_point_with_disclosure_and_valid_links():
+    t = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert D.BANNER_FIXED in t and D.SCOPE_NOTE in t and "python -m mep_tray.webui" in t
+    assert "沒有 Web UI" not in t and "沒有 Web UI、API server" not in t
+    for name in NAMES + ("VERIFICATION.md", "HANDOFF.md"):
+        assert f"docs/{name}" in t, name
+    for target in re.findall(r"\]\(([^)#\s]+)\)", t):
+        assert (ROOT / target).exists(), target
+
+
+@pytest.mark.parametrize("name", ("HANDOFF.md", "VERIFICATION.md"))
+def test_historical_records_carry_the_superseded_banner_at_the_top(name):
+    head = text(name)[:400]
+    assert head.lstrip().startswith("> **歷史紀錄。**") and "MANUAL 第 8 節" in head and "A–E 輪" in head
+
+
+def test_manual_rules_table_lists_exactly_the_codes_in_rules_json():
+    import json
+    codes = set(json.loads((ROOT / "mep_tray" / "rules.json").read_text(encoding="utf-8"))["codes"])
+    sec = text("MANUAL.md").split("## 規範表")[1].split("\n## ")[0]
+    rows = set(re.findall(r"^\| `(\w+)` \|", sec, re.M))
+    assert rows == codes
+    assert "回查原檔" in sec and "MRT_APPX_C" in text("MANUAL.md").split("## 8. 限制")[1]
+
+
+def test_docs_do_not_claim_six_slow_tests_or_a_certain_symlink_skip():
+    for name in NAMES:
+        t = text(name)
+        assert not re.search(r"6 個\s*slow|六個\s*slow", t), name
+    assert "在不支援符號連結的機器上會有一個測試 skip" in text("INSTALL.md")

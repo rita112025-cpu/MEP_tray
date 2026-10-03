@@ -1,3 +1,5 @@
+> **歷史紀錄。** 現況以 [MANUAL 第 8 節](MANUAL.md) 與 [INSTALL](INSTALL.md) 為準；本檔日期之後的 A–E 輪新增了網頁介面、版本管理與報告，下文凡寫「沒有 Web UI／未 commit／未 push」者已過時。
+
 # Revit / C# Verification Gate
 
 本輪只驗證與修正既有路徑，不新增產品功能。所有下表 runtime 狀態與 build 分開；Python baseline 122 tests 與第一次 benchmark 留在 HANDOFF。
