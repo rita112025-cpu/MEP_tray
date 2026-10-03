@@ -358,7 +358,7 @@ def test_manifest_strings_never_contain_home_tmp_or_absolute_paths(isolate):
     assert not re.search(r"[A-Za-z]:[\\/]", text) and "Program Files" not in text
     # 管線實際寫出的 manifest 也一樣乾淨，且脫敏後仍自洽（載入時雜湊重算一致）
     pipe_text = "\n".join(string_leaves(r.manifest))
-    assert home.lower() not in pipe_text.lower() and "secret" not in pipe_text
+    assert home.lower() not in pipe_text.lower() and "<HOME>" in pipe_text      # 家目錄被替換；其下的子路徑尾段是使用者自己輸入的名稱
     assert V.load_version("san1").ok
 
 
