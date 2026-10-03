@@ -127,3 +127,11 @@ def test_manual_documents_the_mrt_appendix_c_decisions():
     for kw in ("C-041", "1000", "C-048", "500", "屏蔽", "檢修空間", "heat_bare", "C-050", "SHOULD", "大於 100", "易燃爆氣體管",
                "用電設備交越", "交叉 300", "PDF 頁碼"):
         assert kw in t, kw
+
+
+def test_manual_documents_cable_tray_support_fill_and_layer_rules():
+    t = text("MANUAL.md")
+    for kw in ("1000", "255", "2400", "NEMA VE1", "第三層", "最多兩層", "1.15.2 (1) F", "p.1-57", "用戶用電設備裝置規則",
+               "接地匯流排", "不是 Cable Tray 填充率", "尚未自動檢核", "不是本工程允許的托架安裝間距"):
+        assert kw in t, kw
+    assert "fill ratio 維持 null" in t

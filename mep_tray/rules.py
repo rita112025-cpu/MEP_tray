@@ -29,7 +29,8 @@ UNIT_SUFFIX = {"_mm": "mm", "_m": "m"}
 UNITS = {"ratio", "m", "mm", "xOD"}
 SOURCE_STRENGTHS = {"MUST", "SHOULD"}          # 條文強度：必須 / 宜
 SOURCE_RULE_ID_RE = re.compile(r"^C-\d{3}$")
-SOURCE_FIELDS = ("rule_id", "pdf_page", "appendix_page", "strength", "note")
+SOURCE_FIELDS = ("rule_id", "pdf_page", "appendix_page", "strength", "note")     # 附錄C 形式
+SOURCE_DOC_FIELDS = ("document", "section", "document_page", "strength", "note")  # 其他文件形式（有 document 欄位者）
 
 
 def _check_sources(c: str, info: dict, params: dict, errs: list) -> None:
@@ -55,16 +56,23 @@ def _check_sources(c: str, info: dict, params: dict, errs: list) -> None:
             if not isinstance(src, dict):
                 errs.append(f"{w}: 需為物件")
                 continue
-            for f in SOURCE_FIELDS:
+            doc_form = "document" in src
+            for f in (SOURCE_DOC_FIELDS if doc_form else SOURCE_FIELDS):
                 if f not in src:
                     errs.append(f"{w}: 缺欄位 {f}")
-            rid, pg, ap, st, note = (src.get(f) for f in SOURCE_FIELDS)
-            if "rule_id" in src and not (isinstance(rid, str) and SOURCE_RULE_ID_RE.match(rid)):
-                errs.append(f"{w}.rule_id: 格式需為 C-001")
-            if "pdf_page" in src and (isinstance(pg, bool) or not isinstance(pg, int) or pg <= 0):
-                errs.append(f"{w}.pdf_page: 需為正整數")
-            if "appendix_page" in src and not (isinstance(ap, str) and ap.strip()):
-                errs.append(f"{w}.appendix_page: 需為非空字串")
+            st, note = src.get("strength"), src.get("note")
+            if doc_form:
+                for f in ("document", "section", "document_page"):
+                    if f in src and not (isinstance(src[f], str) and src[f].strip()):
+                        errs.append(f"{w}.{f}: 需為非空字串")
+            else:
+                rid, pg, ap = (src.get(f) for f in ("rule_id", "pdf_page", "appendix_page"))
+                if "rule_id" in src and not (isinstance(rid, str) and SOURCE_RULE_ID_RE.match(rid)):
+                    errs.append(f"{w}.rule_id: 格式需為 C-001")
+                if "pdf_page" in src and (isinstance(pg, bool) or not isinstance(pg, int) or pg <= 0):
+                    errs.append(f"{w}.pdf_page: 需為正整數")
+                if "appendix_page" in src and not (isinstance(ap, str) and ap.strip()):
+                    errs.append(f"{w}.appendix_page: 需為非空字串")
             if "strength" in src and st not in SOURCE_STRENGTHS:
                 errs.append(f"{w}.strength: 需為 {sorted(SOURCE_STRENGTHS)}")
             if "note" in src and not isinstance(note, str):

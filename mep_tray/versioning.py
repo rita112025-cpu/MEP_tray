@@ -130,11 +130,13 @@ def input_hash(inp, codes, **opts) -> str:
     return hash_obj(input_material(inp, codes, **opts))
 
 
+SNAPSHOT_SOURCE_FIELDS = ("rule_id", "pdf_page", "appendix_page", "document", "section", "document_page", "strength")
+
+
 def gov_snapshot(gov: dict) -> dict:
     return {k: {"label": g.label, "unit": g.unit, "direction": g.direction, "value": g.value,
                 "code": g.code, "clause": g.clause, "verified": g.verified,
-                "sources": [{f: src.get(f) for f in ("rule_id", "pdf_page", "appendix_page", "strength")}
-                            for src in g.sources]} for k, g in sorted(gov.items())}
+                "sources": [{f: src[f] for f in SNAPSHOT_SOURCE_FIELDS if f in src} for src in g.sources]} for k, g in sorted(gov.items())}
 
 
 def normalized_segments(route) -> list:

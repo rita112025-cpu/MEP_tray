@@ -161,8 +161,11 @@ def _inputs(d: ReportData) -> str:
 
 def _sources_text(g) -> str:
     """勝出規範對該參數的出處：規則編號、PDF 頁、附錄頁、強度；多筆全部保留。無出處則「—」。"""
-    return "；".join(f"{s['rule_id']} PDF p.{s['pdf_page']}（{s['appendix_page']}，{s['strength']}）"
-                     for s in g.sources) or "—"
+    def one(s):
+        if "document" in s:
+            return f"{s['document']} {s['section']} p.{s['document_page']}（{s['strength']}）"
+        return f"{s['rule_id']} PDF p.{s['pdf_page']}（{s['appendix_page']}，{s['strength']}）"
+    return "；".join(one(s) for s in g.sources) or "—"
 
 
 def _governing(d: ReportData) -> str:
