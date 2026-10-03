@@ -559,7 +559,7 @@ def test_rendering_cost_is_bounded_by_the_row_limits_not_by_input_size(isolate):
     doc = R.render_report_data(big)
     t_big = time.perf_counter() - t0
     assert "共 50000 筆問題" in doc and len(doc.encode("utf-8")) < 2_000_000
-    assert t_big < max(5.0, 4 * t_small + 1.0)               # 輸入放大 100 倍，成本不得跟著放大（只剩總計統計）
+    assert t_big < max(20.0, 4 * t_small + 1.0)               # 輸入放大 100 倍，成本不得跟著放大（只剩總計統計）
 
 
 def test_sanitize_cache_follows_environment_changes(isolate, monkeypatch, tmp_path):

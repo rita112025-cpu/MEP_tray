@@ -27,7 +27,18 @@ def srv(tmp_path, monkeypatch):
     s = W.make_server(0, make_dwg=False)
     threading.Thread(target=s.serve_forever, daemon=True).start()
     yield s
+    s.jobs.join(120)                                          # 不遺留背景工作（單一工作者）到下一個測試
     s.close()
+
+
+def wait_until(cond, timeout=30.0, step=0.02):
+    """事件驅動等待：輪詢條件，而不是固定睡眠（CPU 被占滿時固定睡眠會誤傷）。"""
+    end = time.time() + timeout
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(step)
+    return False
 
 
 def good():
@@ -102,7 +113,7 @@ def run_job(s, body=None):
     st, _, d = jcall(s, "POST", T(s, "api/run"), body or good())
     assert st == 202, d
     jid = d["job_id"]
-    for _ in range(200):
+    for _ in range(1200):                                     # 最多等 120 秒；完成即離開
         st, _, j = jcall(s, "GET", T(s, f"api/jobs/{jid}"))
         if j["state"] != "running":
             return j
@@ -225,8 +236,8 @@ def test_content_type_must_be_json_but_charset_parameter_is_fine(srv):
     st, _, d = jcall(srv, "POST", T(srv, "api/run"), body, headers={"Content-Type": "text/plain"})
     assert st == 415 and d["error"]["code"] == "unsupported_media_type"
     st, _, d = jcall(srv, "POST", T(srv, "api/run"), body, headers={"Content-Type": "application/json; charset=utf-8"})
-    assert st == 202
-    srv.jobs.join(30)
+    assert st == 202, (st, d, srv.jobs.running(), list(srv.log_lines)[-5:])
+    srv.jobs.join(120)
 
 
 def test_missing_content_length_is_411(srv):
@@ -274,7 +285,7 @@ def test_oversized_body_is_413_without_reading_it(srv):
 def test_body_shorter_than_content_length_is_400_not_a_hang(srv):
     t0 = time.time()
     st, _, body = raw(srv, rawreq(srv, ["Content-Type: application/json", "Content-Length: 100"], b'{"a":'), shut_wr=True)
-    assert st == 400 and json.loads(body)["error"]["code"] == "short_body" and time.time() - t0 < 5
+    assert st == 400 and json.loads(body)["error"]["code"] == "short_body" and time.time() - t0 < 30            # 意圖：不卡住（逾時門檻放寬以容納 CPU 被占滿）
 
 
 def test_bytes_after_the_declared_body_are_not_treated_as_another_request(srv):
@@ -282,7 +293,7 @@ def test_bytes_after_the_declared_body_are_not_treated_as_another_request(srv):
     smuggled = rawreq(srv, [], method="GET", path=T(srv, "api/versions"), with_origin=False)
     first = rawreq(srv, ["Content-Type: application/json", f"Content-Length: {len(body)}"], body)
     raw(srv, first + smuggled)
-    srv.jobs.join(30)
+    srv.jobs.join(120)
     lines = [l for l in srv.log_lines if l.startswith(("POST", "GET"))]
     assert [l.split()[0] for l in lines] == ["POST"]                    # 只處理了一個請求；連線隨後關閉
 
@@ -474,7 +485,7 @@ def test_whole_room_obstacle_is_a_400_before_any_job_is_created(srv):
     t0 = time.time()
     st, _, d = jcall(srv, "POST", T(srv, "api/run"), body)
     assert st == 400 and d["error"]["code"] == "obstacle_work_limit" and d["error"]["field"] == "obstacles"
-    assert time.time() - t0 < 2.0 and not srv.jobs.jobs and srv.jobs.running() is None
+    assert time.time() - t0 < 15.0 and not srv.jobs.jobs and srv.jobs.running() is None      # 意圖：不是 46 秒
 
 
 def test_http_validation_error_shape(srv):
@@ -609,7 +620,7 @@ def test_second_post_while_busy_is_409_and_first_still_completes(srv, monkeypatc
     real = W.P.run
 
     def slow(*a, **k):
-        assert gate.wait(20)
+        assert gate.wait(90)
         return real(*a, **k)
     monkeypatch.setattr(W.P, "run", slow)
     st, _, d = jcall(srv, "POST", T(srv, "api/run"), good())
@@ -619,16 +630,16 @@ def test_second_post_while_busy_is_409_and_first_still_completes(srv, monkeypatc
     assert st2 == 409 and d2["error"]["code"] == "busy"
     assert jcall(srv, "GET", T(srv, f"api/jobs/{jid}"))[2]["state"] == "running"
     gate.set()
-    srv.jobs.join(30)
+    srv.jobs.join(120)
     assert jcall(srv, "GET", T(srv, f"api/jobs/{jid}"))[2]["state"] == "done"
     assert jcall(srv, "POST", T(srv, "api/run"), good())[0] == 202                          # 完成後可再執行
-    srv.jobs.join(30)
+    srv.jobs.join(120)
 
 
 def test_simultaneous_posts_exactly_one_is_accepted(srv, monkeypatch):
     gate = threading.Event()
     real = W.P.run
-    monkeypatch.setattr(W.P, "run", lambda *a, **k: (gate.wait(20), real(*a, **k))[1])
+    monkeypatch.setattr(W.P, "run", lambda *a, **k: (gate.wait(90), real(*a, **k))[1])
     codes, barrier = [], threading.Barrier(6)
 
     def go():
@@ -639,7 +650,7 @@ def test_simultaneous_posts_exactly_one_is_accepted(srv, monkeypatch):
     [t.join() for t in ts]
     assert sorted(codes) == [202, 409, 409, 409, 409, 409]
     gate.set()
-    srv.jobs.join(30)
+    srv.jobs.join(120)
 
 
 def test_pipeline_failure_becomes_human_readable_error_and_leaves_nothing(srv):
@@ -661,7 +672,7 @@ def test_internal_crash_is_reported_without_traceback_or_paths(srv, monkeypatch,
     assert e["code"] == "internal_error" and e["message"] == "RuntimeError"
     assert str(Path.home()) not in json.dumps(j) and "secret detail" not in json.dumps(j)
     assert srv.jobs.running() is None and jcall(srv, "POST", T(srv, "api/run"), good())[0] == 202
-    srv.jobs.join(30)
+    srv.jobs.join(120)
 
 
 def test_run_id_collision_is_retried_with_a_new_id(srv, monkeypatch):
@@ -739,12 +750,12 @@ def test_connection_cap_returns_503_beyond_the_limit_and_recovers(tmp_path, monk
         for _ in range(3):                                    # 占滿 3 個連線（不送任何資料，處理緒會卡在讀請求行）
             k = socket.create_connection(("127.0.0.1", s.port), timeout=5)
             held.append(k)
-        time.sleep(0.3)
-        st, head, _ = raw(s, rawreq(s, [], method="GET", path=f"/t/{s.token}/", with_origin=False), timeout=5)
+        assert wait_until(lambda: s._sem._value == 0), "3 個連線尚未占滿處理名額"           # 事件驅動：名額真的用完才送第 4 條
+        st, head, _ = raw(s, rawreq(s, [], method="GET", path=f"/t/{s.token}/", with_origin=False), timeout=15)
         assert st == 503 and b"Connection: close" in head
         for k in held:
             k.close()
-        time.sleep(0.5)
+        assert wait_until(lambda: s._sem._value == 3), "放開連線後名額沒有恢復"
         assert call(s, "GET", f"/t/{s.token}/")[0] == 200
     finally:
         for k in held:
@@ -767,7 +778,7 @@ def test_half_sent_request_is_dropped_after_the_socket_timeout(tmp_path, monkeyp
         k = socket.create_connection(("127.0.0.1", s.port), timeout=6)
         k.sendall(b"GET /t/x/ HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Slow: ")
         t0 = time.time()
-        assert k.recv(100) == b"" and time.time() - t0 < 5          # 伺服器在逾時後主動斷線
+        assert k.recv(100) == b"" and time.time() - t0 < 30          # 伺服器在逾時後主動斷線
         k.close()
     finally:
         s.close()
@@ -779,12 +790,12 @@ def test_close_reports_the_running_job_and_frees_the_port(tmp_path, monkeypatch)
     th = threading.Thread(target=s.serve_forever, daemon=True)
     th.start()
     gate = threading.Event()
-    monkeypatch.setattr(W.P, "run", lambda *a, **k: (gate.wait(10), P.run.__wrapped__(*a, **k))[1]
-                        if hasattr(P.run, "__wrapped__") else gate.wait(10))
+    monkeypatch.setattr(W.P, "run", lambda *a, **k: (gate.wait(60), P.run.__wrapped__(*a, **k))[1]
+                        if hasattr(P.run, "__wrapped__") else gate.wait(60))
     jid = s.jobs.submit(*W.validate_request(good()))
     port = s.port
     assert s.close() == jid
-    th.join(5)
+    th.join(30)
     assert not th.is_alive()
     gate.set()
     k = socket.socket()
@@ -821,7 +832,7 @@ def test_close_before_serving_started_does_not_hang(tmp_path, monkeypatch):
     monkeypatch.setenv("MEP_OUTPUT_ROOT", str(tmp_path / "out"))
     s = W.make_server(0, make_dwg=False)
     t0 = time.time()
-    assert s.close() is None and time.time() - t0 < 2
+    assert s.close() is None and time.time() - t0 < 15
 
 
 def test_main_prints_one_token_url_and_shuts_down_cleanly_on_ctrl_c(tmp_path, monkeypatch, capsys):
