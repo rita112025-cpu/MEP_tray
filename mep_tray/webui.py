@@ -354,7 +354,8 @@ padding:16px;line-height:1.5;color:#111;background:#fff}
 h1{font-size:1.4rem;margin:.2em 0 .6em}h2{font-size:1.1rem;border-bottom:2px solid #444;padding-bottom:.2em}
 section{margin:1.4em 0}fieldset{border:1px solid #888;margin:.8em 0;padding:.6em .9em;min-width:0}
 legend{font-weight:bold;padding:0 .3em}
-.row{display:flex;flex-wrap:wrap;gap:.6em 1em}.row label{display:flex;flex-direction:column;font-size:.9rem;min-width:0}
+.row{display:flex;flex-wrap:wrap;gap:.6em 1em;align-items:flex-end}.field{display:flex;flex-direction:column;min-width:0}
+.field label,.choice label{font-size:.9rem}.choice{display:inline-flex;gap:.4em;align-items:center;margin:.15em .8em .15em 0}
 input,select,button{font:inherit;padding:.35em .5em;min-width:0;max-width:100%}
 input[type=number]{width:7.5em}input[aria-invalid=true]{border:2px solid #000;background:#ffe9e9}
 .err{font-weight:bold;margin:.3em 0}.err::before{content:"✖ "}.hint{font-size:.85rem;color:#333}
@@ -371,7 +372,7 @@ APP_JS = r"""
 (function () {
   "use strict";
   var $ = function (id) { return document.getElementById(id); };
-  var obstacles = null, busy = false;
+  var obstacles = null, obstaclesBad = false, busy = false;
   var FIELD_MAP = {codes: "codes", cell_m: "cell_m", obstacles: "obstacle_file", "tray.kind": "tray_kind_power"};
 
   function text(tag, str, cls) { var e = document.createElement(tag); e.textContent = str; if (cls) e.className = cls; return e; }
@@ -479,10 +480,10 @@ APP_JS = r"""
   }
 
   $("obstacle_file").addEventListener("change", function (ev) {
-    var f = ev.target.files[0], out = $("obstacle_status"); obstacles = null; out.textContent = "";
+    var f = ev.target.files[0], out = $("obstacle_status"); obstacles = null; obstaclesBad = false; out.textContent = "";
     ev.target.removeAttribute("aria-invalid");
     if (!f) return;
-    if (f.size > 262144) { out.textContent = "✖ 檔案超過 256 KB"; ev.target.setAttribute("aria-invalid", "true"); return; }
+    if (f.size > 262144) { obstaclesBad = true; out.textContent = "✖ 檔案超過 256 KB"; ev.target.setAttribute("aria-invalid", "true"); return; }
     var rd = new FileReader();
     rd.onload = function () {
       try {
@@ -491,9 +492,9 @@ APP_JS = r"""
         if (!Array.isArray(j)) throw new Error("需為清單");
         if (j.length > 200) throw new Error("最多 200 個障礙物");
         obstacles = j; out.textContent = "已載入 " + j.length + " 個障礙物";
-      } catch (e) { out.textContent = "✖ 不是合法的障礙物 JSON：" + e.message; ev.target.setAttribute("aria-invalid", "true"); }
+      } catch (e) { obstaclesBad = true; out.textContent = "✖ 不是合法的障礙物 JSON：" + e.message; ev.target.setAttribute("aria-invalid", "true"); }
     };
-    rd.onerror = function () { out.textContent = "✖ 讀取檔案失敗"; };
+    rd.onerror = function () { obstaclesBad = true; out.textContent = "✖ 讀取檔案失敗"; ev.target.setAttribute("aria-invalid", "true"); };
     rd.readAsText(f);
   });
 
@@ -501,7 +502,8 @@ APP_JS = r"""
     ev.preventDefault();
     if (busy) return;
     clearErrors(); clear($("results"));
-    if ($("obstacle_file").getAttribute("aria-invalid") === "true") { showError("障礙物檔案有問題，請更正或移除後再執行。", "obstacles"); return; }
+    // 用狀態變數判斷（clearErrors 已清掉 aria-invalid；壞檔案不得被靜默忽略後照常執行）
+    if (obstaclesBad) { showError("障礙物檔案有問題，請更正或移除後再執行（目前不會送出）。", "obstacles"); return; }
     var req = buildRequest();
     if (!req.codes.length) { showError("請至少勾選一套規範。", "codes"); return; }
     setBusy(true); status("送出中…");
@@ -520,24 +522,33 @@ APP_JS = r"""
 
 
 def render_index(token: str, rules: dict) -> str:
+    """頁面。所有控制項都用明確的 <label for=id> 對應（不用「包住輸入框」的標籤），且名稱唯一，
+    螢幕閱讀器才不會唸出一堆重複的「X (m)」或只有值的名稱（瀏覽器實測抓到的問題）。"""
     def esc(s):
         return html.escape(str(s), quote=True)
 
-    def num(i, label, val, step="any", lo=None):
-        return (f'<label for="{i}">{esc(label)}<input id="{i}" name="{i}" type="number" step="{step}" '
-                f'inputmode="decimal" value="{esc(val)}"></label>')
+    def field(i, label, control):
+        return f'<span class="field"><label for="{i}">{esc(label)}</label>{control}</span>'
 
-    def xyz(prefix, title, vals, optional=False):
-        cells = "".join(num(f"{prefix}_{a}", f"{a.upper()} (m)", v) for a, v in zip("xyz", vals))
+    def num(i, label, val, step="any"):
+        return field(i, label, f'<input id="{i}" name="{i}" type="number" step="{step}" inputmode="decimal" value="{esc(val)}">')
+
+    def xyz(prefix, title, vals):
+        cells = "".join(num(f"{prefix}_{a}", f"{title} {a.upper()} (m)", v) for a, v in zip("xyz", vals))
         return f'<div class="row" role="group" aria-label="{esc(title)}">{cells}</div>'
 
     codes = "".join(
-        f'<label><input type="checkbox" name="code" value="{esc(k)}" checked> {esc(k)}：{esc(v["name"])}</label><br>'
+        f'<div class="choice"><input type="checkbox" id="code_{esc(k)}" name="code" value="{esc(k)}" checked>'
+        f'<label for="code_{esc(k)}">{esc(k)}：{esc(v["name"])}</label></div>'
         for k, v in rules["codes"].items())
     ends = "".join(f'<p class="hint">終點 {i + 1}{"（必填）" if i == 0 else "（選填，留空略過）"}</p>'
                    + xyz(f"ends{i}", f"終點 {i + 1}", ((10, 1, 3) if i == 0 else ("", "", "")))
                    for i in range(MAX_END_POINTS))
     cells = "".join(f'<option value="{c:g}"{" selected" if c == 0.25 else ""}>{c:g} m</option>' for c in CELLS)
+    kinds = ('<span class="choice"><input type="radio" name="tray_kind" id="tray_kind_power" value="power" checked>'
+             '<label for="tray_kind_power">電力橋架</label></span>'
+             '<span class="choice"><input type="radio" name="tray_kind" id="tray_kind_signal" value="signal">'
+             '<label for="tray_kind_signal">訊號橋架</label></span>')
     return f"""<!DOCTYPE html>
 <html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MEP 電纜橋架智慧設計工具</title><link rel="stylesheet" href="app.css"></head>
@@ -546,17 +557,16 @@ def render_index(token: str, rules: dict) -> str:
 <form id="form" novalidate>
 <section aria-labelledby="h-size"><h2 id="h-size">① 尺寸輸入</h2>
 <div id="form-errors" role="alert"></div>
-<fieldset><legend>房間（公尺）</legend>{xyz("room", "房間長寬高", (12, 6, 4))}</fieldset>
-<fieldset><legend>橋架</legend><div class="row">{num("tray_width_mm", "寬 (mm)", 300)}{num("tray_height_mm", "高 (mm)", 100)}
-<span role="radiogroup" aria-label="橋架類型"><label><input type="radio" name="tray_kind" id="tray_kind_power" value="power" checked> 電力</label>
-<label><input type="radio" name="tray_kind" value="signal"> 訊號</label></span></div></fieldset>
+<fieldset><legend>房間（公尺）</legend>{xyz("room", "房間", (12, 6, 4))}</fieldset>
+<fieldset><legend>橋架</legend><div class="row">{num("tray_width_mm", "橋架寬 (mm)", 300)}{num("tray_height_mm", "橋架高 (mm)", 100)}
+<div role="radiogroup" aria-label="橋架類型" class="row">{kinds}</div></div></fieldset>
 <fieldset><legend>起點與終點（公尺）</legend><p class="hint">起訖座標需為格距的整數倍。</p>
 <p class="hint">起點</p>{xyz("start", "起點", (1, 1, 3))}{ends}</fieldset>
 <fieldset><legend>電纜（選填；不填則以預設電纜 Ø20 mm × 10 條計算並在報告揭露）</legend><div class="row">
-{num("cable_od_mm", "外徑 (mm)", "")}{num("cable_count", "條數", "", step="1")}</div></fieldset>
+{num("cable_od_mm", "電纜外徑 (mm)", "")}{num("cable_count", "電纜條數", "", step="1")}</div></fieldset>
 <fieldset><legend>格距與障礙物</legend><div class="row">
-<label for="cell_m">格距<select id="cell_m" name="cell_m">{cells}</select></label>
-<label for="obstacle_file">障礙物 JSON 檔（選填；不上傳＝空房間）<input id="obstacle_file" type="file" accept=".json,application/json"></label></div>
+{field("cell_m", "格距", f'<select id="cell_m" name="cell_m">{cells}</select>')}
+{field("obstacle_file", "障礙物 JSON 檔（選填；不上傳＝空房間）", '<input id="obstacle_file" type="file" accept=".json,application/json" aria-describedby="obstacle_status">')}</div>
 <p id="obstacle_status" class="hint" role="status"></p>
 <p class="hint">0.25 m 約數秒；0.1 m 可能需數十秒；0.05 m 僅小房間可選。</p></fieldset></section>
 <section aria-labelledby="h-codes"><h2 id="h-codes">② 規範勾選</h2>
@@ -599,6 +609,14 @@ class WebServer(ThreadingHTTPServer):
         if not self._sem.acquire(blocking=False):                  # 連線數上限：超過直接 503 並關閉
             try:
                 request.sendall(b"HTTP/1.0 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+                # 先半關閉寫入端並短暫讀掉客戶端還在送的資料，再關閉：直接 close 在 Windows 會送 RST，
+                # 503 可能在被客戶端讀到之前就被丟棄（整套測試負載下實測偶發）。
+                request.shutdown(socket.SHUT_WR)
+                request.settimeout(0.3)
+                try:
+                    request.recv(65536)
+                except OSError:
+                    pass
             except OSError:
                 pass
             self.shutdown_request(request)

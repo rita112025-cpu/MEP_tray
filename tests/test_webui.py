@@ -66,9 +66,12 @@ def T(s, rest=""):
 
 def raw(s, payload: bytes, shut_wr=False, timeout=6):
     k = socket.create_connection(("127.0.0.1", s.port), timeout=timeout)
-    k.sendall(payload)
-    if shut_wr:
-        k.shutdown(socket.SHUT_WR)
+    try:
+        k.sendall(payload)
+        if shut_wr:
+            k.shutdown(socket.SHUT_WR)
+    except ConnectionError:                                   # 伺服器可能在我們送完之前就回應並關閉（例如 503/413）
+        pass
     chunks = []
     try:
         while True:
@@ -76,7 +79,7 @@ def raw(s, payload: bytes, shut_wr=False, timeout=6):
             if not c:
                 break
             chunks.append(c)
-    except (socket.timeout, ConnectionResetError):
+    except (socket.timeout, ConnectionError):
         pass
     k.close()
     data = b"".join(chunks)
@@ -125,13 +128,22 @@ def test_index_has_exactly_the_four_blocks_and_safe_headers(srv):
     assert "<noscript>" in html_ and BANNER_FIXED in html_
 
 
-def test_every_input_has_a_label_and_checkboxes_follow_rules(srv):
+def test_every_control_has_a_unique_explicit_label_and_checkboxes_follow_rules(srv):
     html_ = call(srv, "GET", T(srv))[2].decode("utf-8")
-    ids = re.findall(r'<input id="([^"]+)"', html_) + re.findall(r'<select id="([^"]+)"', html_)
+    ids = re.findall(r'<(?:input|select)[^>]*?id="([^"]+)"', html_)
+    assert len(ids) == len(set(ids)) and len(ids) >= 25
+    names = {}
     for i in ids:
-        assert f'for="{i}"' in html_, i
-    for code in load_rules()["codes"]:
-        assert f'value="{code}"' in html_
+        m = re.search(rf'<label for="{re.escape(i)}">([^<]+)</label>', html_)
+        assert m, f"{i} 沒有明確的 <label for>"
+        names[i] = m.group(1)
+    assert len(set(names.values())) == len(names), "無障礙名稱重複"         # 例如不得有多個「X (m)」
+    assert "<label><input" not in html_                                      # 不用「包住輸入框」的標籤
+    for prefix, title in (("room", "房間"), ("start", "起點"), ("ends0", "終點 1")):
+        assert [names[f"{prefix}_{a}"] for a in "xyz"] == [f"{title} {a} (m)" for a in "XYZ"]
+    assert names["cell_m"] == "格距" and names["tray_kind_power"] == "電力橋架" and names["tray_kind_signal"] == "訊號橋架"
+    for code, info in load_rules()["codes"].items():
+        assert f'<label for="code_{code}">{code}：' in html_ and f'value="{code}"' in html_
     assert 'role="status"' in html_ and 'aria-live="polite"' in html_ and 'role="alert"' in html_
 
 
@@ -835,3 +847,11 @@ def test_main_prints_one_token_url_and_shuts_down_cleanly_on_ctrl_c(tmp_path, mo
     out = capsys.readouterr().out
     assert re.search(r"http://127\.0\.0\.1:\d+/t/[A-Za-z0-9_-]{43,}/", out) and out.count("/t/") == 1
     assert "已關閉" in out
+
+
+def test_submit_decides_on_obstacle_state_not_on_aria_invalid_that_clearErrors_wipes():
+    """瀏覽器實測抓到的缺陷：clearErrors() 先清掉 aria-invalid，之後才用它判斷，壞檔案被靜默忽略後照常執行。"""
+    js = W.APP_JS
+    assert js.count("obstaclesBad = true") >= 3 and "obstaclesBad = false" in js and "if (obstaclesBad)" in js
+    assert 'getAttribute("aria-invalid") === "true"' not in js
+    assert js.index("clearErrors(); clear($(\"results\"));") < js.index("if (obstaclesBad)")
