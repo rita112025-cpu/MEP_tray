@@ -24,7 +24,7 @@ NICE_CELLS = [0.25, 0.2, 0.1, 0.05]
 
 class RoutingError(RuntimeError):
     """路徑規劃的可預期失敗。code 為穩定的機器可讀代碼（供管線/UI 使用，勿比對中文訊息）：
-    misaligned | grid_too_large | endpoint_blocked | no_route | search_limit | route_error"""
+    misaligned | grid_too_large | obstacle_work_limit | endpoint_blocked | no_route | search_limit | route_error"""
 
     def __init__(self, message: str, code: str = "route_error"):
         super().__init__(message)
@@ -101,11 +101,58 @@ def try_route_tray(*a, **kw) -> RouteResult:
         return RouteResult(False, None, str(e), code=e.code)
 
 
+# 「標記被阻擋的格點與邊」發生在 A* 之前，max_expansions 擋不住它：單一涵蓋整個大房間的障礙物在 0.1 m 格距下
+# 實測要數十秒。因此在建格後、標記前，以確定性的工作量估算（格次）設預算，超過就直接拒絕（不用牆鐘）。
+MAX_OBSTACLE_WORK = 3_000_000
+
+
+def grid_size(room: Box, cell: float) -> tuple[int, int, int]:
+    """網格各軸格數 floor(L/cell)+1。router 與 webui 共用同一個公式，避免「UI 放行、管線拒絕」的漂移。"""
+    return tuple(int(math.floor((room.hi[i] - room.lo[i]) / cell)) + 1 for i in range(3))
+
+
+def grid_cells(room: Box, cell: float) -> int:
+    n = grid_size(room, cell)
+    return n[0] * n[1] * n[2]
+
+
+def _ranges(inf: Box, origin, cell: float, n) -> list:
+    out = []
+    for i in range(3):
+        a = max(0, int(math.floor((inf.lo[i] - origin[i]) / cell)))
+        b = min(n[i] - 1, int(math.ceil((inf.hi[i] - origin[i]) / cell)))
+        out.append(range(a, b + 1))
+    return out
+
+
+def obstacle_work(inf: Box, origin, cell: float, n) -> int:
+    """單一（已膨脹）障礙物的標記工作量 = 格點迴圈次數 + 三個軸向的邊檢查迴圈次數（與標記迴圈同形，O(1) 計算）。"""
+    rng = _ranges(inf, origin, cell, n)
+    nodes = len(rng[0]) * len(rng[1]) * len(rng[2])
+    edges = 0
+    for ax in range(3):
+        oth = [k for k in range(3) if k != ax]
+        e0 = max(0, int(math.floor((inf.lo[ax] - origin[ax]) / cell)) - 1)
+        e1 = min(n[ax] - 2, int(math.ceil((inf.hi[ax] - origin[ax]) / cell)))
+        edges += max(0, e1 - e0 + 1) * len(rng[oth[0]]) * len(rng[oth[1]])
+    return nodes + edges
+
+
+def estimate_obstacle_work(room: Box, obstacles: list, tray_w_m: float, tray_h_m: float, tray_type: str,
+                           rules: dict, cell: float) -> int:
+    """route_tray 在標記阻擋格前會做的同一個估算（webui 用它在建立工作前先 400）。"""
+    half = max(tray_w_m, tray_h_m) / 2
+    n = grid_size(room, cell)
+    return sum(obstacle_work(ob.box.inflate(clearance_m(ob.kind, tray_type, rules) + half), room.lo, cell, n)
+               for ob in obstacles)
+
+
 def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle],
                tray_w_m: float, tray_h_m: float, tray_type: str,
                rules: dict[str, Governing], cell: float | None = None,
                bend_penalty: float = 4.0, vertical_penalty: float = 1.3,
-               max_expansions: int = 300_000, max_cells: int = 3_000_000) -> Route:
+               max_expansions: int = 300_000, max_cells: int = 3_000_000,
+               max_obstacle_work: int = MAX_OBSTACLE_WORK) -> Route:
     origin = room.lo
     if cell is None:
         cell = auto_cell(tray_w_m, rules, [start, *ends], origin)
@@ -118,10 +165,15 @@ def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle]
     hr = rules.get("headroom_mm")
     wall = (sc.value if sc else 0.0) / 1000.0 + half
     top = max(sc.value if sc else 0.0, hr.value if hr else 0.0) / 1000.0 + half   # 天花：結構淨距與上方維護淨空取大
-    n = tuple(int(math.floor((room.hi[i] - room.lo[i]) / cell)) + 1 for i in range(3))
+    n = grid_size(room, cell)
     total = n[0] * n[1] * n[2]
     if total > max_cells:    # 確定性防護：建格前即報錯，不必跑 A*
         raise RoutingError(f"格點總數 {total:,} 超過上限 {max_cells:,}，請放大格距或縮小場景", "grid_too_large")
+    infl = [ob.box.inflate(clearance_m(ob.kind, tray_type, rules) + half) for ob in obstacles]
+    work = sum(obstacle_work(inf, origin, cell, n) for inf in infl)
+    if work > max_obstacle_work:     # 確定性預算：在標記迴圈（可能跑數十秒）之前就拒絕
+        raise RoutingError(f"障礙物範圍過大或過多（估算工作量 {work:,} 超過上限 {max_obstacle_work:,}），"
+                           f"請縮小障礙物、減少數量或放大格距", "obstacle_work_limit")
 
     def to_cell(p: Vec):
         return tuple(int(round((p[i] - origin[i]) / cell)) for i in range(3))
@@ -137,13 +189,8 @@ def route_tray(room: Box, start: Vec, ends: list[Vec], obstacles: list[Obstacle]
 
     blocked: set = set()
     blocked_edges: set = set()
-    for ob in obstacles:
-        inf = ob.box.inflate(clearance_m(ob.kind, tray_type, rules) + half)
-        rng = []
-        for i in range(3):
-            a = max(0, int(math.floor((inf.lo[i] - origin[i]) / cell)))
-            b = min(n[i] - 1, int(math.ceil((inf.hi[i] - origin[i]) / cell)))
-            rng.append(range(a, b + 1))
+    for inf in infl:
+        rng = _ranges(inf, origin, cell, n)
         for x in rng[0]:
             for y in rng[1]:
                 for z in rng[2]:
