@@ -113,3 +113,10 @@ def test_docs_do_not_claim_six_slow_tests_or_a_certain_symlink_skip():
         t = text(name)
         assert not re.search(r"6 個\s*slow|六個\s*slow", t), name
     assert "在不支援符號連結的機器上會有一個測試 skip" in text("INSTALL.md")
+
+
+def test_manual_discloses_routing_and_clearance_scope_limits():
+    t = text("MANUAL.md")
+    for kw in ("greedy shared-trunk", "不保證全域最佳解", "JSON 軸對齊 box",
+               "clear_water_mm", "單軸最小位移"):
+        assert kw in t, kw
