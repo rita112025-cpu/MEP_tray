@@ -4,6 +4,26 @@
 
 本輪只驗證與修正既有路徑，不新增產品功能。所有下表 runtime 狀態與 build 分開；Python baseline 122 tests 與第一次 benchmark 留在 HANDOFF。
 
+## develop 合併前完整 gate（2026-10-09，commit fbb5dde）
+
+對象：`origin/develop` 於 PR #8 合併後（`fbb5dde`），在獨立 worktree 執行，準備併入 `master`（PR #5）。環境：Windows 11、Python 3.12、.NET SDK 10、本機 AutoCAD（accoreconsole）、Revit 2025。
+
+| 項目 | 結果 |
+|---|---|
+| `git diff --check` | 通過 |
+| `python -m compileall -q mep_tray tests` | 通過 |
+| C# `MepTray.Core`／`MepTray.Core.SelfTest` Release 建置 | 0 警告、0 錯誤 |
+| C# SelfTest 執行（net10.0，Python 實際匯出的模型） | ALL PASS，exit 0 |
+| `python -m pytest -q` | 579 passed、1 failed、1 skipped、19 deselected（見下） |
+| `python -m pytest -m slow` | 1 passed |
+| `python -m pytest -m autocad` | 4 passed |
+| `python -m pytest -m revit` | 14 passed（74.56 s）；Revit 結束後無殘留 `Revit.exe` |
+
+- 預設 pytest 的 1 個失敗為 `tests/test_webui.py::test_content_type_must_be_json_but_charset_parameter_is_fine`，錯誤 `ConnectionAbortedError`（測試用 socket 連線被中止）。單獨重跑 6 次皆通過，`tests/test_webui.py` 整檔重跑 159 passed、1 skipped。判定為偶發；**根因未查明**，未修改測試，也不視為已解決。
+- Revit 實機部分的 add-in 未簽署，依先前紀錄可能需人工按「Load Once」；本次是否出現該對話框未另行記錄。
+- 未執行：Revit 2027（本機未安裝）。
+- 本檔其餘章節（capability matrix、座標範圍、未驗證清單）未因本次 gate 改變；PBP 旋轉、Z 位移、Survey Point、Shared Coordinates 仍為未驗證／不支援。
+
 ## Revit 2025.5 座標 oracle：PBP 非零位移（stage 4 slice 1，2026-10-09）
 
 **更正**：下節 `i_pbp` 的 PASS 只證明 PROJECT_BASE_POINT 路徑可 commit；全新樣板的 Project Base Point 位於內部原點（本輪讀回 PositionMm=(0,0,0)），offset 為 0，因此該場景無法鑑別平移是否正確。
