@@ -146,3 +146,9 @@ def test_manual_describes_the_preview_layers():
     t = text("MANUAL.md")
     for kw in ("障礙物", "吊架", "接頭"):
         assert kw in t.split("XY 平面示意")[1][:300], kw
+
+
+def test_manual_describes_the_preview_view_switching():
+    t = text("MANUAL.md")
+    for kw in ("XZ", "YZ", "俯視", "前視", "側視", "切換"):
+        assert kw in t, kw
