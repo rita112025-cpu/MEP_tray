@@ -25,9 +25,10 @@ git branch develop; git push -u origin develop
 git checkout develop; git pull
 git checkout -b feature/<議題>
 
-# 提交訊息格式：type: summary（沿用現有風格）
-#   例：fix: align cable tray support rules with owner specification
+# 提交訊息格式：type(scope): subject（scope 可省略；沿用現有風格）
+#   例：fix(rules): align cable tray support rules with owner specification
 #   type ∈ {feat, fix, docs, test, build, refactor}
+#   scope ∈ {rules, revit, export, webui, docs, ci, ...}
 git add -A; git commit -m "feat: <描述>"
 
 # 合併回 develop（GitHub PR 或本機 --no-ff）
