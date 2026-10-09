@@ -30,6 +30,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from . import pipeline as P
+from . import export_revit as ER
 from . import report as RP
 from . import versioning as V
 from .disclosure import BANNER_FIXED, SCOPE_NOTE
@@ -253,7 +254,12 @@ PREVIEW_SIZE = (640, 280)
 _PREVIEW_MARGIN = 24
 _PREVIEW_BAR_SPACE = 36
 PREVIEW_MAX_SEGMENTS = 5000                    # 超過就不送示意（避免完成結果的 JSON 過大）
+PREVIEW_MAX_OBSTACLES = MAX_OBSTACLES          # 與請求上限一致（請求本來就不會超過）
+PREVIEW_MAX_HANGERS = 1000                     # 圖層筆數上限：超過只畫前 N 個並附註（JSON 保持小）
+PREVIEW_MAX_JOINTS = 500
 PREVIEW_UNAVAILABLE = "無法產生平面示意圖；請以下載檔與報告為準。"
+PREVIEW_JOINT_KINDS = ("elbow", "tee", "cross", "union", "unsupported")
+_LAYER_LABEL = {"obstacles": "障礙物", "hangers": "吊架", "joints": "接頭"}
 
 
 def _nice_scale_m(max_m: float) -> float:
@@ -274,10 +280,15 @@ def _r3(v) -> float:
     return round(float(v), 3) + 0.0
 
 
-def xy_preview(room, segments, size=PREVIEW_SIZE, start=None, ends=()) -> dict:
+def xy_preview(room, segments, size=PREVIEW_SIZE, start=None, ends=(), obstacles=(), hangers=(), joints=()) -> dict:
     """房間 XY 平面的 Canvas 座標（Y 向下；模型 +Y 朝上，原點在房間框左下）。
 
     輸入為模型座標（m）；輸出已換算成畫布像素，前端只需照畫。只在工作成功時計算一次並存在工作結果中。
+    圖層（皆為俯視投影，不分高度）：
+    - obstacles：[{kind, lo, hi}] → [{kind, rect:[x, y, w, h]}]，裁切到房間框內；完全在房外的略過；不送名稱。
+    - hangers：[(x, y, z)] → [[x, y]]，俯視重疊（垂直段）只留一個。
+    - joints：[{kind, point}] → [{kind, pt:[x, y]}]，kind 不在白名單一律 unsupported。
+    每層超過上限只保留前 N 個，並在 notes 附註；counts 為原始筆數。
     資料不合理（非有限數、房間尺寸非正、線段過多）一律拋 ValueError。"""
     lo, hi = room[0], room[1]
     rx, ry = hi[0] - lo[0], hi[1] - lo[1]
@@ -307,6 +318,48 @@ def xy_preview(room, segments, size=PREVIEW_SIZE, start=None, ends=()) -> dict:
         x0, y0 = to_px(a)
         x1, y1 = to_px(b)
         segs.append([x0, y0, x1, y1])
+
+    notes = []
+    obstacles, hangers, joints = list(obstacles), list(hangers), list(joints)
+    obs_px = []
+    for o in obstacles:
+        olo, ohi = o["lo"], o["hi"]
+        vals = [float(v) for v in (olo[0], olo[1], ohi[0], ohi[1])]
+        if not all(math.isfinite(v) for v in vals):
+            raise ValueError("障礙物座標必須為有限數")
+        if len(obs_px) >= PREVIEW_MAX_OBSTACLES:
+            continue
+        x0, x1 = max(min(vals[0], vals[2]), lo[0]), min(max(vals[0], vals[2]), hi[0])
+        y0, y1 = max(min(vals[1], vals[3]), lo[1]), min(max(vals[1], vals[3]), hi[1])
+        if x1 <= x0 or y1 <= y0:                               # 俯視投影完全在房外
+            continue
+        px0, py_top = to_px((x0, y1))
+        px1, py_bot = to_px((x1, y0))
+        kind = o.get("kind") if o.get("kind") in OBSTACLE_KINDS else "other"
+        obs_px.append({"kind": kind, "rect": [px0, py_top, _r3(px1 - px0), _r3(py_bot - py_top)]})
+    if len(obstacles) > PREVIEW_MAX_OBSTACLES:
+        notes.append(f"障礙物共 {len(obstacles)} 個，僅顯示前 {PREVIEW_MAX_OBSTACLES} 個。")
+
+    hang_px, seen = [], set()
+    for h in hangers:
+        pt = to_px(h)
+        if pt in seen or len(hang_px) >= PREVIEW_MAX_HANGERS:
+            continue
+        seen.add(pt)
+        hang_px.append(list(pt))
+    if len(hang_px) >= PREVIEW_MAX_HANGERS and len(hangers) > PREVIEW_MAX_HANGERS:
+        notes.append(f"吊架共 {len(hangers)} 個，僅顯示前 {PREVIEW_MAX_HANGERS} 個。")
+
+    joint_px = []
+    for jt in joints:
+        pt = to_px(jt["point"])
+        if len(joint_px) >= PREVIEW_MAX_JOINTS:
+            continue
+        kind = jt.get("kind") if jt.get("kind") in PREVIEW_JOINT_KINDS else "unsupported"
+        joint_px.append({"kind": kind, "pt": list(pt)})
+    if len(joints) > PREVIEW_MAX_JOINTS:
+        notes.append(f"接頭共 {len(joints)} 個，僅顯示前 {PREVIEW_MAX_JOINTS} 個。")
+
     metres = _nice_scale_m(0.35 * rx)
     length_px = metres * scale
     return {
@@ -316,16 +369,49 @@ def xy_preview(room, segments, size=PREVIEW_SIZE, start=None, ends=()) -> dict:
         "segments": segs,
         "start": list(to_px(start)) if start is not None else None,
         "ends": [list(to_px(e)) for e in ends],
+        "obstacles": obs_px,
+        "hangers": hang_px,
+        "joints": joint_px,
+        "counts": {"obstacles": len(obstacles), "hangers": len(hangers), "joints": len(joints)},
+        "notes": notes,
         "scale_bar": {"x": _r3(x), "y": _r3(y + rh + 14), "length_px": _r3(length_px),
                       "label": f"{metres:g} m"},
     }
 
 
+def preview_joints(route) -> list:
+    """接頭與 Revit 匯入 JSON 同一個來源（export_revit.build_joints；分支接入點先切段），座標 mm → m。"""
+    return [{"kind": j["kind"], "point": [v / 1000 for v in j["point"]]}
+            for j in ER.build_joints(ER.split_segments(route))]
+
+
 def safe_preview(res) -> tuple:
-    """(preview, preview_error)。示意圖只是附加資訊：任何失敗都不能讓已成功的工作變成錯誤。"""
+    """(preview, preview_error)。示意圖只是附加資訊：任何失敗都不能讓已成功的工作變成錯誤。
+
+    圖層各自取資料（障礙物＝送出的請求、吊架＝route.hangers、接頭＝preview_joints）；取不到的圖層只略過並附註。
+    帶圖層換算失敗時退回只畫基本示意（房間、路徑、起訖點）；連基本示意都失敗才回 None + 文字。"""
     try:
         inp = res.inputs
-        return xy_preview(inp.room, res.route.segments, start=inp.start, ends=inp.ends), None
+        layers, broken = {}, []
+        sources = (("obstacles", lambda: list(inp.obstacles or [])),
+                   ("hangers", lambda: list(res.route.hangers or [])),
+                   ("joints", lambda: preview_joints(res.route)))
+        for name, get in sources:
+            try:
+                layers[name] = get()
+            except Exception as e:                             # 單一圖層失敗不影響其他圖層
+                broken.append(name)
+                sys.stderr.write(f"[webui] preview layer {name} skipped: {type(e).__name__}\n")
+        try:
+            pv = xy_preview(inp.room, res.route.segments, start=inp.start, ends=inp.ends, **layers)
+        except Exception as e:
+            sys.stderr.write(f"[webui] preview layers skipped: {type(e).__name__}\n")
+            pv = xy_preview(inp.room, res.route.segments, start=inp.start, ends=inp.ends)
+            pv["notes"].append("圖層資料異常，僅顯示房間、路徑與起訖點。")
+            return pv, None
+        if broken:
+            pv["notes"].append("無法顯示的圖層：" + "、".join(_LAYER_LABEL[b] for b in broken) + "。")
+        return pv, None
     except Exception as e:                                     # 不洩漏細節，只記類型
         sys.stderr.write(f"[webui] preview skipped: {type(e).__name__}\n")
         return None, PREVIEW_UNAVAILABLE
@@ -522,6 +608,66 @@ APP_JS = r"""
     var sb = pv.scale_bar;
     return !!sb && finite(sb.x) && finite(sb.y) && finite(sb.length_px) && typeof sb.label === "string";
   }
+  var OBS_STYLE = {structure: ["#444", "結構"], water: ["#1a8fc9", "水管"], duct: ["#777", "風管"],
+    heat: ["#d97a00", "熱源"], heat_bare: ["#a0461e", "無保溫熱源"], tray_power: ["#7b3fa0", "電力橋架"],
+    tray_signal: ["#c055b8", "訊號橋架"], other: ["#999", "其他"]};
+  var JOINT_LABEL = {elbow: "彎頭◇", tee: "三通△", cross: "四通⊞", union: "直接頭○", unsupported: "未支援接頭⊠"};
+  var LAYER_CAP = 1000;
+  function layer(a, ok) {
+    var out = [];
+    if (!Array.isArray(a)) return out;
+    for (var i = 0; i < a.length && out.length < LAYER_CAP; i++) if (ok(a[i])) out.push(a[i]);
+    return out;
+  }
+  function obstacleOk(o) { return !!o && typeof o.kind === "string" && finiteList(o.rect, 4) && o.rect[2] > 0 && o.rect[3] > 0; }
+  function jointOk(o) { return !!o && typeof o.kind === "string" && finiteList(o.pt, 2); }
+  function pointOk(p) { return finiteList(p, 2); }
+  function drawObstacles(ctx, list) {
+    for (var i = 0; i < list.length; i++) {
+      var r = list[i].rect, st = OBS_STYLE[list[i].kind] || OBS_STYLE.other, k;
+      ctx.save();
+      ctx.fillStyle = "rgba(160,160,160,0.18)"; ctx.fillRect(r[0], r[1], r[2], r[3]);
+      ctx.beginPath(); ctx.rect(r[0], r[1], r[2], r[3]); ctx.clip();
+      ctx.strokeStyle = st[0]; ctx.lineWidth = 1; ctx.beginPath();
+      for (k = -r[3]; k < r[2]; k += 6) { ctx.moveTo(r[0] + k, r[1] + r[3]); ctx.lineTo(r[0] + k + r[3], r[1]); }
+      ctx.stroke(); ctx.restore();
+      ctx.strokeStyle = st[0]; ctx.lineWidth = 1.5; ctx.strokeRect(r[0], r[1], r[2], r[3]);
+    }
+  }
+  function drawJoint(ctx, j) {
+    var x = j.pt[0], y = j.pt[1], s = 5;
+    ctx.lineWidth = 1.5; ctx.strokeStyle = "#111"; ctx.fillStyle = "#fff"; ctx.beginPath();
+    if (j.kind === "elbow") { ctx.moveTo(x, y - s); ctx.lineTo(x + s, y); ctx.lineTo(x, y + s); ctx.lineTo(x - s, y); ctx.closePath(); ctx.fill(); ctx.stroke(); }
+    else if (j.kind === "tee") { ctx.moveTo(x, y - s); ctx.lineTo(x + s, y + s); ctx.lineTo(x - s, y + s); ctx.closePath(); ctx.fill(); ctx.stroke(); }
+    else if (j.kind === "cross") {
+      ctx.rect(x - s, y - s, 2 * s, 2 * s); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x - s, y); ctx.lineTo(x + s, y); ctx.moveTo(x, y - s); ctx.lineTo(x, y + s); ctx.stroke();
+    } else if (j.kind === "union") { ctx.arc(x, y, s - 1, 0, 2 * Math.PI); ctx.fill(); ctx.stroke(); }
+    else {
+      ctx.strokeStyle = "#b40000"; ctx.rect(x - s, y - s, 2 * s, 2 * s); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x - s, y - s); ctx.lineTo(x + s, y + s); ctx.moveTo(x + s, y - s); ctx.lineTo(x - s, y + s); ctx.stroke();
+    }
+  }
+  function legendText(obs, hs, jt) {
+    var parts = ["圖例：藍線＝橋架路徑（俯視，垂直段顯示為點）", "綠方塊＝起點", "紅圓點＝終點"], seen = {}, kinds = [], i;
+    if (obs.length) {
+      for (i = 0; i < obs.length; i++) {
+        var st = OBS_STYLE[obs[i].kind] || OBS_STYLE.other;
+        if (!seen[st[1]]) { seen[st[1]] = true; kinds.push(st[1]); }
+      }
+      parts.push("斜線框＝障礙物俯視投影（不分高度；依類型著色：" + kinds.join("、") + "）");
+    }
+    if (hs.length) parts.push("黑色 ×＝吊架");
+    if (jt.length) {
+      seen = {}; kinds = [];
+      for (i = 0; i < jt.length; i++) {
+        var lb = JOINT_LABEL[jt[i].kind] || JOINT_LABEL.unsupported;
+        if (!seen[lb]) { seen[lb] = true; kinds.push(lb); }
+      }
+      parts.push("接頭：" + kinds.join("、"));
+    }
+    return parts.join("；") + "；比例尺單位 m。";
+  }
   function drawPreview(box, d) {
     var pv = d.preview;
     box.appendChild(text("h3", "XY 平面示意"));
@@ -530,6 +676,7 @@ APP_JS = r"""
       return;
     }
     box.appendChild(text("p", d.preview.caption, "hint"));
+    var obs = layer(pv.obstacles, obstacleOk), hs = layer(pv.hangers, pointOk), jt = layer(pv.joints, jointOk);
     var cv = document.createElement("canvas");
     cv.id = "preview"; cv.width = pv.size[0]; cv.height = pv.size[1];
     cv.setAttribute("role", "img"); cv.setAttribute("aria-label", "XY 平面示意（" + pv.caption + "）");
@@ -539,6 +686,7 @@ APP_JS = r"""
     try {
       var rm = pv.room, sg = pv.segments, sb = pv.scale_bar, k;
       ctx.strokeStyle = "#111"; ctx.fillStyle = "#111"; ctx.lineWidth = 1; ctx.strokeRect(rm[0], rm[1], rm[2], rm[3]);
+      drawObstacles(ctx, obs);
       ctx.strokeStyle = "#0050b4"; ctx.lineWidth = 3; ctx.lineCap = "round";
       ctx.fillStyle = "#0050b4";
       for (k = 0; k < sg.length; k++) {
@@ -546,6 +694,13 @@ APP_JS = r"""
         if (sg[k][0] === sg[k][2] && sg[k][1] === sg[k][3]) { ctx.arc(sg[k][0], sg[k][1], 3, 0, 2 * Math.PI); ctx.fill(); continue; }
         ctx.moveTo(sg[k][0], sg[k][1]); ctx.lineTo(sg[k][2], sg[k][3]); ctx.stroke();
       }
+      ctx.strokeStyle = "#111"; ctx.lineWidth = 1.5; ctx.lineCap = "butt"; ctx.beginPath();
+      for (k = 0; k < hs.length; k++) {
+        ctx.moveTo(hs[k][0] - 3, hs[k][1] - 3); ctx.lineTo(hs[k][0] + 3, hs[k][1] + 3);
+        ctx.moveTo(hs[k][0] + 3, hs[k][1] - 3); ctx.lineTo(hs[k][0] - 3, hs[k][1] + 3);
+      }
+      ctx.stroke();
+      for (k = 0; k < jt.length; k++) drawJoint(ctx, jt[k]);
       ctx.font = "12px sans-serif"; ctx.lineWidth = 1; ctx.strokeStyle = "#111";
       if (pv.start) {
         ctx.fillStyle = "#0a7a2f"; ctx.fillRect(pv.start[0] - 5, pv.start[1] - 5, 10, 10);
@@ -566,7 +721,9 @@ APP_JS = r"""
       return;
     }
     box.appendChild(cv);
-    box.appendChild(text("p", "圖例：藍線＝橋架路徑（俯視，垂直段顯示為點）；綠方塊＝起點；紅圓點＝終點；比例尺單位 m。", "hint"));
+    box.appendChild(text("p", legendText(obs, hs, jt), "hint"));
+    var notes = Array.isArray(pv.notes) ? pv.notes : [];
+    for (var n = 0; n < notes.length && n < 10; n++) if (typeof notes[n] === "string") box.appendChild(text("p", notes[n], "hint"));
   }
 
   function renderResult(d) {
