@@ -958,3 +958,162 @@ def test_app_validates_preview_and_falls_back_to_text_and_draws_start_end_scale(
     assert "起點" in js and "終點" in js and "pv.start" in js and "pv.ends" in js
     assert js.index("XY 平面示意") < js.index('text("h3", "下載")')     # 位於統計表之後、下載清單之前
     assert js.index("box.appendChild(t);") < js.index("drawPreview(box, d);") < js.index('text("h3", "下載")')
+
+
+# ───────────── 結果區 XY 示意圖層：障礙物／吊架／接頭（階段 3 第二刀） ─────────────
+ROOM10 = ((0.0, 0.0, 0.0), (10.0, 5.0, 4.0))
+SEG10 = [((0.0, 0.0, 3.0), (10.0, 0.0, 3.0))]
+
+
+def _px(p, x, y):
+    """模型 (x, y) m → 畫布像素（與 xy_preview 相同換算，以 room 框反推）。"""
+    rx, ry, rw, rh = p["room"]
+    return rx + x * rw / 10.0, ry + (5.0 - y) * rh / 5.0
+
+
+def test_xy_preview_without_layers_still_has_empty_layer_fields():
+    p = W.xy_preview(ROOM10, SEG10)
+    assert p["obstacles"] == [] and p["hangers"] == [] and p["joints"] == [] and p["notes"] == []
+    assert p["counts"] == {"obstacles": 0, "hangers": 0, "joints": 0}
+
+
+def test_xy_preview_projects_obstacle_footprints_to_pixel_rects_with_kind_but_no_name():
+    obs = [{"name": "秘密名稱", "kind": "water", "lo": [2.0, 1.0, 0.0], "hi": [3.0, 4.0, 3.2]}]
+    p = W.xy_preview(ROOM10, SEG10, obstacles=obs)
+    (o,) = p["obstacles"]
+    assert set(o) == {"kind", "rect"} and o["kind"] == "water"
+    x, y, w, h = o["rect"]
+    x0, y_top = _px(p, 2.0, 4.0)
+    x1, y_bot = _px(p, 3.0, 1.0)
+    assert abs(x - x0) < 0.01 and abs(y - y_top) < 0.01 and abs(w - (x1 - x0)) < 0.01 and abs(h - (y_bot - y_top)) < 0.01
+    assert "秘密名稱" not in json.dumps(p, ensure_ascii=False)
+    assert p["counts"]["obstacles"] == 1
+
+
+def test_xy_preview_clips_obstacles_to_the_room_and_drops_those_fully_outside():
+    obs = [{"name": "a", "kind": "structure", "lo": [-1.0, -1.0, -1.0], "hi": [11.0, 0.5, 5.0]},
+           {"name": "b", "kind": "duct", "lo": [20.0, 20.0, 0.0], "hi": [21.0, 21.0, 1.0]},
+           {"name": "c", "kind": "lava", "lo": [4.0, 2.0, 0.0], "hi": [5.0, 3.0, 1.0]}]
+    p = W.xy_preview(ROOM10, SEG10, obstacles=obs)
+    rx, ry, rw, rh = p["room"]
+    kinds = [o["kind"] for o in p["obstacles"]]
+    assert kinds == ["structure", "other"]                    # 房外整個略過；未知類型以 other 顯示
+    x, y, w, h = p["obstacles"][0]["rect"]
+    assert abs(x - rx) < 0.01 and abs(x + w - (rx + rw)) < 0.01 and abs(y + h - (ry + rh)) < 0.01
+    assert p["counts"]["obstacles"] == 3
+
+
+def test_xy_preview_caps_obstacles_at_max_obstacles_with_a_note():
+    assert W.PREVIEW_MAX_OBSTACLES == W.MAX_OBSTACLES == 200
+    obs = [{"name": f"o{i}", "kind": "other", "lo": [1.0, 1.0, 0.0], "hi": [2.0, 2.0, 1.0]} for i in range(250)]
+    p = W.xy_preview(ROOM10, SEG10, obstacles=obs)
+    assert len(p["obstacles"]) == 200 and p["counts"]["obstacles"] == 250
+    assert any("障礙物" in n and "200" in n for n in p["notes"])
+
+
+def test_xy_preview_maps_hangers_dedupes_vertical_stacks_and_caps_them():
+    hs = [(1.0, 0.0, 3.0), (1.0, 0.0, 2.0), (5.0, 0.0, 3.0)]   # 垂直段上的吊架在俯視重疊 → 只畫一次
+    p = W.xy_preview(ROOM10, SEG10, hangers=hs)
+    assert len(p["hangers"]) == 2 and p["counts"]["hangers"] == 3
+    hx, hy = p["hangers"][0]
+    ex, ey = _px(p, 1.0, 0.0)
+    assert abs(hx - ex) < 0.01 and abs(hy - ey) < 0.01
+    many = [(0.001 * i, 0.0, 3.0) for i in range(W.PREVIEW_MAX_HANGERS + 50)]
+    p = W.xy_preview(ROOM10, SEG10, hangers=many)
+    assert len(p["hangers"]) <= W.PREVIEW_MAX_HANGERS and any("吊架" in n for n in p["notes"])
+
+
+def test_xy_preview_maps_joints_with_kind_and_caps_them():
+    js = [{"kind": "elbow", "point": [10.0, 0.0, 3.0]}, {"kind": "tee", "point": [5.0, 0.0, 3.0]},
+          {"kind": "cross", "point": [2.0, 0.0, 3.0]}, {"kind": "union", "point": [1.0, 0.0, 3.0]},
+          {"kind": "weird", "point": [3.0, 0.0, 3.0]}]
+    p = W.xy_preview(ROOM10, SEG10, joints=js)
+    assert [j["kind"] for j in p["joints"]] == ["elbow", "tee", "cross", "union", "unsupported"]
+    x, y = p["joints"][0]["pt"]
+    ex, ey = _px(p, 10.0, 0.0)
+    assert abs(x - ex) < 0.01 and abs(y - ey) < 0.01
+    many = [{"kind": "union", "point": [0.001 * i, 0.0, 3.0]} for i in range(W.PREVIEW_MAX_JOINTS + 5)]
+    p = W.xy_preview(ROOM10, SEG10, joints=many)
+    assert len(p["joints"]) == W.PREVIEW_MAX_JOINTS and p["counts"]["joints"] == W.PREVIEW_MAX_JOINTS + 5
+    assert any("接頭" in n for n in p["notes"])
+
+
+def test_xy_preview_rejects_non_finite_layer_data():
+    with pytest.raises(ValueError):
+        W.xy_preview(ROOM10, SEG10, hangers=[(float("inf"), 0.0, 0.0)])
+    with pytest.raises(ValueError):
+        W.xy_preview(ROOM10, SEG10, joints=[{"kind": "elbow", "point": [float("nan"), 0, 0]}])
+    with pytest.raises(ValueError):
+        W.xy_preview(ROOM10, SEG10, obstacles=[{"kind": "water", "lo": [0, 0, 0], "hi": [float("nan"), 1, 1]}])
+
+
+def test_preview_joints_come_from_the_same_builder_as_revit_json():
+    from mep_tray import export_revit as ER
+    from mep_tray.router import Route
+    route = Route(waypoints=[], segments=[((0.0, 0.0, 3.0), (5.0, 0.0, 3.0)), ((5.0, 0.0, 3.0), (5.0, 4.0, 3.0))],
+                  bends=[(5.0, 0.0, 3.0)], length_m=9.0, hangers=[(1.0, 0.0, 3.0)])
+    js = W.preview_joints(route)
+    expect = ER.build_joints(ER.split_segments(route))
+    assert [j["kind"] for j in js] == [j["kind"] for j in expect] == ["elbow"]
+    assert js[0]["point"] == [5.0, 0.0, 3.0]                   # mm → m
+
+
+class _FakeRes:
+    def __init__(self, inputs, route):
+        self.inputs, self.route = inputs, route
+
+
+def _fake_res(obstacles=()):
+    from mep_tray.model import Inputs
+    from mep_tray.router import Route
+    inp = Inputs(room=ROOM10, start=(0.0, 0.0, 3.0), ends=[(10.0, 0.0, 3.0)], obstacles=list(obstacles))
+    route = Route(waypoints=[], segments=list(SEG10), bends=[], length_m=10.0, hangers=[(1.0, 0.0, 3.0)])
+    return _FakeRes(inp, route)
+
+
+def test_safe_preview_includes_all_layers_from_request_and_route():
+    res = _fake_res([{"name": "p", "kind": "duct", "lo": [4.0, 1.0, 0.0], "hi": [5.0, 2.0, 1.0]}])
+    p, err = W.safe_preview(res)
+    assert err is None and len(p["obstacles"]) == 1 and len(p["hangers"]) == 1 and p["notes"] == []
+
+
+def test_safe_preview_drops_only_a_broken_layer_and_keeps_the_base_preview(monkeypatch):
+    def boom(route):
+        raise RuntimeError("x")
+    monkeypatch.setattr(W, "preview_joints", boom)
+    p, err = W.safe_preview(_fake_res())
+    assert err is None and p["segments"] and p["joints"] == [] and len(p["hangers"]) == 1
+    assert any("接頭" in n for n in p["notes"])
+
+
+def test_safe_preview_falls_back_to_base_when_layer_data_is_invalid():
+    res = _fake_res()
+    res.route.hangers = [(float("nan"), 0.0, 3.0)]
+    p, err = W.safe_preview(res)
+    assert err is None and p["segments"] and p["hangers"] == [] and p["obstacles"] == [] and p["joints"] == []
+    assert any("圖層" in n for n in p["notes"])
+
+
+def test_successful_run_with_obstacle_carries_obstacle_hanger_and_joint_layers(srv):
+    body = {**good(), "obstacles": [obstacle(name="pipe", kind="water", lo=[5, 3, 0], hi=[5.3, 6, 3.2])]}
+    j = run_job(srv, body)
+    assert j["state"] == "done", j
+    p = j["preview"]
+    assert [o["kind"] for o in p["obstacles"]] == ["water"]
+    assert p["counts"]["hangers"] == j["summary"]["stats"]["hangers"] and p["hangers"]
+    assert p["counts"]["joints"] == j["summary"]["stats"]["joints"]
+    assert all(j_["kind"] in ("elbow", "tee", "cross", "union", "unsupported") for j_ in p["joints"])
+    assert "pipe" not in json.dumps(p) and len(json.dumps(p)) < 100_000
+
+
+def test_app_draws_obstacle_hanger_joint_layers_with_traditional_chinese_legend():
+    js = W.APP_JS
+    for kw in ("pv.obstacles", "pv.hangers", "pv.joints", "pv.notes", "drawObstacles", "drawJoint"):
+        assert kw in js, kw
+    for kw in ("障礙物", "吊架", "彎頭", "三通", "四通", "直接頭"):
+        assert kw in js, kw
+    assert "innerHTML" not in js and "eval(" not in js
+    # 圖層繪製順序：障礙物在橋架之下、吊架與接頭在橋架之上、起訖點最上
+    body = js[js.index("function drawPreview"):]
+    assert body.index("drawObstacles(ctx") < body.index("k < sg.length") < body.index("k < hs.length") \
+        < body.index("drawJoint(ctx, jt") < body.index("if (pv.start)")

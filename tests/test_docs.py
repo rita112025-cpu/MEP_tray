@@ -140,3 +140,9 @@ def test_manual_documents_cable_tray_support_fill_and_layer_rules():
                "接地匯流排", "不是 Cable Tray 填充率", "尚未自動檢核", "不是本工程允許的托架安裝間距"):
         assert kw in t, kw
     assert "fill ratio 維持 null" in t
+
+
+def test_manual_describes_the_preview_layers():
+    t = text("MANUAL.md")
+    for kw in ("障礙物", "吊架", "接頭"):
+        assert kw in t.split("XY 平面示意")[1][:300], kw
