@@ -866,3 +866,95 @@ def test_submit_decides_on_obstacle_state_not_on_aria_invalid_that_clearErrors_w
     assert js.count("obstaclesBad = true") >= 3 and "obstaclesBad = false" in js and "if (obstaclesBad)" in js
     assert 'getAttribute("aria-invalid") === "true"' not in js
     assert js.index("clearErrors(); clear($(\"results\"));") < js.index("if (obstaclesBad)")
+
+
+# ───────────── 結果區 XY 示意（階段 3 第一刀） ─────────────
+def test_xy_preview_fits_room_inside_canvas_and_picks_a_nice_scale_bar():
+    room = ((0.0, 0.0, 0.0), (12.0, 6.0, 4.0))
+    segs = [((1.0, 1.0, 3.0), (10.0, 1.0, 3.0))]
+    p = W.xy_preview(room, segs)
+    assert p["caption"] == "示意圖，非施工圖"
+    w, h = p["size"]
+    x, y, rw, rh = p["room"]
+    assert w == 640 and h == 280
+    assert 0 <= x < x + rw <= w and 0 <= y < y + rh <= h
+    assert abs((rw / rh) - (12 / 6)) < 0.02
+    bar = p["scale_bar"]
+    assert bar["label"].endswith(" m") and bar["length_px"] > 20
+    assert x <= bar["x"] < bar["x"] + bar["length_px"] <= x + rw
+    assert y + rh <= bar["y"] <= h
+    metres = float(bar["label"].split()[0])
+    assert abs(bar["length_px"] / metres - rw / 12.0) < 0.5
+
+
+def test_xy_preview_puts_model_origin_at_the_bottom_left_of_the_room_rect():
+    room = ((0.0, 0.0, 0.0), (10.0, 5.0, 4.0))
+    p = W.xy_preview(room, [((0.0, 0.0, 0.0), (10.0, 0.0, 0.0))])
+    x0, y0, x1, y1 = p["segments"][0]
+    rx, ry, rw, rh = p["room"]
+    assert abs(x0 - rx) < 1 and abs(x1 - (rx + rw)) < 1
+    assert abs(y0 - (ry + rh)) < 1 and abs(y1 - (ry + rh)) < 1
+
+
+def test_successful_run_payload_includes_xy_preview_of_the_route(srv):
+    j = run_job(srv)
+    p = j["preview"]
+    assert p["caption"] == "示意圖，非施工圖" and len(p["segments"]) >= 1
+    assert p["size"] == [640, 280]
+    body = json.dumps(j, allow_nan=False)
+    assert "D:\\\\" not in body and "/github/" not in body
+
+
+def test_app_draws_preview_from_job_json_without_html_injection():
+    js = W.APP_JS
+    assert "d.preview" in js and 'getContext("2d")' in js
+    assert "d.preview.caption" in js and "scale_bar" in js
+    assert "createElement(\"canvas\")" in js
+    assert "innerHTML" not in js
+    assert "#preview" in W.APP_CSS or "canvas" in W.APP_CSS
+
+
+def test_xy_preview_marks_start_and_end_points_in_canvas_pixels():
+    room = ((0.0, 0.0, 0.0), (10.0, 5.0, 4.0))
+    p = W.xy_preview(room, [((0.0, 0.0, 3.0), (10.0, 0.0, 3.0))], start=(0.0, 5.0, 3.0), ends=[(10.0, 0.0, 3.0)])
+    rx, ry, rw, rh = p["room"]
+    sx, sy = p["start"]
+    (ex, ey), = p["ends"]
+    assert abs(sx - rx) < 1 and abs(sy - ry) < 1                 # 模型左上角 (0, 5) → 畫布框左上
+    assert abs(ex - (rx + rw)) < 1 and abs(ey - (ry + rh)) < 1    # 模型 (10, 0) → 畫布框右下
+
+
+def test_xy_preview_rejects_bad_geometry_with_value_error():
+    with pytest.raises(ValueError):
+        W.xy_preview(((0, 0, 0), (0, 5, 4)), [])
+    with pytest.raises(ValueError):
+        W.xy_preview(((0, 0, 0), (10, 5, 4)), [((0, 0, 0), (float("nan"), 0, 0))])
+    seg = ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0))
+    with pytest.raises(ValueError):
+        W.xy_preview(((0, 0, 0), (10, 5, 4)), [seg] * (W.PREVIEW_MAX_SEGMENTS + 1))
+
+
+def test_preview_failure_keeps_the_successful_job_done_with_a_text_notice(srv, monkeypatch):
+    def boom(*a, **k):
+        raise ValueError("x")
+    monkeypatch.setattr(W, "xy_preview", boom)
+    j = run_job(srv)
+    assert j["state"] == "done" and j["files"]
+    assert j["preview"] is None and j["preview_error"] == W.PREVIEW_UNAVAILABLE
+
+
+def test_running_job_status_does_not_carry_preview_payload():
+    jm = W.JobManager("t" * 32)
+    jm.jobs["abc"] = {"state": "running"}
+    assert "preview" not in jm.status("abc")
+    assert 'd.state === "running"' in W.APP_JS and "drawPreview(box, d);" in W.APP_JS
+    assert W.APP_JS.index("drawPreview(box, d);") > W.APP_JS.index("function renderResult(d)")
+
+
+def test_app_validates_preview_and_falls_back_to_text_and_draws_start_end_scale():
+    js = W.APP_JS
+    assert "previewOk(pv)" in js and "d.preview_error" in js
+    assert "無法顯示平面示意圖" in js and "此瀏覽器無法繪製示意圖" in js
+    assert "起點" in js and "終點" in js and "pv.start" in js and "pv.ends" in js
+    assert js.index("XY 平面示意") < js.index('text("h3", "下載")')     # 位於統計表之後、下載清單之前
+    assert js.index("box.appendChild(t);") < js.index("drawPreview(box, d);") < js.index('text("h3", "下載")')
