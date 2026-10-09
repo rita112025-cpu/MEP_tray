@@ -248,6 +248,89 @@ HUMAN = {
 }
 
 
+PREVIEW_CAPTION = "示意圖，非施工圖"
+PREVIEW_SIZE = (640, 280)
+_PREVIEW_MARGIN = 24
+_PREVIEW_BAR_SPACE = 36
+PREVIEW_MAX_SEGMENTS = 5000                    # 超過就不送示意（避免完成結果的 JSON 過大）
+PREVIEW_UNAVAILABLE = "無法產生平面示意圖；請以下載檔與報告為準。"
+
+
+def _nice_scale_m(max_m: float) -> float:
+    """不大於 max_m 的 1–2–5×10^n 長度（公尺）。"""
+    if not math.isfinite(max_m) or max_m <= 0:
+        return 1.0
+    exp = math.floor(math.log10(max_m))
+    for k in range(exp, exp - 8, -1):
+        base = 10 ** k
+        for n in (5, 2, 1):
+            v = n * base
+            if v <= max_m + 1e-12:
+                return v
+    return max_m
+
+
+def _r3(v) -> float:
+    return round(float(v), 3) + 0.0
+
+
+def xy_preview(room, segments, size=PREVIEW_SIZE, start=None, ends=()) -> dict:
+    """房間 XY 平面的 Canvas 座標（Y 向下；模型 +Y 朝上，原點在房間框左下）。
+
+    輸入為模型座標（m）；輸出已換算成畫布像素，前端只需照畫。只在工作成功時計算一次並存在工作結果中。
+    資料不合理（非有限數、房間尺寸非正、線段過多）一律拋 ValueError。"""
+    lo, hi = room[0], room[1]
+    rx, ry = hi[0] - lo[0], hi[1] - lo[1]
+    if not all(math.isfinite(float(v)) for v in (lo[0], lo[1], hi[0], hi[1])):
+        raise ValueError("房間座標必須為有限數")
+    if rx <= 0 or ry <= 0:
+        raise ValueError("房間平面尺寸必須為正")
+    segments = list(segments)
+    if len(segments) > PREVIEW_MAX_SEGMENTS:
+        raise ValueError("線段過多，不產生示意圖")
+    cw, ch = size
+    inner_w = cw - 2 * _PREVIEW_MARGIN
+    inner_h = ch - _PREVIEW_MARGIN - _PREVIEW_BAR_SPACE
+    scale = min(inner_w / rx, inner_h / ry)
+    rw, rh = rx * scale, ry * scale
+    x = _PREVIEW_MARGIN + (inner_w - rw) / 2
+    y = _PREVIEW_MARGIN + (inner_h - rh) / 2
+
+    def to_px(pt):
+        px, py = float(pt[0]), float(pt[1])
+        if not (math.isfinite(px) and math.isfinite(py)):
+            raise ValueError("座標必須為有限數")
+        return (_r3(x + (px - lo[0]) * scale), _r3(y + (hi[1] - py) * scale))
+
+    segs = []
+    for a, b in segments:
+        x0, y0 = to_px(a)
+        x1, y1 = to_px(b)
+        segs.append([x0, y0, x1, y1])
+    metres = _nice_scale_m(0.35 * rx)
+    length_px = metres * scale
+    return {
+        "caption": PREVIEW_CAPTION,
+        "size": [cw, ch],
+        "room": [_r3(x), _r3(y), _r3(rw), _r3(rh)],
+        "segments": segs,
+        "start": list(to_px(start)) if start is not None else None,
+        "ends": [list(to_px(e)) for e in ends],
+        "scale_bar": {"x": _r3(x), "y": _r3(y + rh + 14), "length_px": _r3(length_px),
+                      "label": f"{metres:g} m"},
+    }
+
+
+def safe_preview(res) -> tuple:
+    """(preview, preview_error)。示意圖只是附加資訊：任何失敗都不能讓已成功的工作變成錯誤。"""
+    try:
+        inp = res.inputs
+        return xy_preview(inp.room, res.route.segments, start=inp.start, ends=inp.ends), None
+    except Exception as e:                                     # 不洩漏細節，只記類型
+        sys.stderr.write(f"[webui] preview skipped: {type(e).__name__}\n")
+        return None, PREVIEW_UNAVAILABLE
+
+
 def human_error(err: P.PipelineError) -> dict:
     title, hint = HUMAN.get((err.stage, err.code), ("執行失敗", "請查看下方的錯誤代碼與說明。"))
     if err.cleanup_failed:
@@ -308,10 +391,12 @@ class JobManager:
                 files.append({"kind": kind, "label": KIND_LABEL[kind], "name": ent["name"],
                               "href": f"{base}/download/{res.run_id}/{kind}", "sha8": ent["sha256"][:8]})
         prev = previous_version(res.run_id)
+        preview, preview_error = safe_preview(res)
         return {"state": "done", "run_id": res.run_id, "summary": res.to_summary_dict(), "files": files,
                 "banners": [BANNER_FIXED, SCOPE_NOTE] if res.stats.get("unverified_checks") or
                 any(not g.verified for g in res.gov.values()) else [SCOPE_NOTE],
-                "diff_href": f"{base}/diff/{prev}/{res.run_id}" if prev else None}
+                "diff_href": f"{base}/diff/{prev}/{res.run_id}" if prev else None,
+                "preview": preview, "preview_error": preview_error}
 
     def status(self, jid: str):
         with self._lock:
@@ -365,6 +450,7 @@ button[disabled]{opacity:.6;cursor:progress}
 table{border-collapse:collapse;width:100%;font-size:.9rem}th,td{border:1px solid #888;padding:3px 6px;text-align:left;
 word-break:break-word}
 .mono{font-family:Consolas,"Courier New",monospace;font-size:.85rem}ul.files{padding-left:1.2em}
+canvas{display:block;max-width:100%;border:1px solid #888;background:#fafafa;margin:.6em 0}
 @media(max-width:480px){input[type=number]{width:6em}}
 """.strip()
 
@@ -419,6 +505,70 @@ APP_JS = r"""
     return req;
   }
 
+  function finite(v) { return typeof v === "number" && isFinite(v); }
+  function finiteList(a, n) {
+    if (!Array.isArray(a) || a.length !== n) return false;
+    for (var i = 0; i < n; i++) if (!finite(a[i])) return false;
+    return true;
+  }
+  function previewOk(pv) {
+    if (!pv || typeof pv !== "object" || typeof pv.caption !== "string") return false;
+    if (!finiteList(pv.size, 2) || pv.size[0] <= 0 || pv.size[1] <= 0 || pv.size[0] > 4000 || pv.size[1] > 4000) return false;
+    if (!finiteList(pv.room, 4) || !Array.isArray(pv.segments)) return false;
+    for (var i = 0; i < pv.segments.length; i++) if (!finiteList(pv.segments[i], 4)) return false;
+    if (pv.start !== null && pv.start !== undefined && !finiteList(pv.start, 2)) return false;
+    if (pv.ends !== undefined && !Array.isArray(pv.ends)) return false;
+    for (var j = 0; pv.ends && j < pv.ends.length; j++) if (!finiteList(pv.ends[j], 2)) return false;
+    var sb = pv.scale_bar;
+    return !!sb && finite(sb.x) && finite(sb.y) && finite(sb.length_px) && typeof sb.label === "string";
+  }
+  function drawPreview(box, d) {
+    var pv = d.preview;
+    box.appendChild(text("h3", "XY 平面示意"));
+    if (!previewOk(pv)) {
+      box.appendChild(text("p", typeof d.preview_error === "string" ? d.preview_error : "無法顯示平面示意圖；請以下載檔與報告為準。", "hint"));
+      return;
+    }
+    box.appendChild(text("p", d.preview.caption, "hint"));
+    var cv = document.createElement("canvas");
+    cv.id = "preview"; cv.width = pv.size[0]; cv.height = pv.size[1];
+    cv.setAttribute("role", "img"); cv.setAttribute("aria-label", "XY 平面示意（" + pv.caption + "）");
+    var ctx = null;
+    try { ctx = cv.getContext("2d"); } catch (e) { ctx = null; }
+    if (!ctx) { box.appendChild(text("p", "此瀏覽器無法繪製示意圖；請以下載檔與報告為準。", "hint")); return; }
+    try {
+      var rm = pv.room, sg = pv.segments, sb = pv.scale_bar, k;
+      ctx.strokeStyle = "#111"; ctx.fillStyle = "#111"; ctx.lineWidth = 1; ctx.strokeRect(rm[0], rm[1], rm[2], rm[3]);
+      ctx.strokeStyle = "#0050b4"; ctx.lineWidth = 3; ctx.lineCap = "round";
+      ctx.fillStyle = "#0050b4";
+      for (k = 0; k < sg.length; k++) {
+        ctx.beginPath();
+        if (sg[k][0] === sg[k][2] && sg[k][1] === sg[k][3]) { ctx.arc(sg[k][0], sg[k][1], 3, 0, 2 * Math.PI); ctx.fill(); continue; }
+        ctx.moveTo(sg[k][0], sg[k][1]); ctx.lineTo(sg[k][2], sg[k][3]); ctx.stroke();
+      }
+      ctx.font = "12px sans-serif"; ctx.lineWidth = 1; ctx.strokeStyle = "#111";
+      if (pv.start) {
+        ctx.fillStyle = "#0a7a2f"; ctx.fillRect(pv.start[0] - 5, pv.start[1] - 5, 10, 10);
+        ctx.fillStyle = "#111"; ctx.fillText("起點", pv.start[0] + 7, pv.start[1] - 7);
+      }
+      for (k = 0; pv.ends && k < pv.ends.length; k++) {
+        ctx.fillStyle = "#b40000"; ctx.beginPath(); ctx.arc(pv.ends[k][0], pv.ends[k][1], 5, 0, 2 * Math.PI); ctx.fill();
+        ctx.fillStyle = "#111"; ctx.fillText("終點" + (k + 1), pv.ends[k][0] + 7, pv.ends[k][1] + 14);
+      }
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(sb.x, sb.y); ctx.lineTo(sb.x + sb.length_px, sb.y);
+      ctx.moveTo(sb.x, sb.y - 4); ctx.lineTo(sb.x, sb.y + 4);
+      ctx.moveTo(sb.x + sb.length_px, sb.y - 4); ctx.lineTo(sb.x + sb.length_px, sb.y + 4); ctx.stroke();
+      ctx.fillText(sb.label, sb.x, sb.y + 16);
+      ctx.fillText(pv.caption, pv.size[0] - 8 - ctx.measureText(pv.caption).width, pv.size[1] - 8);
+    } catch (e2) {
+      box.appendChild(text("p", "繪製示意圖時發生問題；請以下載檔與報告為準。", "hint"));
+      return;
+    }
+    box.appendChild(cv);
+    box.appendChild(text("p", "圖例：藍線＝橋架路徑（俯視，垂直段顯示為點）；綠方塊＝起點；紅圓點＝終點；比例尺單位 m。", "hint"));
+  }
+
   function renderResult(d) {
     var box = $("results"); clear(box);
     for (var i = 0; i < d.banners.length; i++) box.appendChild(text("div", d.banners[i], "banner"));
@@ -430,6 +580,7 @@ APP_JS = r"""
       var tr = document.createElement("tr"); tr.appendChild(text("th", rows[r][0])); tr.appendChild(text("td", String(rows[r][1]))); t.appendChild(tr);
     }
     box.appendChild(t);
+    drawPreview(box, d);
     var h = text("h3", "下載"); box.appendChild(h);
     var ul = document.createElement("ul"); ul.className = "files";
     for (var k = 0; k < d.files.length; k++) {

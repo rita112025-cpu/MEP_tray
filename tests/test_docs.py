@@ -115,6 +115,11 @@ def test_docs_do_not_claim_six_slow_tests_or_a_certain_symlink_skip():
     assert "在不支援符號連結的機器上會有一個測試 skip" in text("INSTALL.md")
 
 
+def test_manual_says_the_result_preview_is_schematic_not_a_construction_drawing():
+    t = text("MANUAL.md")
+    assert "示意圖，非施工圖" in t and "XY" in t
+
+
 def test_manual_discloses_routing_and_clearance_scope_limits():
     t = text("MANUAL.md")
     for kw in ("greedy shared-trunk", "不保證全域最佳解", "JSON 軸對齊 box",
