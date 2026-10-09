@@ -33,6 +33,11 @@
     <Using Include="System.IO" />
   </ItemGroup>
 
+  <!-- 隨建置輸出 .addin 範本（Assembly 為相對檔名）；安裝時由 scripts/install_revit_addin.ps1 改寫為絕對路徑 -->
+  <ItemGroup>
+    <None Include="MepTray.addin" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <ItemGroup>
     <Reference Include="RevitAPI">
       <HintPath>$(RevitInstallDir)RevitAPI.dll</HintPath>

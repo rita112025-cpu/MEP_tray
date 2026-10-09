@@ -58,8 +58,13 @@ python -m mep_tray.webui
 ## 5. 建置 Revit 增益集（選用）
 
 1. 安裝與 Revit 執行階段相符的 .NET SDK（Revit 2025.5 的 `RevitAPI.runtimeconfig.json` 指定 net10.0）。
-2. 目標框架由 `revit/MepTrayImport` 的 csproj 從已安裝 Revit 自動偵測。
-3. 在 Revit 內的使用步驟與驗證範圍見 [VERIFICATION.md](VERIFICATION.md)。本專案交付的是「Revit Cable Tray 系統族建模匯入器」，**不是 .rfa**。
+2. 執行安裝腳本（建置＋版本化部署＋manifest 一次完成）：
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\install_revit_addin.ps1 -RevitVersion 2025
+   ```
+   腳本不修改 OS 安全政策、不做 Unblock-File；2027 為未實機驗證（可 `-RevitVersion 2027` 指定，風險自負）。
+3. 重啟 Revit，於 Add-Ins → External Commands 確認「MEP Tray Import」出現。使用與驗證範圍見 [VERIFICATION.md](VERIFICATION.md)。本專案交付的是「Revit Cable Tray 系統族建模匯入器」，**不是 .rfa**。
+4. 除錯：載入失敗先查 Code Integrity 事件——`Get-WinEvent -LogName 'Microsoft-Windows-CodeIntegrity/Operational' -MaxEvents 20 | ? Message -match 'MepTray'`；再查 `%APPDATA%\Autodesk\Revit\<產品>\Journals\` 最新 journal 搜 `MepTray`。
 
 ## 6. 常見問題
 
