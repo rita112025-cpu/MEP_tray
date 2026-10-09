@@ -154,6 +154,23 @@ def test_manual_describes_the_preview_view_switching():
         assert kw in t, kw
 
 
+def _matrix_rows():
+    sec = text("VERIFICATION.md").split("## Revit capability matrix")[1].split("\n## ")[0]
+    return [ln for ln in sec.splitlines() if ln.startswith("| Coordinate transform") or ln.startswith("| Revit 2027")]
+
+
+def test_verification_matrix_marks_pbp_translation_verified_and_keeps_the_rest_unverified():
+    rows = _matrix_rows()
+    pbp = [r for r in rows if "PROJECT_BASE_POINT 非零位置平移" in r]
+    assert len(pbp) == 1 and "UNVERIFIED" not in pbp[0], pbp
+    gui = pbp[0].rstrip(" |").split(" | ")[-1]
+    assert gui.startswith("PASS") and "Revit 2025.5" in gui and "Load Once" in gui, gui
+    for kw in ("PBP 旋轉", "Survey Point", "模型 origin 非零", "Revit 2027"):
+        row = [r for r in rows if kw in r]
+        assert len(row) == 1 and row[0].rstrip(" |").endswith(("UNVERIFIED", "UNVERIFIED（本機未安裝）")), (kw, row)
+    assert "runtime 未驗證" not in text("VERIFICATION.md").split("## Coordinate scope")[1].split("\n## ")[0]
+
+
 # ───────────── CI 與發布流程 ─────────────
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 
