@@ -99,11 +99,16 @@ The individual cases and original gate below retain their historical status. Thi
 
 ## Revit capability matrix
 
-Static PASS 只表示已讀 interface/caller/source 並確認該範圍的防護與接線；不代表執行成功。GUI UNVERIFIED 均屬 HUMAN TEST PENDING。
+Static PASS 只表示已讀 interface/caller/source 並確認該範圍的防護與接線；不代表執行成功。GUI UNVERIFIED 均屬 HUMAN TEST PENDING。Revit GUI 欄的 PASS 僅限 Revit 2025.5（25.5.0.57）。SelfTest 欄為 2026-10-03 狀態；2026-10-09 SelfTest 44 項 ALL PASS 見上節。
 
 | 功能（明確範圍） | Static | Build | SelfTest | Revit GUI |
 |---|---|---|---|---|
-| Coordinate transform：內部座標／PBP 位置平移與未支援變換拒絕 | PASS | PASS | BLOCKED | UNVERIFIED |
+| Coordinate transform：PROJECT_BASE_POINT 非零位置平移（PBP 移動 (5000, −3000, 0) mm，僅 XY、Angle=0） | PASS | PASS | BLOCKED | PASS — Revit 2025.5 AutoRun（2026-10-09，`i2_pbp_moved` 讀回端點 = 模型點 + PBP 位置，誤差 < 1e-9 mm；`pytest -m revit` 14 passed；未簽署建置須人工按「Load Once」） |
+| Coordinate transform：SHARED_COORDINATES／UNSPECIFIED 基準拒絕 | PASS | PASS | BLOCKED | PASS（拒絕）— AutoRun 2026-10-09 `j_shared`、`c_unspecified` 未建元件 |
+| Coordinate transform：PBP 旋轉（Angle≠0）、PBP Z 位移與 Level 互動 | NOT SUPPORTED（只平移、不套用旋轉） | — | — | UNVERIFIED |
+| Coordinate transform：Survey Point 移動／SHARED_COORDINATES 基準匯入 | NOT SUPPORTED（依設計拒絕） | — | — | UNVERIFIED |
+| Coordinate transform：模型 origin 非零、非標準 axis、rotation_deg 非零拒絕 | PASS（拒絕） | PASS | BLOCKED | UNVERIFIED |
+| Revit 2027（任何功能） | — | — | — | UNVERIFIED（本機未安裝） |
 | Duplicate fitting detection：重複 joint ID／重複線段引用；不宣稱幾何全面去重 | PASS | PASS | BLOCKED | UNVERIFIED |
 | Segment reference validation：存在性、段數、null、唯一 ID | PASS | PASS | BLOCKED | UNVERIFIED |
 | Routing export：Python 實際輸出／C# 模型與 Comments 契約 | PASS | PASS | BLOCKED | UNVERIFIED |
@@ -114,13 +119,13 @@ Python export/roundtrip 已執行通過；C# Cross-language assertions 已 build
 ## Coordinate scope / NOT SUPPORTED
 
 - Revit internal：mm→ft，直接使用模型座標。
-- Project Base Point：mm→ft 後加上 `BasePoint.Position`；只做位置平移，保持 internal axes，不套用旋轉。
+- Project Base Point：mm→ft 後加上 `BasePoint.Position`；只做位置平移，保持 internal axes，不套用旋轉。非零 XY 平移已於 Revit 2025.5 AutoRun 驗證 PASS（2026-10-09，見上方座標 oracle 節）；PBP 旋轉與 Z 位移 UNVERIFIED。
 - Survey Point：NOT SUPPORTED，程式未取得 Survey Point。
 - Shared Coordinates：NOT SUPPORTED；輸入此 basis 時 Import 回報尚未實作，未進 transaction。
 - Link transform：NOT SUPPORTED，沒有 RevitLinkInstance / GetTransform caller。
 - 模型 origin 非零、非標準 axis 或 rotation_deg 非零：拒絕，不能忽略變換。
 
-前兩者僅為「已實作，runtime 未驗證」。README、未指定 basis 的選擇對話框與匯入結果 UI 均明確揭露此限制。
+前兩者已實作；Revit 2025.5 AutoRun 已驗證 PBP 非零 XY 平移（Angle=0、Z 不動），其餘座標變換與 Revit 2027 仍 UNVERIFIED。README、未指定 basis 的選擇對話框與匯入結果 UI 均明確揭露此限制。
 
 ## Nested null regression matrix
 
