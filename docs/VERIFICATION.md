@@ -4,6 +4,27 @@
 
 本輪只驗證與修正既有路徑，不新增產品功能。所有下表 runtime 狀態與 build 分開；Python baseline 122 tests 與第一次 benchmark 留在 HANDOFF。
 
+## Revit 2025.5 AutoRun acceptance update (2026-10-09)
+
+本輪以 AutoRun 入口（`tests/revit_live.py`，Revit 2025 實機 25.5.0.57）執行全部 10 場景，`autorun.done` 產生、無 `revit_error.txt`、無殘留 Revit 程序。報告存於 `output/revit2025_autorun/`。本次新增驗證，取代先前的 Inspection=null UNVERIFIED 狀態：
+
+| 場景 | 結果 | 證據 |
+|---|---|---|
+| a_tee | PASS — Committed、3 trays、tee OK、Inspection 回讀 | tray id 813370 起 |
+| b_elbow | PASS — 2 trays、elbow OK、端點 mm 與 Comments 回讀正確 | S001(1000,1000,3000) 等 |
+| c_unspecified | PASS（拒絕）— UNSPECIFIED 無覆寫正確 abort、未建元件 | Abort 訊息 |
+| ov_d_unspecified | PASS — 以 INTERNAL_ORIGIN 覆寫後 committed | ov_ 前綴覆寫路徑 |
+| e_missing_type | PASS（拒絕）— 列出可用 CableTrayType 後 abort、未建元件 | 可用型別清單 |
+| f_rollback | PASS（回滾）— 過短線段（<1/10 in）transaction 回滾、Committed=false | ArgumentException 記錄 |
+| g_cross | PASS — 4 trays、cross OK | tray id 4 筆 |
+| h_union | PASS — 2 trays、union OK（先前 UNVERIFIED） | — |
+| i_pbp | PASS — PROJECT_BASE_POINT 基準 committed、1 tray（先前 UNVERIFIED） | Basis=PROJECT_BASE_POINT |
+| j_shared | PASS（拒絕）— SHARED_COORDINATES 明確拒絕、未建元件 | Abort 訊息 |
+| k_unsupported | 依設計 — 非正交腿 joint 標 FAIL、trays 建立、Committed=true | topology matrix 定義行為 |
+
+- 未驗證維持：Revit 2027（本機未安裝 `C:\Program Files\Autodesk\Revit 2027`）、數值精度僅以場景端點抽驗（誤差 < 0.05 mm）、存檔重開持久化仍依 2026-10-03 人工驗收。
+- C# runtime 前次 BLOCKED（0x800711C7）已解除：SelfTest 44 項 ALL PASS、`pytest -m revit` 1 passed（2026-10-09，詳 HANDOFF 階段 1 紀錄；Code Integrity 政策未變更，無解除 OS policy 行為）。
+
 ## Revit 2025.5 manual acceptance update (2026-10-03)
 
 - Installed / Add-in Load / Command Invocation: PASS on Revit 25.5.0.57.
