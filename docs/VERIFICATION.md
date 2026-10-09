@@ -4,6 +4,33 @@
 
 本輪只驗證與修正既有路徑，不新增產品功能。所有下表 runtime 狀態與 build 分開；Python baseline 122 tests 與第一次 benchmark 留在 HANDOFF。
 
+## Revit 2025.5 座標 oracle：PBP 非零位移（stage 4 slice 1，2026-10-09）
+
+**更正**：下節 `i_pbp` 的 PASS 只證明 PROJECT_BASE_POINT 路徑可 commit；全新樣板的 Project Base Point 位於內部原點（本輪讀回 PositionMm=(0,0,0)），offset 為 0，因此該場景無法鑑別平移是否正確。
+
+本輪新增：
+
+- AutoRun 若見 `<模型名>.setup.json`，匯入前以獨立 Transaction 套用（`{"move_pbp_mm":[dx,dy,dz]}` → 必要時解除釘選後 `ElementTransformUtils.MoveElement` 平移 PBP），讀回位移與要求差 > 0.5 mm 即失敗並寫 `*.setup_error.txt`、不匯入該場景。
+- Inspection 新增 `Coordinates`：PBP 與 Survey Point 的 Position／SharedPosition（mm）、Pinned，以及 ActiveProjectLocation 在內部原點的 ProjectPosition。
+- 新場景 `i2_pbp_moved`：PROJECT_BASE_POINT 基準、PBP 移動 (5000, −3000, 0) mm（不動 Z）。
+- `tests/test_revit_live.py`：實機測試（`revit` marker）斷言全部 12 場景的預期結果，以及「讀回端點 = 模型點 + 讀回 PBP 位置」（容差 0.5 mm；接頭端被 fitting 修剪不比對）；另有不需 Revit 的 setup 檔產生／驗證單元測試在預設 pytest 執行。
+
+Revit 2025 實機結果（25.5.0.57，`python -m tests.revit_live output\revit2025_coord_oracle`，證據 `output/revit2025_coord_oracle/models/`）：
+
+| 項目 | 讀回值 |
+|---|---|
+| 移動前 PBP Position／SharedPosition | (0, 0, 0)／(0, 0, 0)，Pinned=false |
+| 移動後 PBP Position | (5000, −3000, 0) mm（moved_mm 與要求完全一致） |
+| 移動後 PBP SharedPosition | (5000, −3000, 0) mm |
+| Survey Point Position／SharedPosition | 移動前後皆 (0, 0, 0) |
+| ActiveProjectPosition（Default Site，內部原點處） | EW=0、NS=0、Elev=0、Angle=0，移動前後不變 |
+| i2_pbp_moved 橋架 S001 | 模型 (1000,1000,3000)→(10000,1000,3000)；讀回 (6000,−2000,3000)→(15000,−2000,3000)，誤差 < 1e-9 mm |
+| 其餘 11 場景 | 結果與下節表相同（i_pbp offset 0） |
+
+- 人工步驟：未簽署的建置會讓 Revit 跳出「Security - Unsigned Add-In」對話框，須由使用者按「Load Once」AutoRun 才會繼續；未以登錄檔或信任設定繞過。
+- `pytest -m revit` 結果：`14 passed, 582 deselected in 90.46s`（13 項實機 AutoRun 斷言 + 1 項既有 C# SelfTest；Revit 實機輸出 `output/revit2025_coord_oracle_pytest/models/`；兩輪結束後皆無殘留 Revit.exe）
+- 未驗證：PBP 旋轉（Angle≠0）、Survey Point 移動與 SHARED_COORDINATES 基準、Z 位移與 Level 互動、Revit 2027；Revit 2020.2 起 PBP 已無 clipped/unclipped 切換，本輪僅驗證 MoveElement 移動 PBP（不移動模型）的行為。
+
 ## Revit 2025.5 AutoRun acceptance update (2026-10-09)
 
 本輪以 AutoRun 入口（`tests/revit_live.py`，Revit 2025 實機 25.5.0.57）執行全部 10 場景，`autorun.done` 產生、無 `revit_error.txt`、無殘留 Revit 程序。報告存於 `output/revit2025_autorun/`。本次新增驗證，取代先前的 Inspection=null UNVERIFIED 狀態：
