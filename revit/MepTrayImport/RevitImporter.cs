@@ -25,10 +25,37 @@ public sealed class TrayInfo
     public string Comments { get; set; } = "";
 }
 
+public sealed class BasePointInfo
+{
+    /// <summary>BasePoint.Position（內部座標，mm）。</summary>
+    public double[] PositionMm { get; set; } = new double[3];
+    /// <summary>BasePoint.SharedPosition（共用座標，mm）。</summary>
+    public double[] SharedPositionMm { get; set; } = new double[3];
+    public bool Pinned { get; set; }
+}
+
+public sealed class ProjectPositionInfo
+{
+    public string Location { get; set; } = "";
+    public double EastWestMm { get; set; }
+    public double NorthSouthMm { get; set; }
+    public double ElevationMm { get; set; }
+    public double AngleRad { get; set; }
+}
+
+public sealed class CoordinateInfo
+{
+    public BasePointInfo? ProjectBasePoint { get; set; }
+    public BasePointInfo? SurveyPoint { get; set; }
+    /// <summary>ActiveProjectLocation 在內部原點處的 ProjectPosition。</summary>
+    public ProjectPositionInfo? ActiveProjectPosition { get; set; }
+}
+
 public sealed class Inspection
 {
     public List<TrayInfo> Trays { get; } = new();
     public int FittingCount { get; set; }
+    public CoordinateInfo? Coordinates { get; set; }
 }
 
 public sealed class ImportReport
@@ -236,7 +263,6 @@ public static class RevitImporter
             if (ct.Location is not LocationCurve location)
                 throw new InvalidDataException($"橋架 {ct.Id} 沒有 LocationCurve，無法讀回幾何");
             var line = location.Curve;
-            double[] Mm(XYZ p) => new[] { Units.FeetToMm(p.X), Units.FeetToMm(p.Y), Units.FeetToMm(p.Z) };
             ins.Trays.Add(new TrayInfo
             {
                 Id = ct.Id.ToString(),
@@ -249,6 +275,36 @@ public static class RevitImporter
         }
         ins.FittingCount = new FilteredElementCollector(doc)
             .OfCategory(BuiltInCategory.OST_CableTrayFitting).WhereElementIsNotElementType().GetElementCount();
+        ins.Coordinates = ReadCoordinates(doc);
         return ins;
+    }
+
+    static double[] Mm(XYZ p) => new[] { Units.FeetToMm(p.X), Units.FeetToMm(p.Y), Units.FeetToMm(p.Z) };
+
+    static BasePointInfo? PointInfo(BasePoint? bp) =>
+        bp == null ? null : new BasePointInfo { PositionMm = Mm(bp.Position), SharedPositionMm = Mm(bp.SharedPosition), Pinned = bp.Pinned };
+
+    /// <summary>讀回 PBP、Survey Point 與 ActiveProjectLocation 的座標狀態（mm；角度為弧度）。</summary>
+    public static CoordinateInfo ReadCoordinates(Document doc)
+    {
+        var c = new CoordinateInfo
+        {
+            ProjectBasePoint = PointInfo(BasePoint.GetProjectBasePoint(doc)),
+            SurveyPoint = PointInfo(BasePoint.GetSurveyPoint(doc)),
+        };
+        var loc = doc.ActiveProjectLocation;
+        if (loc != null)
+        {
+            var pp = loc.GetProjectPosition(XYZ.Zero);
+            c.ActiveProjectPosition = new ProjectPositionInfo
+            {
+                Location = loc.Name,
+                EastWestMm = Units.FeetToMm(pp.EastWest),
+                NorthSouthMm = Units.FeetToMm(pp.NorthSouth),
+                ElevationMm = Units.FeetToMm(pp.Elevation),
+                AngleRad = pp.Angle,
+            };
+        }
+        return c;
     }
 }
