@@ -21,5 +21,7 @@ python -m mep_tray.webui
 - [架構（ARCHITECTURE）](docs/ARCHITECTURE.md)：資料流、決定性、安全邊界、擴充點。
 - [驗證狀態（VERIFICATION）](docs/VERIFICATION.md)：Revit／AutoCAD 實機驗證紀錄（歷史紀錄）。
 - [交接（HANDOFF）](docs/HANDOFF.md)：早期交接與 benchmark（歷史紀錄）。
+- [Git 工作流（GIT_WORKFLOW）](docs/GIT_WORKFLOW.md)：分支與合併 gate。
+- [發布流程（RELEASE）](docs/RELEASE.md)：release gate、CI 範圍、版本號、changelog、簽章與 WDAC。
 
-Revit 只驗證到 2025.5 的建立與儲存重開；尺寸／端點／Comments 讀回與 Revit 2027 為未驗證，詳見 VERIFICATION。
+Revit 只驗證到 2025.5：建立與儲存重開，以及 AutoRun 的端點／Comments 讀回與專案基準點非零 XY 平移；PBP 旋轉、Z 位移、Survey Point、Shared Coordinates（依設計拒絕）與 Revit 2027 為未驗證或不支援，詳見 VERIFICATION。

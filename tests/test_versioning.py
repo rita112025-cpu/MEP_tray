@@ -115,13 +115,13 @@ def test_result_hash_does_not_depend_on_dxf_bytes_or_environment(isolate, monkey
 # ───────────── 差異來源 ─────────────
 def test_only_rules_change_has_source_rules_and_lists_the_changed_value(isolate):
     mk("base")
-    r2 = with_rules(lambda r: r["codes"]["CNS"]["values"].update(span_max_m=1.5))
+    r2 = with_rules(lambda r: r["codes"]["MRT_APPX_C"]["values"].update(span_max_m=0.8))      # 勝出者（最嚴）
     mk("rules", rules=r2)
     d = V.compare("base", "rules")
     assert d.ok and d.source == "rules" and not d.results_equal
     assert V._is_empty(d.inputs)
     ch = d.rules["changed"]["span_max_m"]
-    assert ch["value"] == [2.0, 1.5] and d.rules["effective_changed"] and d.rules["hash_changed"]
+    assert ch["value"] == [1.0, 0.8] and d.rules["effective_changed"] and d.rules["hash_changed"]
     assert d.result["counts"]["hanger_count"]["delta"] > 0
 
 
@@ -136,7 +136,7 @@ def test_non_governing_rule_change_is_hash_only_and_not_a_rules_change(isolate):
 
 def test_verified_toggle_is_reported_in_rules_diff(isolate):
     mk("base")
-    r2 = with_rules(lambda r: r["codes"]["CNS"].update(verified=True))
+    r2 = with_rules(lambda r: r["codes"]["MRT_APPX_C"].update(verified=True))
     mk("ver", rules=r2)
     d = V.compare("base", "ver")
     assert d.source == "rules" and d.rules["changed"]["span_max_m"]["verified"] == [False, True]
@@ -153,7 +153,7 @@ def test_only_input_change_has_source_inputs_and_empty_rules_diff(isolate):
 
 def test_both_changed(isolate):
     mk("base")
-    r2 = with_rules(lambda r: r["codes"]["CNS"]["values"].update(span_max_m=1.5))
+    r2 = with_rules(lambda r: r["codes"]["MRT_APPX_C"]["values"].update(span_max_m=0.8))
     mk("both", inp=sample(tray_w_mm=400), rules=r2)
     assert V.compare("base", "both").source == "both"
 

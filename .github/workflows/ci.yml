@@ -1,0 +1,83 @@
+# CI for MEP_tray (stage 4 slice 5).
+#
+# Scope: default Python gate + C# core build + Core SelfTest runtime contract.
+# NOT built here: revit/MepTrayImport. It references RevitAPI.dll / RevitAPIUI.dll
+# from a local Revit install (RevitInstallDir); those Autodesk binaries cannot be
+# redistributed or committed, and hosted runners have no Revit. The add-in build and
+# all Revit GUI checks stay in the local gate (docs/VERIFICATION.md, docs/RELEASE.md).
+# Default pytest deselects the autocad / revit / slow markers (see pytest.ini).
+name: CI
+
+on:
+  push:
+    branches: [develop, master]
+  pull_request:
+    branches: [develop, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest + C# core (windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Whitespace check (whole tree vs empty tree)
+        # Checks every tracked file of the checked-out commit, so it works for push and
+        # pull_request alike without needing the base commit (shallow clone).
+        run: git diff --check 4b825dc642cb6eb9a060e54bf8d69288fbee4904 HEAD
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt pytest
+
+      - name: pytest (default gate; autocad/revit/slow deselected by pytest.ini)
+        run: python -m pytest -q
+
+      - name: compileall
+        run: python -m compileall -q mep_tray tests
+
+      - name: Set up .NET SDK 10
+        # MepTray.Core targets net8.0;net10.0 and SelfTest targets net10.0. One SDK 10
+        # builds both TFMs (net8.0 reference packs come from NuGet); only the net10.0
+        # runtime is executed. global.json pins SDK 10.0.100 with rollForward latestFeature.
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Build MepTray.Core (Release, net8.0 + net10.0)
+        run: dotnet build revit/MepTray.Core -c Release -nologo
+
+      - name: Build MepTray.Core.SelfTest (Release)
+        run: dotnet build revit/MepTray.Core.SelfTest -c Release -nologo
+
+      - name: Generate SelfTest inputs from the real Python exporter
+        run: python -c "from pathlib import Path; from tests.test_revit_dotnet import _build_model; p=Path('ci-inputs'); p.mkdir(); _build_model(p)"
+
+      - name: Run Core SelfTest (net10.0)
+        run: |
+          dotnet revit/MepTray.Core.SelfTest/bin/Release/net10.0/MepTray.Core.SelfTest.dll ci-inputs/m.json ci-inputs/expected.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

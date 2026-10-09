@@ -8,3 +8,5 @@ cer.log
 .handoff-temp/
 **/bin/
 **/obj/
+venv/
+ci-inputs/

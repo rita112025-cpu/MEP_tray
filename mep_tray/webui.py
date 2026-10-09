@@ -30,6 +30,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from . import pipeline as P
+from . import export_revit as ER
 from . import report as RP
 from . import versioning as V
 from .disclosure import BANNER_FIXED, SCOPE_NOTE
@@ -248,6 +249,237 @@ HUMAN = {
 }
 
 
+PREVIEW_CAPTION = "示意圖，非施工圖"
+PREVIEW_SIZE = (640, 280)
+_PREVIEW_MARGIN = 24
+_PREVIEW_BAR_SPACE = 36
+PREVIEW_MAX_SEGMENTS = 5000                    # 超過就不送示意（避免完成結果的 JSON 過大）
+PREVIEW_MAX_OBSTACLES = MAX_OBSTACLES          # 與請求上限一致（請求本來就不會超過）
+PREVIEW_MAX_HANGERS = 1000                     # 圖層筆數上限：超過只畫前 N 個並附註（JSON 保持小）
+PREVIEW_MAX_JOINTS = 500
+PREVIEW_MAX_BYTES = 600_000                    # 三個視角合計的序列化上限；超過只留預設視角，仍超過就不送
+PREVIEW_UNAVAILABLE = "無法產生示意圖；請以下載檔與報告為準。"
+PREVIEW_JOINT_KINDS = ("elbow", "tee", "cross", "union", "unsupported")
+_LAYER_LABEL = {"obstacles": "障礙物", "hangers": "吊架", "joints": "接頭"}
+# 視角：(畫布水平軸, 畫布垂直軸（向上）, 標題)。XZ＝前視（從 -Y 往 +Y 看）；YZ＝側視（從 +X 往 -X 看，+Y 朝右）。
+PREVIEW_VIEWS = {
+    "xy": (0, 1, "XY 平面示意（俯視）"),
+    "xz": (0, 2, "XZ 立面示意（前視）"),
+    "yz": (1, 2, "YZ 立面示意（側視）"),
+}
+_AXIS_NAME = "XYZ"
+
+
+def _nice_scale_m(max_m: float) -> float:
+    """不大於 max_m 的 1–2–5×10^n 長度（公尺）。"""
+    if not math.isfinite(max_m) or max_m <= 0:
+        return 1.0
+    exp = math.floor(math.log10(max_m))
+    for k in range(exp, exp - 8, -1):
+        base = 10 ** k
+        for n in (5, 2, 1):
+            v = n * base
+            if v <= max_m + 1e-12:
+                return v
+    return max_m
+
+
+def _r3(v) -> float:
+    return round(float(v), 3) + 0.0
+
+
+def view_preview(room, segments, view="xy", size=PREVIEW_SIZE, start=None, ends=(), obstacles=(), hangers=(),
+                 joints=()) -> dict:
+    """房間在單一視角平面的 Canvas 座標（畫布 Y 向下；視角的垂直軸朝上，原點在房間框左下）。
+
+    view：xy（俯視，X 右 Y 上）、xz（前視，X 右 Z 上）、yz（側視，Y 右 Z 上）。各視角以自己的兩軸
+    房間範圍等比例縮放進畫布。輸入為模型座標（m）；輸出已換算成畫布像素，前端只需照畫。
+    圖層（皆為該平面的正投影，不分前後深度）：
+    - segments：與視平面垂直的段投影成一點（兩端像素相同，前端畫成圓點）。
+    - obstacles：[{kind, lo, hi}] → [{kind, rect:[x, y, w, h]}]，裁切到房間框內；完全在框外的略過；不送名稱。
+    - hangers：[(x, y, z)] → [[x, y]]，投影後重疊者只留一個。
+    - joints：[{kind, point}] → [{kind, pt:[x, y]}]，kind 不在白名單一律 unsupported。
+    每層超過上限只保留前 N 個，並在 notes 附註；counts 為原始筆數。
+    資料不合理（未知視角、非有限數、該視角房間尺寸非正、線段過多）一律拋 ValueError。"""
+    if view not in PREVIEW_VIEWS:
+        raise ValueError("未知的示意視角")
+    ah, av, title = PREVIEW_VIEWS[view]
+    lo, hi = room[0], room[1]
+    lo_h, lo_v, hi_h, hi_v = float(lo[ah]), float(lo[av]), float(hi[ah]), float(hi[av])
+    if not all(math.isfinite(v) for v in (lo_h, lo_v, hi_h, hi_v)):
+        raise ValueError("房間座標必須為有限數")
+    rx, ry = hi_h - lo_h, hi_v - lo_v
+    if rx <= 0 or ry <= 0:
+        raise ValueError("房間在此視角的尺寸必須為正")
+    segments = list(segments)
+    if len(segments) > PREVIEW_MAX_SEGMENTS:
+        raise ValueError("線段過多，不產生示意圖")
+    cw, ch = size
+    inner_w = cw - 2 * _PREVIEW_MARGIN
+    inner_h = ch - _PREVIEW_MARGIN - _PREVIEW_BAR_SPACE
+    scale = min(inner_w / rx, inner_h / ry)
+    rw, rh = rx * scale, ry * scale
+    x = _PREVIEW_MARGIN + (inner_w - rw) / 2
+    y = _PREVIEW_MARGIN + (inner_h - rh) / 2
+
+    def to_px2(ph, pv):
+        if not (math.isfinite(ph) and math.isfinite(pv)):
+            raise ValueError("座標必須為有限數")
+        return (_r3(x + (ph - lo_h) * scale), _r3(y + (hi_v - pv) * scale))
+
+    def to_px(pt):
+        return to_px2(float(pt[ah]), float(pt[av]))
+
+    segs = []
+    for a, b in segments:
+        x0, y0 = to_px(a)
+        x1, y1 = to_px(b)
+        segs.append([x0, y0, x1, y1])
+
+    notes = []
+    obstacles, hangers, joints = list(obstacles), list(hangers), list(joints)
+    obs_px = []
+    for o in obstacles:
+        olo, ohi = o["lo"], o["hi"]
+        vals = [float(v) for v in (olo[0], olo[1], olo[2], ohi[0], ohi[1], ohi[2])]
+        if not all(math.isfinite(v) for v in vals):
+            raise ValueError("障礙物座標必須為有限數")
+        if len(obs_px) >= PREVIEW_MAX_OBSTACLES:
+            continue
+        h0 = max(min(vals[ah], vals[3 + ah]), lo_h)
+        h1 = min(max(vals[ah], vals[3 + ah]), hi_h)
+        v0 = max(min(vals[av], vals[3 + av]), lo_v)
+        v1 = min(max(vals[av], vals[3 + av]), hi_v)
+        if h1 <= h0 or v1 <= v0:                               # 此視角的投影完全在房間框外
+            continue
+        px0, py_top = to_px2(h0, v1)
+        px1, py_bot = to_px2(h1, v0)
+        kind = o.get("kind") if o.get("kind") in OBSTACLE_KINDS else "other"
+        obs_px.append({"kind": kind, "rect": [px0, py_top, _r3(px1 - px0), _r3(py_bot - py_top)]})
+    if len(obstacles) > PREVIEW_MAX_OBSTACLES:
+        notes.append(f"障礙物共 {len(obstacles)} 個，僅顯示前 {PREVIEW_MAX_OBSTACLES} 個。")
+
+    hang_px, seen = [], set()
+    for h in hangers:
+        pt = to_px(h)
+        if pt in seen or len(hang_px) >= PREVIEW_MAX_HANGERS:
+            continue
+        seen.add(pt)
+        hang_px.append(list(pt))
+    if len(hang_px) >= PREVIEW_MAX_HANGERS and len(hangers) > PREVIEW_MAX_HANGERS:
+        notes.append(f"吊架共 {len(hangers)} 個，僅顯示前 {PREVIEW_MAX_HANGERS} 個。")
+
+    joint_px = []
+    for jt in joints:
+        pt = to_px(jt["point"])
+        if len(joint_px) >= PREVIEW_MAX_JOINTS:
+            continue
+        kind = jt.get("kind") if jt.get("kind") in PREVIEW_JOINT_KINDS else "unsupported"
+        joint_px.append({"kind": kind, "pt": list(pt)})
+    if len(joints) > PREVIEW_MAX_JOINTS:
+        notes.append(f"接頭共 {len(joints)} 個，僅顯示前 {PREVIEW_MAX_JOINTS} 個。")
+
+    metres = _nice_scale_m(0.35 * rx)
+    length_px = metres * scale
+    return {
+        "view": view,
+        "title": title,
+        "axes": [_AXIS_NAME[ah], _AXIS_NAME[av]],
+        "caption": PREVIEW_CAPTION,
+        "size": [cw, ch],
+        "room": [_r3(x), _r3(y), _r3(rw), _r3(rh)],
+        "segments": segs,
+        "start": list(to_px(start)) if start is not None else None,
+        "ends": [list(to_px(e)) for e in ends],
+        "obstacles": obs_px,
+        "hangers": hang_px,
+        "joints": joint_px,
+        "counts": {"obstacles": len(obstacles), "hangers": len(hangers), "joints": len(joints)},
+        "notes": notes,
+        "scale_bar": {"x": _r3(x), "y": _r3(y + rh + 14), "length_px": _r3(length_px),
+                      "label": f"{metres:g} m"},
+    }
+
+
+def xy_preview(room, segments, size=PREVIEW_SIZE, **layers) -> dict:
+    """俯視（XY）示意；等同 view_preview(..., "xy")，保留給既有呼叫端。"""
+    return view_preview(room, segments, "xy", size, **layers)
+
+
+def preview_views(room, segments, **layers) -> dict:
+    """三個視角一次算好（任一視角失敗就拋例外；容錯版本見 safe_preview）。"""
+    segments = list(segments)
+    return {"caption": PREVIEW_CAPTION, "default_view": "xy",
+            "views": {k: view_preview(room, segments, k, **layers) for k in PREVIEW_VIEWS}}
+
+
+def preview_joints(route) -> list:
+    """接頭與 Revit 匯入 JSON 同一個來源（export_revit.build_joints；分支接入點先切段），座標 mm → m。"""
+    return [{"kind": j["kind"], "point": [v / 1000 for v in j["point"]]}
+            for j in ER.build_joints(ER.split_segments(route))]
+
+
+def _preview_bytes(obj) -> int:
+    return len(json.dumps(obj, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+
+
+def safe_preview(res) -> tuple:
+    """(preview, preview_error)。示意圖只是附加資訊：任何失敗都不能讓已成功的工作變成錯誤。
+
+    preview = {caption, default_view, views: {xy, xz, yz}}；每個視角各自容錯：
+    圖層各自取資料（障礙物＝送出的請求、吊架＝route.hangers、接頭＝preview_joints）；取不到的圖層只略過並附註。
+    某視角帶圖層換算失敗時退回只畫基本示意（房間、路徑、起訖點）；連基本示意都失敗就略過該視角並附註。
+    全部視角都失敗、或只留預設視角仍超過 PREVIEW_MAX_BYTES，才回 None + 文字。"""
+    try:
+        inp = res.inputs
+        segments = list(res.route.segments)
+        layers, broken = {}, []
+        sources = (("obstacles", lambda: list(inp.obstacles or [])),
+                   ("hangers", lambda: list(res.route.hangers or [])),
+                   ("joints", lambda: preview_joints(res.route)))
+        for name, get in sources:
+            try:
+                layers[name] = get()
+            except Exception as e:                             # 單一圖層失敗不影響其他圖層
+                broken.append(name)
+                sys.stderr.write(f"[webui] preview layer {name} skipped: {type(e).__name__}\n")
+        views, failed = {}, []
+        for key in PREVIEW_VIEWS:
+            try:
+                try:
+                    pv = view_preview(inp.room, segments, key, start=inp.start, ends=inp.ends, **layers)
+                except Exception as e:
+                    sys.stderr.write(f"[webui] preview {key} layers skipped: {type(e).__name__}\n")
+                    pv = view_preview(inp.room, segments, key, start=inp.start, ends=inp.ends)
+                    pv["notes"].append("圖層資料異常，僅顯示房間、路徑與起訖點。")
+                else:
+                    if broken:
+                        pv["notes"].append("無法顯示的圖層：" + "、".join(_LAYER_LABEL[b] for b in broken) + "。")
+            except Exception as e:                             # 單一視角失敗不影響其他視角
+                failed.append(key)
+                sys.stderr.write(f"[webui] preview {key} skipped: {type(e).__name__}\n")
+                continue
+            views[key] = pv
+        if not views:
+            raise ValueError("no preview view")
+        if failed:
+            msg = "無法產生的視角：" + "、".join(k.upper() for k in failed) + "。"
+            for pv in views.values():
+                pv["notes"].append(msg)
+        default = "xy" if "xy" in views else next(iter(views))
+        out = {"caption": PREVIEW_CAPTION, "default_view": default, "views": views}
+        if _preview_bytes(out) > PREVIEW_MAX_BYTES:
+            keep = views[default]
+            keep["notes"].append("示意資料量過大，僅顯示 " + default.upper() + " 視角。")
+            out["views"] = {default: keep}
+            if _preview_bytes(out) > PREVIEW_MAX_BYTES:
+                raise ValueError("preview too large")
+        return out, None
+    except Exception as e:                                     # 不洩漏細節，只記類型
+        sys.stderr.write(f"[webui] preview skipped: {type(e).__name__}\n")
+        return None, PREVIEW_UNAVAILABLE
+
+
 def human_error(err: P.PipelineError) -> dict:
     title, hint = HUMAN.get((err.stage, err.code), ("執行失敗", "請查看下方的錯誤代碼與說明。"))
     if err.cleanup_failed:
@@ -308,10 +540,12 @@ class JobManager:
                 files.append({"kind": kind, "label": KIND_LABEL[kind], "name": ent["name"],
                               "href": f"{base}/download/{res.run_id}/{kind}", "sha8": ent["sha256"][:8]})
         prev = previous_version(res.run_id)
+        preview, preview_error = safe_preview(res)
         return {"state": "done", "run_id": res.run_id, "summary": res.to_summary_dict(), "files": files,
                 "banners": [BANNER_FIXED, SCOPE_NOTE] if res.stats.get("unverified_checks") or
                 any(not g.verified for g in res.gov.values()) else [SCOPE_NOTE],
-                "diff_href": f"{base}/diff/{prev}/{res.run_id}" if prev else None}
+                "diff_href": f"{base}/diff/{prev}/{res.run_id}" if prev else None,
+                "preview": preview, "preview_error": preview_error}
 
     def status(self, jid: str):
         with self._lock:
@@ -365,6 +599,9 @@ button[disabled]{opacity:.6;cursor:progress}
 table{border-collapse:collapse;width:100%;font-size:.9rem}th,td{border:1px solid #888;padding:3px 6px;text-align:left;
 word-break:break-word}
 .mono{font-family:Consolas,"Courier New",monospace;font-size:.85rem}ul.files{padding-left:1.2em}
+canvas{display:block;max-width:100%;border:1px solid #888;background:#fafafa;margin:.6em 0}
+.views{display:flex;flex-wrap:wrap;gap:.4em;margin:.4em 0}.views button{border:1px solid #444;background:#f4f4f4;cursor:pointer}
+.views button[aria-pressed=true]{background:#0050b4;border-color:#0050b4;color:#fff;font-weight:bold}
 @media(max-width:480px){input[type=number]{width:6em}}
 """.strip()
 
@@ -419,6 +656,238 @@ APP_JS = r"""
     return req;
   }
 
+  function finite(v) { return typeof v === "number" && isFinite(v); }
+  function finiteList(a, n) {
+    if (!Array.isArray(a) || a.length !== n) return false;
+    for (var i = 0; i < n; i++) if (!finite(a[i])) return false;
+    return true;
+  }
+  function previewOk(pv) {
+    if (!pv || typeof pv !== "object" || typeof pv.caption !== "string") return false;
+    if (!finiteList(pv.size, 2) || pv.size[0] <= 0 || pv.size[1] <= 0 || pv.size[0] > 4000 || pv.size[1] > 4000) return false;
+    if (!finiteList(pv.room, 4) || !Array.isArray(pv.segments)) return false;
+    for (var i = 0; i < pv.segments.length; i++) if (!finiteList(pv.segments[i], 4)) return false;
+    if (pv.start !== null && pv.start !== undefined && !finiteList(pv.start, 2)) return false;
+    if (pv.ends !== undefined && !Array.isArray(pv.ends)) return false;
+    for (var j = 0; pv.ends && j < pv.ends.length; j++) if (!finiteList(pv.ends[j], 2)) return false;
+    var sb = pv.scale_bar;
+    return !!sb && finite(sb.x) && finite(sb.y) && finite(sb.length_px) && typeof sb.label === "string";
+  }
+  var OBS_STYLE = {structure: ["#444", "結構"], water: ["#1a8fc9", "水管"], duct: ["#777", "風管"],
+    heat: ["#d97a00", "熱源"], heat_bare: ["#a0461e", "無保溫熱源"], tray_power: ["#7b3fa0", "電力橋架"],
+    tray_signal: ["#c055b8", "訊號橋架"], other: ["#999", "其他"]};
+  var JOINT_LABEL = {elbow: "彎頭◇", tee: "三通△", cross: "四通⊞", union: "直接頭○", unsupported: "未支援接頭⊠"};
+  var LAYER_CAP = 1000;
+  function layer(a, ok) {
+    var out = [];
+    if (!Array.isArray(a)) return out;
+    for (var i = 0; i < a.length && out.length < LAYER_CAP; i++) if (ok(a[i])) out.push(a[i]);
+    return out;
+  }
+  function obstacleOk(o) { return !!o && typeof o.kind === "string" && finiteList(o.rect, 4) && o.rect[2] > 0 && o.rect[3] > 0; }
+  function jointOk(o) { return !!o && typeof o.kind === "string" && finiteList(o.pt, 2); }
+  function pointOk(p) { return finiteList(p, 2); }
+  function drawObstacles(ctx, list) {
+    for (var i = 0; i < list.length; i++) {
+      var r = list[i].rect, st = OBS_STYLE[list[i].kind] || OBS_STYLE.other, k;
+      ctx.save();
+      ctx.fillStyle = "rgba(160,160,160,0.18)"; ctx.fillRect(r[0], r[1], r[2], r[3]);
+      ctx.beginPath(); ctx.rect(r[0], r[1], r[2], r[3]); ctx.clip();
+      ctx.strokeStyle = st[0]; ctx.lineWidth = 1; ctx.beginPath();
+      for (k = -r[3]; k < r[2]; k += 6) { ctx.moveTo(r[0] + k, r[1] + r[3]); ctx.lineTo(r[0] + k + r[3], r[1]); }
+      ctx.stroke(); ctx.restore();
+      ctx.strokeStyle = st[0]; ctx.lineWidth = 1.5; ctx.strokeRect(r[0], r[1], r[2], r[3]);
+    }
+  }
+  function drawJoint(ctx, j) {
+    var x = j.pt[0], y = j.pt[1], s = 5;
+    ctx.lineWidth = 1.5; ctx.strokeStyle = "#111"; ctx.fillStyle = "#fff"; ctx.beginPath();
+    if (j.kind === "elbow") { ctx.moveTo(x, y - s); ctx.lineTo(x + s, y); ctx.lineTo(x, y + s); ctx.lineTo(x - s, y); ctx.closePath(); ctx.fill(); ctx.stroke(); }
+    else if (j.kind === "tee") { ctx.moveTo(x, y - s); ctx.lineTo(x + s, y + s); ctx.lineTo(x - s, y + s); ctx.closePath(); ctx.fill(); ctx.stroke(); }
+    else if (j.kind === "cross") {
+      ctx.rect(x - s, y - s, 2 * s, 2 * s); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x - s, y); ctx.lineTo(x + s, y); ctx.moveTo(x, y - s); ctx.lineTo(x, y + s); ctx.stroke();
+    } else if (j.kind === "union") { ctx.arc(x, y, s - 1, 0, 2 * Math.PI); ctx.fill(); ctx.stroke(); }
+    else {
+      ctx.strokeStyle = "#b40000"; ctx.rect(x - s, y - s, 2 * s, 2 * s); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x - s, y - s); ctx.lineTo(x + s, y + s); ctx.moveTo(x + s, y - s); ctx.lineTo(x - s, y + s); ctx.stroke();
+    }
+  }
+  var VIEWS = [
+    {key: "xy", button: "XY 俯視", title: "XY 平面示意（俯視）", h: "X", v: "Y", side: "俯視",
+      path: "俯視，垂直段顯示為點", depth: "高度"},
+    {key: "xz", button: "XZ 前視", title: "XZ 立面示意（前視）", h: "X", v: "Z", side: "前視",
+      path: "前視，沿 Y 向的段顯示為點", depth: "Y 向前後"},
+    {key: "yz", button: "YZ 側視", title: "YZ 立面示意（側視）", h: "Y", v: "Z", side: "側視",
+      path: "側視，沿 X 向的段顯示為點", depth: "X 向前後"}];
+  function legendText(vw, obs, hs, jt) {
+    var parts = ["圖例：藍線＝橋架路徑（" + vw.path + "）", "綠方塊＝起點", "紅圓點＝終點"], seen = {}, kinds = [], i;
+    if (obs.length) {
+      for (i = 0; i < obs.length; i++) {
+        var st = OBS_STYLE[obs[i].kind] || OBS_STYLE.other;
+        if (!seen[st[1]]) { seen[st[1]] = true; kinds.push(st[1]); }
+      }
+      parts.push("斜線框＝障礙物" + vw.side + "投影（不分" + vw.depth + "；依類型著色：" + kinds.join("、") + "）");
+    }
+    if (hs.length) parts.push("黑色 ×＝吊架");
+    if (jt.length) {
+      seen = {}; kinds = [];
+      for (i = 0; i < jt.length; i++) {
+        var lb = JOINT_LABEL[jt[i].kind] || JOINT_LABEL.unsupported;
+        if (!seen[lb]) { seen[lb] = true; kinds.push(lb); }
+      }
+      parts.push("接頭：" + kinds.join("、"));
+    }
+    return parts.join("；") + "；畫布軸向：" + vw.h + " 向右、" + vw.v + " 向上；比例尺單位 m。";
+  }
+  // 起訖點標籤排版：相距 MARK_TOL px 內的點合併成一個標籤（如「起點／終點1」）；其餘依序試候選位置
+  // （右上、右下、左上、左下，再逐行往外疊），取第一個不碰到已放標籤與任何記號的位置；一律夾回畫布內。
+  var MARK_TOL = 4, LABEL_H = 14;
+  function groupMarkers(marks, tol) {
+    var groups = [], i, g;
+    for (i = 0; i < marks.length; i++) {
+      for (g = 0; g < groups.length; g++) {
+        if (Math.abs(groups[g].x - marks[i].x) <= tol && Math.abs(groups[g].y - marks[i].y) <= tol) break;
+      }
+      if (g < groups.length) groups[g].label += "／" + marks[i].label;
+      else groups.push({x: marks[i].x, y: marks[i].y, label: marks[i].label});
+    }
+    return groups;
+  }
+  function boxHit(a, b) { return a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1; }
+  function layoutLabels(groups, measure, w, h, lh) {
+    var taken = [], out = [], i, j, s, t;
+    for (i = 0; i < groups.length; i++) {
+      taken.push({x0: groups[i].x - 6, y0: groups[i].y - 6, x1: groups[i].x + 6, y1: groups[i].y + 6});
+    }
+    for (i = 0; i < groups.length; i++) {
+      var g = groups[i], tw = measure(g.label), cands = [], best = null, fallback = null;
+      for (j = 0; j < 6; j++) {
+        cands.push([g.x + 7, g.y - 7 - j * lh], [g.x + 7, g.y + 14 + j * lh],
+          [g.x - 7 - tw, g.y - 7 - j * lh], [g.x - 7 - tw, g.y + 14 + j * lh]);
+      }
+      for (s = 0; s < cands.length && !best; s++) {
+        var lx = Math.min(Math.max(cands[s][0], 2), Math.max(2, w - 2 - tw));
+        var ly = Math.min(Math.max(cands[s][1], lh), h - 4);
+        var bx = {x0: lx, y0: ly - lh + 2, x1: lx + tw, y1: ly + 2}, hit = false;
+        for (t = 0; t < taken.length && !hit; t++) hit = boxHit(bx, taken[t]);
+        if (!fallback) fallback = bx;
+        if (!hit) best = bx;
+      }
+      if (!best) {                                     // 全部候選都擠：只避開已放的標籤（可蓋到記號）
+        for (s = 0; s < cands.length && !best; s++) {
+          var fx = Math.min(Math.max(cands[s][0], 2), Math.max(2, w - 2 - tw));
+          var fy = Math.min(Math.max(cands[s][1], lh), h - 4);
+          var fb = {x0: fx, y0: fy - lh + 2, x1: fx + tw, y1: fy + 2}, clash = false;
+          for (t = groups.length; t < taken.length && !clash; t++) clash = boxHit(fb, taken[t]);
+          if (!clash) best = fb;
+        }
+      }
+      best = best || fallback;
+      taken.push(best);
+      out.push({text: g.label, x: best.x0, y: best.y1 - 2});
+    }
+    return out;
+  }
+  // ── end label layout ──
+  function drawView(holder, pv, vw) {
+    var obs = layer(pv.obstacles, obstacleOk), hs = layer(pv.hangers, pointOk), jt = layer(pv.joints, jointOk);
+    var cv = document.createElement("canvas");
+    cv.id = "preview"; cv.width = pv.size[0]; cv.height = pv.size[1];
+    cv.setAttribute("role", "img"); cv.setAttribute("aria-label", vw.title + "（" + pv.caption + "）");
+    var ctx = null;
+    try { ctx = cv.getContext("2d"); } catch (e) { ctx = null; }
+    if (!ctx) { holder.appendChild(text("p", "此瀏覽器無法繪製示意圖；請以下載檔與報告為準。", "hint")); return; }
+    try {
+      var rm = pv.room, sg = pv.segments, sb = pv.scale_bar, k;
+      ctx.strokeStyle = "#111"; ctx.fillStyle = "#111"; ctx.lineWidth = 1; ctx.strokeRect(rm[0], rm[1], rm[2], rm[3]);
+      drawObstacles(ctx, obs);
+      ctx.strokeStyle = "#0050b4"; ctx.lineWidth = 3; ctx.lineCap = "round";
+      ctx.fillStyle = "#0050b4";
+      for (k = 0; k < sg.length; k++) {
+        ctx.beginPath();
+        if (sg[k][0] === sg[k][2] && sg[k][1] === sg[k][3]) { ctx.arc(sg[k][0], sg[k][1], 3, 0, 2 * Math.PI); ctx.fill(); continue; }
+        ctx.moveTo(sg[k][0], sg[k][1]); ctx.lineTo(sg[k][2], sg[k][3]); ctx.stroke();
+      }
+      ctx.strokeStyle = "#111"; ctx.lineWidth = 1.5; ctx.lineCap = "butt"; ctx.beginPath();
+      for (k = 0; k < hs.length; k++) {
+        ctx.moveTo(hs[k][0] - 3, hs[k][1] - 3); ctx.lineTo(hs[k][0] + 3, hs[k][1] + 3);
+        ctx.moveTo(hs[k][0] + 3, hs[k][1] - 3); ctx.lineTo(hs[k][0] - 3, hs[k][1] + 3);
+      }
+      ctx.stroke();
+      for (k = 0; k < jt.length; k++) drawJoint(ctx, jt[k]);
+      ctx.font = "12px sans-serif"; ctx.lineWidth = 1; ctx.strokeStyle = "#111";
+      var marks = [];
+      if (pv.start) {
+        ctx.fillStyle = "#0a7a2f"; ctx.fillRect(pv.start[0] - 5, pv.start[1] - 5, 10, 10);
+        marks.push({x: pv.start[0], y: pv.start[1], label: "起點"});
+      }
+      for (k = 0; pv.ends && k < pv.ends.length; k++) {
+        ctx.fillStyle = "#b40000"; ctx.beginPath(); ctx.arc(pv.ends[k][0], pv.ends[k][1], 5, 0, 2 * Math.PI); ctx.fill();
+        marks.push({x: pv.ends[k][0], y: pv.ends[k][1], label: "終點" + (k + 1)});
+      }
+      var labs = layoutLabels(groupMarkers(marks, MARK_TOL), function (s) { return ctx.measureText(s).width; },
+        pv.size[0], pv.size[1], LABEL_H);
+      ctx.fillStyle = "#111";
+      for (k = 0; k < labs.length; k++) ctx.fillText(labs[k].text, labs[k].x, labs[k].y);
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(sb.x, sb.y); ctx.lineTo(sb.x + sb.length_px, sb.y);
+      ctx.moveTo(sb.x, sb.y - 4); ctx.lineTo(sb.x, sb.y + 4);
+      ctx.moveTo(sb.x + sb.length_px, sb.y - 4); ctx.lineTo(sb.x + sb.length_px, sb.y + 4); ctx.stroke();
+      ctx.fillText(sb.label, sb.x, sb.y + 16);
+      ctx.font = "bold 12px sans-serif";
+      var hl = vw.h + " →";
+      ctx.fillText(hl, rm[0] + rm[2] - ctx.measureText(hl).width, rm[1] + rm[3] + 14);
+      ctx.fillText("↑ " + vw.v, rm[0], rm[1] - 6);
+      ctx.font = "12px sans-serif";
+      ctx.fillText(pv.caption, pv.size[0] - 8 - ctx.measureText(pv.caption).width, pv.size[1] - 8);
+    } catch (e2) {
+      holder.appendChild(text("p", "繪製示意圖時發生問題；請以下載檔與報告為準。", "hint"));
+      return;
+    }
+    holder.appendChild(cv);
+    holder.appendChild(text("p", legendText(vw, obs, hs, jt), "hint"));
+    var notes = Array.isArray(pv.notes) ? pv.notes : [];
+    for (var n = 0; n < notes.length && n < 10; n++) if (typeof notes[n] === "string") holder.appendChild(text("p", notes[n], "hint"));
+  }
+  function drawPreview(box, d) {
+    var pr = d.preview, head = text("h3", VIEWS[0].title), avail = {}, first = null, start = null, i;
+    box.appendChild(head);
+    var ok = !!pr && typeof pr === "object" && typeof pr.caption === "string" && !!pr.views && typeof pr.views === "object";
+    for (i = 0; ok && i < VIEWS.length; i++) {
+      var pv = Object.prototype.hasOwnProperty.call(pr.views, VIEWS[i].key) ? pr.views[VIEWS[i].key] : null;
+      if (previewOk(pv)) { avail[VIEWS[i].key] = pv; if (!first) first = VIEWS[i]; }
+      if (pr.default_view === VIEWS[i].key && avail[VIEWS[i].key]) start = VIEWS[i];
+    }
+    if (!first) {
+      box.appendChild(text("p", typeof d.preview_error === "string" ? d.preview_error : "無法顯示示意圖；請以下載檔與報告為準。", "hint"));
+      return;
+    }
+    box.appendChild(text("p", d.preview.caption, "hint"));
+    var bar = document.createElement("div"), holder = document.createElement("div"), buttons = [];
+    bar.className = "views"; bar.setAttribute("role", "group"); bar.setAttribute("aria-label", "切換示意視角");
+    function show(vw) {
+      head.textContent = vw.title;
+      for (var b = 0; b < buttons.length; b++) {
+        var on = buttons[b].key === vw.key;
+        buttons[b].el.setAttribute("aria-pressed", on ? "true" : "false");
+        buttons[b].el.className = on ? "active" : "";
+      }
+      clear(holder);
+      drawView(holder, avail[vw.key], vw);
+    }
+    function addButton(vw) {
+      var btn = document.createElement("button");
+      btn.type = "button"; btn.textContent = vw.button; btn.setAttribute("aria-pressed", "false");
+      if (avail[vw.key]) btn.addEventListener("click", function () { show(vw); });
+      else { btn.disabled = true; btn.title = "此視角無法產生示意"; }
+      bar.appendChild(btn); buttons.push({key: vw.key, el: btn});
+    }
+    for (i = 0; i < VIEWS.length; i++) addButton(VIEWS[i]);
+    box.appendChild(bar); box.appendChild(holder);
+    show(start || first);
+  }
+
   function renderResult(d) {
     var box = $("results"); clear(box);
     for (var i = 0; i < d.banners.length; i++) box.appendChild(text("div", d.banners[i], "banner"));
@@ -430,6 +899,7 @@ APP_JS = r"""
       var tr = document.createElement("tr"); tr.appendChild(text("th", rows[r][0])); tr.appendChild(text("td", String(rows[r][1]))); t.appendChild(tr);
     }
     box.appendChild(t);
+    drawPreview(box, d);
     var h = text("h3", "下載"); box.appendChild(h);
     var ul = document.createElement("ul"); ul.className = "files";
     for (var k = 0; k < d.files.length; k++) {

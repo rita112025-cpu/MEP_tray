@@ -115,6 +115,11 @@ def test_docs_do_not_claim_six_slow_tests_or_a_certain_symlink_skip():
     assert "在不支援符號連結的機器上會有一個測試 skip" in text("INSTALL.md")
 
 
+def test_manual_says_the_result_preview_is_schematic_not_a_construction_drawing():
+    t = text("MANUAL.md")
+    assert "示意圖，非施工圖" in t and "XY" in t
+
+
 def test_manual_discloses_routing_and_clearance_scope_limits():
     t = text("MANUAL.md")
     for kw in ("greedy shared-trunk", "不保證全域最佳解", "JSON 軸對齊 box",
@@ -127,3 +132,76 @@ def test_manual_documents_the_mrt_appendix_c_decisions():
     for kw in ("C-041", "1000", "C-048", "500", "屏蔽", "檢修空間", "heat_bare", "C-050", "SHOULD", "大於 100", "易燃爆氣體管",
                "用電設備交越", "交叉 300", "PDF 頁碼"):
         assert kw in t, kw
+
+
+def test_manual_documents_cable_tray_support_fill_and_layer_rules():
+    t = text("MANUAL.md")
+    for kw in ("1000", "255", "2400", "NEMA VE1", "第三層", "最多兩層", "1.15.2 (1) F", "p.1-57", "用戶用電設備裝置規則",
+               "接地匯流排", "不是 Cable Tray 填充率", "尚未自動檢核", "不是本工程允許的托架安裝間距"):
+        assert kw in t, kw
+    assert "fill ratio 維持 null" in t
+
+
+def test_manual_describes_the_preview_layers():
+    t = text("MANUAL.md")
+    for kw in ("障礙物", "吊架", "接頭"):
+        assert kw in t.split("XY 平面示意")[1][:300], kw
+
+
+def test_manual_describes_the_preview_view_switching():
+    t = text("MANUAL.md")
+    for kw in ("XZ", "YZ", "俯視", "前視", "側視", "切換"):
+        assert kw in t, kw
+
+
+def _matrix_rows():
+    sec = text("VERIFICATION.md").split("## Revit capability matrix")[1].split("\n## ")[0]
+    return [ln for ln in sec.splitlines() if ln.startswith("| Coordinate transform") or ln.startswith("| Revit 2027")]
+
+
+def test_verification_matrix_marks_pbp_translation_verified_and_keeps_the_rest_unverified():
+    rows = _matrix_rows()
+    pbp = [r for r in rows if "PROJECT_BASE_POINT 非零位置平移" in r]
+    assert len(pbp) == 1 and "UNVERIFIED" not in pbp[0], pbp
+    gui = pbp[0].rstrip(" |").split(" | ")[-1]
+    assert gui.startswith("PASS") and "Revit 2025.5" in gui and "Load Once" in gui, gui
+    for kw in ("PBP 旋轉", "Survey Point", "模型 origin 非零", "Revit 2027"):
+        row = [r for r in rows if kw in r]
+        assert len(row) == 1 and row[0].rstrip(" |").endswith(("UNVERIFIED", "UNVERIFIED（本機未安裝）")), (kw, row)
+    assert "runtime 未驗證" not in text("VERIFICATION.md").split("## Coordinate scope")[1].split("\n## ")[0]
+
+
+# ───────────── CI 與發布流程 ─────────────
+WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+
+
+def test_release_doc_covers_gate_versioning_signing_and_wdac():
+    t = text("RELEASE.md")
+    for kw in ("Pull Request", "develop", "master", "VERIFICATION.md", "未執行", "not executed", "CI",
+               "v<major>.<minor>.<patch>", "v0.4.0", "Changelog", "MepTrayImport.dll", "MepTray.Core.dll",
+               "signtool sign /fd SHA256 /tr", "/td SHA256", "Get-AuthenticodeSignature", "WDAC", "Unblock-File",
+               "永遠不進 repo", "不在 CI 或 PR workflow 中簽章", "自簽憑證只用於測試", "系統管理員"):
+        assert kw in t, kw
+    for target in re.findall(r"\]\(([^)#\s]+)\)", t):
+        if not re.match(r"[a-z]+://", target):
+            assert (DOCS / target).resolve().exists(), target
+
+
+def test_release_doc_is_linked_from_git_workflow_and_readme():
+    assert "](RELEASE.md)" in text("GIT_WORKFLOW.md")
+    assert "](docs/RELEASE.md)" in (ROOT / "README.md").read_text(encoding="utf-8")
+
+
+def test_ci_workflow_runs_the_gate_but_never_builds_the_revit_addin():
+    t = WORKFLOW.read_text(encoding="utf-8")
+    for kw in ("runs-on: windows-latest", "contents: read", "cancel-in-progress: true", 'python-version: "3.12"',
+               "cache: pip", "python -m pytest -q", "python -m compileall -q mep_tray tests", "git diff --check",
+               "dotnet build revit/MepTray.Core -c Release", "dotnet build revit/MepTray.Core.SelfTest -c Release",
+               "_build_model", "MepTray.Core.SelfTest.dll"):
+        assert kw in t, kw
+    assert t.count("branches: [develop, master]") == 2
+    for ln in t.splitlines():                      # MepTrayImport 只能出現在說明註解，不能被建置
+        if "MepTrayImport" in ln:
+            assert ln.lstrip().startswith("#"), ln
+    uses = re.findall(r"uses:\s*(\S+)", t)
+    assert uses and all(re.fullmatch(r"actions/[\w-]+@v\d+", u) for u in uses), uses

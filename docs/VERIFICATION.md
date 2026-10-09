@@ -4,6 +4,54 @@
 
 本輪只驗證與修正既有路徑，不新增產品功能。所有下表 runtime 狀態與 build 分開；Python baseline 122 tests 與第一次 benchmark 留在 HANDOFF。
 
+## Revit 2025.5 座標 oracle：PBP 非零位移（stage 4 slice 1，2026-10-09）
+
+**更正**：下節 `i_pbp` 的 PASS 只證明 PROJECT_BASE_POINT 路徑可 commit；全新樣板的 Project Base Point 位於內部原點（本輪讀回 PositionMm=(0,0,0)），offset 為 0，因此該場景無法鑑別平移是否正確。
+
+本輪新增：
+
+- AutoRun 若見 `<模型名>.setup.json`，匯入前以獨立 Transaction 套用（`{"move_pbp_mm":[dx,dy,dz]}` → 必要時解除釘選後 `ElementTransformUtils.MoveElement` 平移 PBP），讀回位移與要求差 > 0.5 mm 即失敗並寫 `*.setup_error.txt`、不匯入該場景。
+- Inspection 新增 `Coordinates`：PBP 與 Survey Point 的 Position／SharedPosition（mm）、Pinned，以及 ActiveProjectLocation 在內部原點的 ProjectPosition。
+- 新場景 `i2_pbp_moved`：PROJECT_BASE_POINT 基準、PBP 移動 (5000, −3000, 0) mm（不動 Z）。
+- `tests/test_revit_live.py`：實機測試（`revit` marker）斷言全部 12 場景的預期結果，以及「讀回端點 = 模型點 + 讀回 PBP 位置」（容差 0.5 mm；接頭端被 fitting 修剪不比對）；另有不需 Revit 的 setup 檔產生／驗證單元測試在預設 pytest 執行。
+
+Revit 2025 實機結果（25.5.0.57，`python -m tests.revit_live output\revit2025_coord_oracle`，證據 `output/revit2025_coord_oracle/models/`）：
+
+| 項目 | 讀回值 |
+|---|---|
+| 移動前 PBP Position／SharedPosition | (0, 0, 0)／(0, 0, 0)，Pinned=false |
+| 移動後 PBP Position | (5000, −3000, 0) mm（moved_mm 與要求完全一致） |
+| 移動後 PBP SharedPosition | (5000, −3000, 0) mm |
+| Survey Point Position／SharedPosition | 移動前後皆 (0, 0, 0) |
+| ActiveProjectPosition（Default Site，內部原點處） | EW=0、NS=0、Elev=0、Angle=0，移動前後不變 |
+| i2_pbp_moved 橋架 S001 | 模型 (1000,1000,3000)→(10000,1000,3000)；讀回 (6000,−2000,3000)→(15000,−2000,3000)，誤差 < 1e-9 mm |
+| 其餘 11 場景 | 結果與下節表相同（i_pbp offset 0） |
+
+- 人工步驟：未簽署的建置會讓 Revit 跳出「Security - Unsigned Add-In」對話框，須由使用者按「Load Once」AutoRun 才會繼續；未以登錄檔或信任設定繞過。
+- `pytest -m revit` 結果：`14 passed, 582 deselected in 90.46s`（13 項實機 AutoRun 斷言 + 1 項既有 C# SelfTest；Revit 實機輸出 `output/revit2025_coord_oracle_pytest/models/`；兩輪結束後皆無殘留 Revit.exe）
+- 未驗證：PBP 旋轉（Angle≠0）、Survey Point 移動與 SHARED_COORDINATES 基準、Z 位移與 Level 互動、Revit 2027；Revit 2020.2 起 PBP 已無 clipped/unclipped 切換，本輪僅驗證 MoveElement 移動 PBP（不移動模型）的行為。
+
+## Revit 2025.5 AutoRun acceptance update (2026-10-09)
+
+本輪以 AutoRun 入口（`tests/revit_live.py`，Revit 2025 實機 25.5.0.57）執行全部 10 場景，`autorun.done` 產生、無 `revit_error.txt`、無殘留 Revit 程序。報告存於 `output/revit2025_autorun/`。本次新增驗證，取代先前的 Inspection=null UNVERIFIED 狀態：
+
+| 場景 | 結果 | 證據 |
+|---|---|---|
+| a_tee | PASS — Committed、3 trays、tee OK、Inspection 回讀 | tray id 813370 起 |
+| b_elbow | PASS — 2 trays、elbow OK、端點 mm 與 Comments 回讀正確 | S001(1000,1000,3000) 等 |
+| c_unspecified | PASS（拒絕）— UNSPECIFIED 無覆寫正確 abort、未建元件 | Abort 訊息 |
+| ov_d_unspecified | PASS — 以 INTERNAL_ORIGIN 覆寫後 committed | ov_ 前綴覆寫路徑 |
+| e_missing_type | PASS（拒絕）— 列出可用 CableTrayType 後 abort、未建元件 | 可用型別清單 |
+| f_rollback | PASS（回滾）— 過短線段（<1/10 in）transaction 回滾、Committed=false | ArgumentException 記錄 |
+| g_cross | PASS — 4 trays、cross OK | tray id 4 筆 |
+| h_union | PASS — 2 trays、union OK（先前 UNVERIFIED） | — |
+| i_pbp | PASS — PROJECT_BASE_POINT 基準 committed、1 tray（先前 UNVERIFIED） | Basis=PROJECT_BASE_POINT |
+| j_shared | PASS（拒絕）— SHARED_COORDINATES 明確拒絕、未建元件 | Abort 訊息 |
+| k_unsupported | 依設計 — 非正交腿 joint 標 FAIL、trays 建立、Committed=true | topology matrix 定義行為 |
+
+- 未驗證維持：Revit 2027（本機未安裝 `C:\Program Files\Autodesk\Revit 2027`）、數值精度僅以場景端點抽驗（誤差 < 0.05 mm）、存檔重開持久化仍依 2026-10-03 人工驗收。
+- C# runtime 前次 BLOCKED（0x800711C7）已解除：SelfTest 44 項 ALL PASS、`pytest -m revit` 1 passed（2026-10-09，詳 HANDOFF 階段 1 紀錄；Code Integrity 政策未變更，無解除 OS policy 行為）。
+
 ## Revit 2025.5 manual acceptance update (2026-10-03)
 
 - Installed / Add-in Load / Command Invocation: PASS on Revit 25.5.0.57.
@@ -51,11 +99,16 @@ The individual cases and original gate below retain their historical status. Thi
 
 ## Revit capability matrix
 
-Static PASS 只表示已讀 interface/caller/source 並確認該範圍的防護與接線；不代表執行成功。GUI UNVERIFIED 均屬 HUMAN TEST PENDING。
+Static PASS 只表示已讀 interface/caller/source 並確認該範圍的防護與接線；不代表執行成功。GUI UNVERIFIED 均屬 HUMAN TEST PENDING。Revit GUI 欄的 PASS 僅限 Revit 2025.5（25.5.0.57）。SelfTest 欄為 2026-10-03 狀態；2026-10-09 SelfTest 44 項 ALL PASS 見上節。
 
 | 功能（明確範圍） | Static | Build | SelfTest | Revit GUI |
 |---|---|---|---|---|
-| Coordinate transform：內部座標／PBP 位置平移與未支援變換拒絕 | PASS | PASS | BLOCKED | UNVERIFIED |
+| Coordinate transform：PROJECT_BASE_POINT 非零位置平移（PBP 移動 (5000, −3000, 0) mm，僅 XY、Angle=0） | PASS | PASS | BLOCKED | PASS — Revit 2025.5 AutoRun（2026-10-09，`i2_pbp_moved` 讀回端點 = 模型點 + PBP 位置，誤差 < 1e-9 mm；`pytest -m revit` 14 passed；未簽署建置須人工按「Load Once」） |
+| Coordinate transform：SHARED_COORDINATES／UNSPECIFIED 基準拒絕 | PASS | PASS | BLOCKED | PASS（拒絕）— AutoRun 2026-10-09 `j_shared`、`c_unspecified` 未建元件 |
+| Coordinate transform：PBP 旋轉（Angle≠0）、PBP Z 位移與 Level 互動 | NOT SUPPORTED（只平移、不套用旋轉） | — | — | UNVERIFIED |
+| Coordinate transform：Survey Point 移動／SHARED_COORDINATES 基準匯入 | NOT SUPPORTED（依設計拒絕） | — | — | UNVERIFIED |
+| Coordinate transform：模型 origin 非零、非標準 axis、rotation_deg 非零拒絕 | PASS（拒絕） | PASS | BLOCKED | UNVERIFIED |
+| Revit 2027（任何功能） | — | — | — | UNVERIFIED（本機未安裝） |
 | Duplicate fitting detection：重複 joint ID／重複線段引用；不宣稱幾何全面去重 | PASS | PASS | BLOCKED | UNVERIFIED |
 | Segment reference validation：存在性、段數、null、唯一 ID | PASS | PASS | BLOCKED | UNVERIFIED |
 | Routing export：Python 實際輸出／C# 模型與 Comments 契約 | PASS | PASS | BLOCKED | UNVERIFIED |
@@ -66,13 +119,13 @@ Python export/roundtrip 已執行通過；C# Cross-language assertions 已 build
 ## Coordinate scope / NOT SUPPORTED
 
 - Revit internal：mm→ft，直接使用模型座標。
-- Project Base Point：mm→ft 後加上 `BasePoint.Position`；只做位置平移，保持 internal axes，不套用旋轉。
+- Project Base Point：mm→ft 後加上 `BasePoint.Position`；只做位置平移，保持 internal axes，不套用旋轉。非零 XY 平移已於 Revit 2025.5 AutoRun 驗證 PASS（2026-10-09，見上方座標 oracle 節）；PBP 旋轉與 Z 位移 UNVERIFIED。
 - Survey Point：NOT SUPPORTED，程式未取得 Survey Point。
 - Shared Coordinates：NOT SUPPORTED；輸入此 basis 時 Import 回報尚未實作，未進 transaction。
 - Link transform：NOT SUPPORTED，沒有 RevitLinkInstance / GetTransform caller。
 - 模型 origin 非零、非標準 axis 或 rotation_deg 非零：拒絕，不能忽略變換。
 
-前兩者僅為「已實作，runtime 未驗證」。README、未指定 basis 的選擇對話框與匯入結果 UI 均明確揭露此限制。
+前兩者已實作；Revit 2025.5 AutoRun 已驗證 PBP 非零 XY 平移（Angle=0、Z 不動），其餘座標變換與 Revit 2027 仍 UNVERIFIED。README、未指定 basis 的選擇對話框與匯入結果 UI 均明確揭露此限制。
 
 ## Nested null regression matrix
 

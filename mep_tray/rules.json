@@ -152,7 +152,7 @@
       "name": "業主需求書(四)附錄C 管線佈設及共同管架施作原則（汐東捷運）",
       "values": {
         "fill_max": null,
-        "span_max_m": null,
+        "span_max_m": 1.0,
         "bend_radius_factor": null,
         "fitting_radius_mm": 300,
         "headroom_mm": 300,
@@ -264,6 +264,15 @@
             "appendix_page": "C-7",
             "strength": "MUST",
             "note": "通信線架對其他線架水平／垂直 300 mm。"
+          }
+        ],
+        "span_max_m": [
+          {
+            "document": "業主需求書（二）第 1 章 機電一般規範",
+            "section": "1.15.2 (1) F",
+            "document_page": "1-57",
+            "strength": "MUST",
+            "note": "Cable Tray 一般托架（軟鋼熱浸鍍鋅）最大間距 1000 mm（原始 PDF 頁面人工核對）。彎曲段與 T 形接頭另要求 255 mm；目前沒有 fitting 專屬支撐模型，255 mm 尚未自動檢核。NEMA VE1 的 2400 mm 是工作負荷測試最大跨距，不是安裝間距。"
           }
         ]
       }

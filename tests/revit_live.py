@@ -2,11 +2,14 @@
 
 流程：建置匯入器 → 暫存 DLL → 臨時寫入 AutoRun .addin 清單（結束後移除）→ 啟動 Revit →
 等待 autorun.done → 讀取各場景的 *.revit_report.json。
+座標設定：setups() 中的場景會另寫 <名稱>.setup.json（例如 {"move_pbp_mm":[dx,dy,dz]}），AutoRun 於匯入前
+以獨立 Transaction 套用，結果寫入 *.setup_result.json（失敗則 *.setup_error.txt，且不匯入該場景）。
 注意：會啟動 Revit GUI；Revit 若出現「未簽署外掛」安全性對話框需由使用者按「Load Once/Always Load」。
 """
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -59,13 +62,68 @@ def scenarios() -> dict[str, dict]:
     s["i_pbp"] = _routed_model([(10, 1, 3)], "i_pbp", basis="PROJECT_BASE_POINT")
     s["j_shared"] = _routed_model([(10, 1, 3)], "j_shared", basis="SHARED_COORDINATES")
     s["k_unsupported"] = _manual_model([((0, 5, 3), a), (a, (5, 10, 3)), (a, (5, 5, 0))], "k_unsupported")
+    s["i2_pbp_moved"] = _routed_model([(10, 1, 3)], "i2_pbp_moved", basis="PROJECT_BASE_POINT")
     return s
+
+
+# 非零 PBP 位移（mm）；不動 Z，避免牽涉 Level 高程
+I2_PBP_DELTA_MM = (5000.0, -3000.0, 0.0)
+SETUP_KEYS = ("move_pbp_mm",)
+
+
+def setups() -> dict[str, dict]:
+    """各場景匯入前要套用的文件座標設定（檔名 <場景>.setup.json）。"""
+    return {"i2_pbp_moved": {"move_pbp_mm": list(I2_PBP_DELTA_MM)}}
+
+
+def validate_setup(d) -> list[str]:
+    """回傳錯誤清單（空 = 合法）；規則與 AutoRunApp.ApplySetup 一致。"""
+    if not isinstance(d, dict) or not d:
+        return ["setup 必須是非空物件"]
+    errs = [f"未知的 setup 鍵 '{k}'" for k in d if k not in SETUP_KEYS]
+    if "move_pbp_mm" in d:
+        v = d["move_pbp_mm"]
+        if not (isinstance(v, list) and len(v) == 3
+                and all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in v)):
+            errs.append("move_pbp_mm 必須是 3 個有限數值 [dx,dy,dz]（mm）")
+    return errs
+
+
+def endpoint_mismatches(model: dict, report: dict, offset_mm, tol_mm: float = 0.5) -> list[str]:
+    """比對 Revit 讀回的橋架端點與「模型點 + offset」。接頭處端點會被 fitting 修剪，故只比對非接頭端點。
+    回傳不符項目描述（空 = 全部相符）；找不到對應橋架也算不符。"""
+    trays = {t["Id"]: t for t in (report.get("Inspection") or {}).get("Trays", [])}
+    created = dict(x.split("=", 1) for x in report.get("CreatedTrays", []))
+    joint_pts = [j["point"] for j in model.get("joints", [])]
+    bad = []
+    for s in model["segments"]:
+        t = trays.get(created.get(s["id"], ""))
+        if t is None:
+            bad.append(f"{s['id']}: 找不到讀回的橋架")
+            continue
+        for key, got_key in (("start", "StartMm"), ("end", "EndMm")):
+            p = s[key]
+            if any(math.dist(p, q) < 1.0 for q in joint_pts):
+                continue
+            exp = [p[i] + offset_mm[i] for i in range(3)]
+            d = math.dist(exp, t[got_key])
+            if d > tol_mm:
+                bad.append(f"{s['id']}.{key}: 期望 {exp} 讀回 {t[got_key]} 差 {d:.3f} mm")
+    return bad
 
 
 def write_scenarios(d: Path) -> None:
     d.mkdir(parents=True, exist_ok=True)
-    for name, m in scenarios().items():
+    sc = scenarios()
+    for name, m in sc.items():
         (d / f"{name}.json").write_text(json.dumps(m, ensure_ascii=False), encoding="utf-8")
+    for name, st in setups().items():
+        if name not in sc:
+            raise ValueError(f"setup 對應的場景不存在: {name}")
+        errs = validate_setup(st)
+        if errs:
+            raise ValueError(f"{name}.setup.json: " + "; ".join(errs))
+        (d / f"{name}.setup.json").write_text(json.dumps(st), encoding="utf-8")
 
 
 def revit_running() -> bool:
@@ -86,7 +144,8 @@ def build_addin(dotnet: str) -> Path:
 
 
 def run_revit(dotnet: str, work: Path, timeout_s: int = 420, basis_override: str = "INTERNAL_ORIGIN") -> dict:
-    """回傳 {'version': str|None, 'reports': {scenario: dict}, 'errors': {scenario: str}, 'done': bool}"""
+    """回傳 {'version': str|None, 'reports': {scenario: dict}, 'models': {scenario: dict},
+    'setups': {scenario: dict}, 'errors': {scenario 或 scenario.setup: str}, 'done': bool, 'dir': Path}"""
     if revit_running():
         raise RuntimeError("Revit 已在執行；請先關閉，避免新程序被併入既有實例")
     if ADDINS_DIR is None:
@@ -120,8 +179,14 @@ def run_revit(dotnet: str, work: Path, timeout_s: int = 420, basis_override: str
             time.sleep(3)
             if proc.poll() is None:
                 proc.kill()
-    res = {"version": None, "reports": {}, "errors": {}, "done": (models / "autorun.done").exists(),
-           "dir": models}
+    res = {"version": None, "reports": {}, "models": {}, "setups": {}, "errors": {},
+           "done": (models / "autorun.done").exists(), "dir": models}
+    for name in scenarios():
+        res["models"][name] = json.loads((models / f"{name}.json").read_text(encoding="utf-8"))
+    for p in sorted(models.glob("*.json.setup_result.json")):
+        res["setups"][p.name.replace(".json.setup_result.json", "")] = json.loads(p.read_text(encoding="utf-8"))
+    for p in sorted(models.glob("*.json.setup_error.txt")):
+        res["errors"][p.name.replace(".json.setup_error.txt", "") + ".setup"] = p.read_text(encoding="utf-8")
     v = models / "revit_version.txt"
     if v.exists():
         res["version"] = v.read_text(encoding="utf-8").strip()
@@ -141,11 +206,15 @@ if __name__ == "__main__":
 
     from tests.dotnet_util import find_dotnet
     dn = find_dotnet()
-    w = Path(tempfile.mkdtemp(prefix="meprevit_"))
+    # 可選參數：輸出資料夾（保留證據用）；預設為暫存資料夾
+    w = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(tempfile.mkdtemp(prefix="meprevit_"))
     out = run_revit(dn, w)
-    print(json.dumps({k: v for k, v in out.items() if k != "reports"}, ensure_ascii=False, default=str, indent=1))
+    print(json.dumps({k: v for k, v in out.items() if k not in ("reports", "models")},
+                     ensure_ascii=False, default=str, indent=1))
     for k, v in out["reports"].items():
+        ins = v.get("Inspection") or {}
+        pbp = ((ins.get("Coordinates") or {}).get("ProjectBasePoint") or {}).get("PositionMm")
         print(k, "committed=", v.get("Committed"), "abort=", v.get("Abort"), "trays=",
-              len((v.get("Inspection") or {}).get("Trays", [])), "joints=",
-              [(j["Kind"], j["Status"]) for j in v.get("Joints", [])])
+              len(ins.get("Trays", [])), "joints=",
+              [(j["Kind"], j["Status"]) for j in v.get("Joints", [])], "pbp_mm=", pbp)
     sys.exit(0 if out["done"] else 1)

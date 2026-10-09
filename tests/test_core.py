@@ -10,7 +10,7 @@ ROOM = Box((0, 0, 0), (12, 6, 4))
 
 def test_strictest_picks_max_for_min_and_min_for_max():
     g = merge_strictest(["CNS", "IEC", "NEC", "TW_BUILDING", "MRT_APPX_C"])
-    assert g["span_max_m"].value == 2.0 and g["span_max_m"].code != "NEC"
+    assert g["span_max_m"].value == 1.0 and g["span_max_m"].code == "MRT_APPX_C"   # C-1.15.2(1)F；CNS 2.0、NEC 3.0 較寬
     assert g["fill_max"].value == 0.40
     assert g["clear_water_mm"].value == 400 and g["clear_water_mm"].code == "MRT_APPX_C"
     assert g["headroom_mm"].value == 300
@@ -123,7 +123,7 @@ def test_every_param_strictest_not_looser_than_any_single_code():
             assert g[key].all_values[g[key].code] == g[key].value
 
 
-@pytest.mark.parametrize("key,code", [("span_max_m", "CNS"), ("fill_max", "CNS"),
+@pytest.mark.parametrize("key,code", [("span_max_m", "MRT_APPX_C"), ("fill_max", "CNS"),
                                       ("clear_water_mm", "MRT_APPX_C"),
                                       ("tray_parallel_mm", "MRT_APPX_C")])
 def test_winner_code(key, code):
@@ -238,9 +238,9 @@ def test_evaluate_reads_direction_from_governing():
     g = merge_strictest(ALL)
     assert g["span_max_m"].direction == "max" and g["headroom_mm"].direction == "min"
     for verified in (True, False):
-        mx = dataclasses.replace(g["span_max_m"], verified=verified)   # 上限 2.0m
+        mx = dataclasses.replace(g["span_max_m"], verified=verified)   # 上限 1.0m
         mn = dataclasses.replace(g["headroom_mm"], verified=verified)  # 下限 300mm
-        ok_mx, bad_mx = evaluate(mx, 1.5), evaluate(mx, 2.5)
+        ok_mx, bad_mx = evaluate(mx, 0.8), evaluate(mx, 1.2)
         ok_mn, bad_mn = evaluate(mn, 350), evaluate(mn, 250)
         assert (ok_mx.indicative, bad_mx.indicative) == (PASS, FAIL)
         assert (ok_mn.indicative, bad_mn.indicative) == (PASS, FAIL)

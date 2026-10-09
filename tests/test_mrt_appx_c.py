@@ -17,6 +17,7 @@ MRT = "MRT_APPX_C"
 RULES = load_rules()
 M = RULES["codes"][MRT]
 OTHERS = [c for c in RULES["codes"] if c != MRT]
+ALL_CODES = list(RULES["codes"])
 
 
 # ───────────── M1：sources ─────────────
@@ -26,9 +27,12 @@ def test_every_non_null_mrt_value_has_complete_sources():
     for k, lst in M["sources"].items():
         assert lst, k
         for s in lst:
-            assert s["rule_id"].startswith("C-") and len(s["rule_id"]) == 5
-            assert isinstance(s["pdf_page"], int) and s["pdf_page"] > 0
-            assert s["appendix_page"].strip() and s["strength"] in SOURCE_STRENGTHS and isinstance(s["note"], str)
+            if "document" in s:                                         # 其他文件形式（業主需求書（二））
+                assert all(s[f].strip() for f in ("document", "section", "document_page")), k
+            else:
+                assert s["rule_id"].startswith("C-") and len(s["rule_id"]) == 5
+                assert isinstance(s["pdf_page"], int) and s["pdf_page"] > 0 and s["appendix_page"].strip()
+            assert s["strength"] in SOURCE_STRENGTHS and isinstance(s["note"], str)
 
 
 def test_specific_source_facts_from_the_owner_requirements():
@@ -78,7 +82,7 @@ def test_rules_without_sources_remain_valid_and_other_codes_have_none():
 def test_mrt_is_never_verified_and_unconfirmed_values_stay_unset():
     assert M["verified"] is False
     assert all(not g.verified for g in merge_strictest([MRT]).values())
-    for k in ("fill_max", "span_max_m", "bend_radius_factor"):
+    for k in ("fill_max", "bend_radius_factor"):   # 填充率、彎曲半徑倍數仍未取得可採用的依據
         assert M["values"][k] is None, k
     assert "gas" not in OBSTACLE_KINDS and "equipment" not in OBSTACLE_KINDS
 
@@ -174,3 +178,67 @@ def test_pipeline_report_and_manifest_snapshot_carry_the_provenance(isolate):
     assert snap["clear_heat_bare_mm"]["sources"][0]["rule_id"] == "C-041"
     html = open(r.files["report"], encoding="utf-8").read()
     assert "C-041 PDF p.8" in html and "C-048" in html and "C-049" in html
+
+
+# ───────────── Cable Tray 支撐間距（業主需求書（二）1.15.2(1)F，p.1-57） ─────────────
+def test_general_support_spacing_is_1000mm_with_the_original_page_as_source():
+    assert M["values"]["span_max_m"] == 1.0                                  # 既有欄位 span_max_m（m）；一般托架
+    src = M["sources"]["span_max_m"]
+    assert len(src) == 1 and src[0]["section"] == "1.15.2 (1) F" and src[0]["document_page"] == "1-57"
+    assert src[0]["document"].startswith("業主需求書（二）") and src[0]["strength"] == "MUST"
+    assert "1000" in src[0]["note"] and "255" in src[0]["note"]
+    g = merge_strictest([MRT])["span_max_m"]
+    assert g.value == 1.0 and g.verified is False and g.sources == src
+
+
+def test_nema_2400_and_bend_tee_255_are_not_used_as_the_general_support_spacing():
+    for c, info in RULES["codes"].items():
+        v = info["values"]["span_max_m"]
+        assert v is None or v <= 3.0, c                                       # 2400 mm = 2.4 m 不得出現在 MRT
+    assert M["values"]["span_max_m"] not in (2.4, 2400, 0.255, 255)
+    assert not [k for k in RULES["params"] if "bend_support" in k or "fitting_span" in k or "layers" in k]   # 沒有新參數
+
+
+def test_strictest_span_with_mrt_is_1000mm_and_hangers_follow_it():
+    from mep_tray.router import place_hangers
+    g = merge_strictest(["CNS", "NEC", MRT])["span_max_m"]
+    assert g.value == 1.0 and g.code == MRT and g.all_values == {"CNS": 2.0, "NEC": 3.0, MRT: 1.0}
+    room = Box((0, 0, 0), (12, 6, 4))
+    route = route_tray(room, (1, 1, 3), [(10, 1, 3)], [], 0.3, 0.1, "power", merge_strictest([MRT]), cell=0.25)
+    hs = sorted(h[0] for h in place_hangers(route, g.value))
+    assert max(b - a for a, b in zip(hs, hs[1:])) <= 1.0 + 1e-9
+
+
+def test_span_source_is_shown_in_report_text_and_snapshot():
+    g = merge_strictest([MRT])["span_max_m"]
+    t = _sources_text(g)
+    assert "1.15.2 (1) F" in t and "p.1-57" in t and "MUST" in t
+    snap = V.gov_snapshot({"span_max_m": g})["span_max_m"]["sources"][0]
+    assert snap["document_page"] == "1-57" and snap["section"] == "1.15.2 (1) F" and "note" not in snap
+
+
+@pytest.mark.parametrize("name,fn", [
+    ("document 缺 section", lambda c: c["sources"]["span_max_m"][0].pop("section")),
+    ("document_page 空白", lambda c: c["sources"]["span_max_m"][0].update(document_page=" ")),
+    ("strength 未知", lambda c: c["sources"]["span_max_m"][0].update(strength="MAY")),
+])
+def test_validator_rejects_bad_document_form_sources(name, fn):
+    with pytest.raises(ValueError):
+        validate_rules(_mutated(fn))
+
+
+# ───────────── fill ratio 與 50% 的誤讀 ─────────────
+def test_fill_ratio_stays_null_and_no_fifty_percent_is_a_tray_fill_value():
+    assert M["values"]["fill_max"] is None and "fill_max" not in M["sources"]
+    assert "fill_max" not in merge_strictest([MRT]) or merge_strictest([MRT])["fill_max"].code != MRT
+    # p.6-19 的 50% 是接地匯流排容量：MRT 不得有任何 fill_max 值或出處引用它（其他規範的既有值不在本輪範圍）
+    assert all("6-19" not in str(x) and "接地匯流排" not in str(x) for x in M["sources"].values())
+    assert merge_strictest(ALL_CODES)["fill_max"].code != MRT
+
+
+
+def test_no_tray_layers_schema_exists_so_the_two_layer_limit_is_documented_only():
+    import inspect
+    from mep_tray import compliance, model
+    assert "layer" not in inspect.getsource(compliance).lower() and "layers" not in Inputs.__dataclass_fields__
+    assert "layer" not in " ".join(model.Inputs.__dataclass_fields__)
