@@ -34,8 +34,9 @@ git add -A; git commit -m "feat: <描述>"
 # 合併回 develop（GitHub PR 或本機 --no-ff）
 git checkout develop; git merge --no-ff feature/<議題>
 
-# 釋出到 master
-git checkout master; git merge --no-ff develop; git tag v<版本>
+# 釋出到 master：一律經 GitHub PR（develop → master），流程見 docs/RELEASE.md；PR 合併後打 tag
+git checkout master; git pull --ff-only
+git tag -a v<版本> -m "v<版本>"; git push origin v<版本>
 ```
 
 ## 3. 合併 gate（合併前必跑）
@@ -45,6 +46,8 @@ git checkout master; git merge --no-ff develop; git tag v<版本>
 | `develop` | `python -m pytest -q` 全綠；`git diff --check` 通過 |
 | `master` | 完整驗證：`pytest -q` ＋ `-m slow` ＋（有 AutoCAD）`-m autocad` ＋（有 .NET SDK）`-m revit` ＋ `python -m compileall -q mep_tray tests`；任一類別無法執行須在合併說明註記「未執行」 |
 
+`develop`／`master` 的 push 與 PR 會自動跑 GitHub Actions CI（`.github/workflows/ci.yml`：預設 pytest、compileall、whitespace、C# Core／SelfTest build 與 SelfTest 執行）。CI 不建置 `MepTrayImport`（需本機 Revit API，不能再散布），因此 `master` gate 的 Revit 與 AutoCAD 項目仍須在本機執行，見 [RELEASE.md](RELEASE.md)。
+
 額外約束（沿用專案既定準則）：
 
 - Runtime gate 與 build 分開回報；編譯通過不視為執行驗證。
@@ -53,7 +56,9 @@ git checkout master; git merge --no-ff develop; git tag v<版本>
 
 ## 4. Release 檢查清單
 
+完整流程（gate、SemVer tag、changelog、Authenticode 簽章、WDAC）見 [RELEASE.md](RELEASE.md)。
+
 - [ ] `master` 合併 gate 全綠
 - [ ] `docs/VERIFICATION.md` 驗證狀態為最新
-- [ ] Revit 增益集 DLL 若再分發：需程式碼簽章（WDAC 環境，見 INSTALL 常見問題）
+- [ ] Revit 增益集 DLL 若再分發：需程式碼簽章（WDAC 環境，見 INSTALL 常見問題與 [RELEASE.md](RELEASE.md) §5–§6）
 - [ ] 打 tag：`v<major>.<minor>.<patch>`，並在 README 紀錄

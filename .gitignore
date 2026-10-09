@@ -9,3 +9,4 @@ cer.log
 **/bin/
 **/obj/
 venv/
+ci-inputs/

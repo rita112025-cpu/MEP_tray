@@ -152,3 +152,39 @@ def test_manual_describes_the_preview_view_switching():
     t = text("MANUAL.md")
     for kw in ("XZ", "YZ", "俯視", "前視", "側視", "切換"):
         assert kw in t, kw
+
+
+# ───────────── CI 與發布流程 ─────────────
+WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+
+
+def test_release_doc_covers_gate_versioning_signing_and_wdac():
+    t = text("RELEASE.md")
+    for kw in ("Pull Request", "develop", "master", "VERIFICATION.md", "未執行", "not executed", "CI",
+               "v<major>.<minor>.<patch>", "v0.4.0", "Changelog", "MepTrayImport.dll", "MepTray.Core.dll",
+               "signtool sign /fd SHA256 /tr", "/td SHA256", "Get-AuthenticodeSignature", "WDAC", "Unblock-File",
+               "永遠不進 repo", "不在 CI 或 PR workflow 中簽章", "自簽憑證只用於測試", "系統管理員"):
+        assert kw in t, kw
+    for target in re.findall(r"\]\(([^)#\s]+)\)", t):
+        if not re.match(r"[a-z]+://", target):
+            assert (DOCS / target).resolve().exists(), target
+
+
+def test_release_doc_is_linked_from_git_workflow_and_readme():
+    assert "](RELEASE.md)" in text("GIT_WORKFLOW.md")
+    assert "](docs/RELEASE.md)" in (ROOT / "README.md").read_text(encoding="utf-8")
+
+
+def test_ci_workflow_runs_the_gate_but_never_builds_the_revit_addin():
+    t = WORKFLOW.read_text(encoding="utf-8")
+    for kw in ("runs-on: windows-latest", "contents: read", "cancel-in-progress: true", 'python-version: "3.12"',
+               "cache: pip", "python -m pytest -q", "python -m compileall -q mep_tray tests", "git diff --check",
+               "dotnet build revit/MepTray.Core -c Release", "dotnet build revit/MepTray.Core.SelfTest -c Release",
+               "_build_model", "MepTray.Core.SelfTest.dll"):
+        assert kw in t, kw
+    assert t.count("branches: [develop, master]") == 2
+    for ln in t.splitlines():                      # MepTrayImport 只能出現在說明註解，不能被建置
+        if "MepTrayImport" in ln:
+            assert ln.lstrip().startswith("#"), ln
+    uses = re.findall(r"uses:\s*(\S+)", t)
+    assert uses and all(re.fullmatch(r"actions/[\w-]+@v\d+", u) for u in uses), uses
