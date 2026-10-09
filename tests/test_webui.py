@@ -2,7 +2,9 @@ import copy
 import http.client
 import json
 import re
+import shutil
 import socket
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -898,7 +900,9 @@ def test_xy_preview_puts_model_origin_at_the_bottom_left_of_the_room_rect():
 
 def test_successful_run_payload_includes_xy_preview_of_the_route(srv):
     j = run_job(srv)
-    p = j["preview"]
+    assert j["preview"]["caption"] == "示意圖，非施工圖" and j["preview"]["default_view"] == "xy"
+    assert list(j["preview"]["views"]) == ["xy", "xz", "yz"]
+    p = j["preview"]["views"]["xy"]
     assert p["caption"] == "示意圖，非施工圖" and len(p["segments"]) >= 1
     assert p["size"] == [640, 280]
     body = json.dumps(j, allow_nan=False)
@@ -937,7 +941,7 @@ def test_xy_preview_rejects_bad_geometry_with_value_error():
 def test_preview_failure_keeps_the_successful_job_done_with_a_text_notice(srv, monkeypatch):
     def boom(*a, **k):
         raise ValueError("x")
-    monkeypatch.setattr(W, "xy_preview", boom)
+    monkeypatch.setattr(W, "view_preview", boom)
     j = run_job(srv)
     assert j["state"] == "done" and j["files"]
     assert j["preview"] is None and j["preview_error"] == W.PREVIEW_UNAVAILABLE
@@ -954,7 +958,7 @@ def test_running_job_status_does_not_carry_preview_payload():
 def test_app_validates_preview_and_falls_back_to_text_and_draws_start_end_scale():
     js = W.APP_JS
     assert "previewOk(pv)" in js and "d.preview_error" in js
-    assert "無法顯示平面示意圖" in js and "此瀏覽器無法繪製示意圖" in js
+    assert "無法顯示示意圖" in js and "此瀏覽器無法繪製示意圖" in js
     assert "起點" in js and "終點" in js and "pv.start" in js and "pv.ends" in js
     assert js.index("XY 平面示意") < js.index('text("h3", "下載")')     # 位於統計表之後、下載清單之前
     assert js.index("box.appendChild(t);") < js.index("drawPreview(box, d);") < js.index('text("h3", "下載")')
@@ -1074,6 +1078,7 @@ def _fake_res(obstacles=()):
 def test_safe_preview_includes_all_layers_from_request_and_route():
     res = _fake_res([{"name": "p", "kind": "duct", "lo": [4.0, 1.0, 0.0], "hi": [5.0, 2.0, 1.0]}])
     p, err = W.safe_preview(res)
+    p = p["views"]["xy"]
     assert err is None and len(p["obstacles"]) == 1 and len(p["hangers"]) == 1 and p["notes"] == []
 
 
@@ -1082,7 +1087,9 @@ def test_safe_preview_drops_only_a_broken_layer_and_keeps_the_base_preview(monke
         raise RuntimeError("x")
     monkeypatch.setattr(W, "preview_joints", boom)
     p, err = W.safe_preview(_fake_res())
-    assert err is None and p["segments"] and p["joints"] == [] and len(p["hangers"]) == 1
+    assert err is None and set(p["views"]) == {"xy", "xz", "yz"}
+    p = p["views"]["xy"]
+    assert p["segments"] and p["joints"] == [] and len(p["hangers"]) == 1
     assert any("接頭" in n for n in p["notes"])
 
 
@@ -1090,7 +1097,9 @@ def test_safe_preview_falls_back_to_base_when_layer_data_is_invalid():
     res = _fake_res()
     res.route.hangers = [(float("nan"), 0.0, 3.0)]
     p, err = W.safe_preview(res)
-    assert err is None and p["segments"] and p["hangers"] == [] and p["obstacles"] == [] and p["joints"] == []
+    assert err is None and set(p["views"]) == {"xy", "xz", "yz"}
+    p = p["views"]["xy"]
+    assert p["segments"] and p["hangers"] == [] and p["obstacles"] == [] and p["joints"] == []
     assert any("圖層" in n for n in p["notes"])
 
 
@@ -1098,12 +1107,12 @@ def test_successful_run_with_obstacle_carries_obstacle_hanger_and_joint_layers(s
     body = {**good(), "obstacles": [obstacle(name="pipe", kind="water", lo=[5, 3, 0], hi=[5.3, 6, 3.2])]}
     j = run_job(srv, body)
     assert j["state"] == "done", j
-    p = j["preview"]
+    p = j["preview"]["views"]["xy"]
     assert [o["kind"] for o in p["obstacles"]] == ["water"]
     assert p["counts"]["hangers"] == j["summary"]["stats"]["hangers"] and p["hangers"]
     assert p["counts"]["joints"] == j["summary"]["stats"]["joints"]
     assert all(j_["kind"] in ("elbow", "tee", "cross", "union", "unsupported") for j_ in p["joints"])
-    assert "pipe" not in json.dumps(p) and len(json.dumps(p)) < 100_000
+    assert "pipe" not in json.dumps(j["preview"]) and len(json.dumps(j["preview"])) < 100_000
 
 
 def test_app_draws_obstacle_hanger_joint_layers_with_traditional_chinese_legend():
@@ -1114,6 +1123,256 @@ def test_app_draws_obstacle_hanger_joint_layers_with_traditional_chinese_legend(
         assert kw in js, kw
     assert "innerHTML" not in js and "eval(" not in js
     # 圖層繪製順序：障礙物在橋架之下、吊架與接頭在橋架之上、起訖點最上
-    body = js[js.index("function drawPreview"):]
+    body = js[js.index("function drawView"):]
     assert body.index("drawObstacles(ctx") < body.index("k < sg.length") < body.index("k < hs.length") \
         < body.index("drawJoint(ctx, jt") < body.index("if (pv.start)")
+
+
+# ───────────── 結果區 XY／XZ／YZ 視角切換（階段 3 第三刀） ─────────────
+def _vpx(p, h, v, room_h, room_v):
+    """模型 (水平軸, 垂直軸) m → 畫布像素（原點在房間框左下；垂直軸向上）。"""
+    rx, ry, rw, rh = p["room"]
+    return rx + h * rw / room_h, ry + (room_v - v) * rh / room_v
+
+
+def test_view_preview_xy_is_the_same_as_xy_preview():
+    obs = [{"name": "n", "kind": "water", "lo": [2.0, 1.0, 0.0], "hi": [3.0, 4.0, 3.2]}]
+    kw = dict(start=(0.0, 0.0, 3.0), ends=[(10.0, 0.0, 3.0)], obstacles=obs, hangers=[(1.0, 0.0, 3.0)],
+              joints=[{"kind": "elbow", "point": [10.0, 0.0, 3.0]}])
+    a, b = W.xy_preview(ROOM10, SEG10, **kw), W.view_preview(ROOM10, SEG10, "xy", **kw)
+    assert a == b and a["view"] == "xy" and a["axes"] == ["X", "Y"]
+
+
+def test_view_preview_xz_puts_x_right_and_z_up_and_fits_the_room_elevation():
+    p = W.view_preview(ROOM10, SEG10, "xz", start=(0.0, 0.0, 3.0), ends=[(10.0, 0.0, 3.0)])
+    assert p["view"] == "xz" and p["axes"] == ["X", "Z"] and p["size"] == [640, 280]
+    rx, ry, rw, rh = p["room"]
+    assert 0 <= rx < rx + rw <= 640 and 0 <= ry < ry + rh <= 280
+    assert abs(rw / rh - 10 / 4) < 0.02                                # 立面寬高比 = X : Z
+    x0, y0, x1, y1 = p["segments"][0]
+    ex0, ey0 = _vpx(p, 0.0, 3.0, 10.0, 4.0)
+    ex1, ey1 = _vpx(p, 10.0, 3.0, 10.0, 4.0)
+    assert max(abs(x0 - ex0), abs(y0 - ey0), abs(x1 - ex1), abs(y1 - ey1)) < 0.01
+    sx, sy = p["start"]
+    assert abs(sx - ex0) < 0.01 and abs(sy - ey0) < 0.01
+    assert p["scale_bar"]["label"].endswith(" m") and rx <= p["scale_bar"]["x"] and p["scale_bar"]["y"] >= ry + rh
+
+
+def test_view_preview_yz_puts_y_right_and_z_up():
+    seg = [((2.0, 1.0, 3.0), (2.0, 4.0, 3.0))]                         # 沿 Y 的段
+    p = W.view_preview(ROOM10, seg, "yz")
+    assert p["view"] == "yz" and p["axes"] == ["Y", "Z"]
+    rx, ry, rw, rh = p["room"]
+    assert abs(rw / rh - 5 / 4) < 0.02
+    x0, y0, x1, y1 = p["segments"][0]
+    ex0, ey0 = _vpx(p, 1.0, 3.0, 5.0, 4.0)
+    ex1, ey1 = _vpx(p, 4.0, 3.0, 5.0, 4.0)
+    assert max(abs(x0 - ex0), abs(y0 - ey0), abs(x1 - ex1), abs(y1 - ey1)) < 0.01
+
+
+def test_segments_perpendicular_to_the_view_plane_become_dots():
+    segs = [((1.0, 1.0, 0.5), (1.0, 1.0, 3.0)),                        # 垂直（Z）
+            ((1.0, 1.0, 3.0), (1.0, 4.0, 3.0)),                        # 沿 Y
+            ((1.0, 4.0, 3.0), (8.0, 4.0, 3.0))]                        # 沿 X
+
+    def dots(view):
+        p = W.view_preview(ROOM10, segs, view)
+        return [s[0] == s[2] and s[1] == s[3] for s in p["segments"]]
+    assert dots("xy") == [True, False, False]
+    assert dots("xz") == [False, True, False]
+    assert dots("yz") == [False, False, True]
+
+
+def test_view_preview_projects_and_clips_obstacles_in_each_view_plane():
+    obs = [{"name": "秘密", "kind": "water", "lo": [2.0, 1.0, 1.0], "hi": [3.0, 4.0, 9.0]},   # Z 超出房高 → 裁到 4
+           {"name": "高處", "kind": "duct", "lo": [5.0, 1.0, 5.0], "hi": [6.0, 2.0, 6.0]}]    # 整個在房高之上
+    xy = W.view_preview(ROOM10, SEG10, "xy", obstacles=obs)
+    assert [o["kind"] for o in xy["obstacles"]] == ["water", "duct"]   # 俯視不分高度
+    xz = W.view_preview(ROOM10, SEG10, "xz", obstacles=obs)
+    assert [o["kind"] for o in xz["obstacles"]] == ["water"] and xz["counts"]["obstacles"] == 2
+    x, y, w, h = xz["obstacles"][0]["rect"]
+    x0, y_top = _vpx(xz, 2.0, 4.0, 10.0, 4.0)
+    x1, y_bot = _vpx(xz, 3.0, 1.0, 10.0, 4.0)
+    assert abs(x - x0) < 0.01 and abs(y - y_top) < 0.01 and abs(w - (x1 - x0)) < 0.01 and abs(h - (y_bot - y_top)) < 0.01
+    yz = W.view_preview(ROOM10, SEG10, "yz", obstacles=obs)
+    x, y, w, h = yz["obstacles"][0]["rect"]
+    y0p, z_top = _vpx(yz, 1.0, 4.0, 5.0, 4.0)
+    y1p, z_bot = _vpx(yz, 4.0, 1.0, 5.0, 4.0)
+    assert abs(x - y0p) < 0.01 and abs(w - (y1p - y0p)) < 0.01 and abs(y - z_top) < 0.01 and abs(h - (z_bot - z_top)) < 0.01
+    assert "秘密" not in json.dumps([xy, xz, yz], ensure_ascii=False)
+
+
+def test_view_preview_projects_hangers_joints_and_dedupes_per_view():
+    hs = [(1.0, 0.0, 3.0), (1.0, 2.0, 3.0), (1.0, 0.0, 2.0)]
+    assert len(W.view_preview(ROOM10, SEG10, "xy", hangers=hs)["hangers"]) == 2
+    assert len(W.view_preview(ROOM10, SEG10, "xz", hangers=hs)["hangers"]) == 2   # 沿 Y 重疊
+    yz = W.view_preview(ROOM10, SEG10, "yz", hangers=hs)
+    assert len(yz["hangers"]) == 3 and yz["counts"]["hangers"] == 3
+    hx, hy = yz["hangers"][1]
+    ex, ey = _vpx(yz, 2.0, 3.0, 5.0, 4.0)
+    assert abs(hx - ex) < 0.01 and abs(hy - ey) < 0.01
+    jt = W.view_preview(ROOM10, SEG10, "xz", joints=[{"kind": "tee", "point": [5.0, 2.0, 3.0]}])
+    (j,) = jt["joints"]
+    ex, ey = _vpx(jt, 5.0, 3.0, 10.0, 4.0)
+    assert j["kind"] == "tee" and abs(j["pt"][0] - ex) < 0.01 and abs(j["pt"][1] - ey) < 0.01
+
+
+def test_view_preview_rejects_unknown_views_and_flat_rooms():
+    with pytest.raises(ValueError):
+        W.view_preview(ROOM10, SEG10, "zx")
+    flat = ((0.0, 0.0, 0.0), (10.0, 5.0, 0.0))
+    W.view_preview(flat, SEG10, "xy")                                   # 俯視不需要高度
+    for v in ("xz", "yz"):
+        with pytest.raises(ValueError):
+            W.view_preview(flat, SEG10, v)
+
+
+def test_preview_views_returns_all_three_views_with_xy_default():
+    pv = W.preview_views(ROOM10, SEG10, start=(0.0, 0.0, 3.0), ends=[(10.0, 0.0, 3.0)])
+    assert pv["caption"] == "示意圖，非施工圖" and pv["default_view"] == "xy"
+    assert list(pv["views"]) == ["xy", "xz", "yz"] == list(W.PREVIEW_VIEWS)
+    for k, v in pv["views"].items():
+        assert v["view"] == k and v["size"] == [640, 280] and v["caption"] == pv["caption"]
+        assert set(v) >= {"room", "segments", "start", "ends", "obstacles", "hangers", "joints", "counts", "notes",
+                          "scale_bar", "axes", "title"}
+    assert [pv["views"][k]["title"] for k in ("xy", "xz", "yz")] == ["XY 平面示意（俯視）", "XZ 立面示意（前視）",
+                                                                     "YZ 立面示意（側視）"]
+
+
+def test_safe_preview_keeps_other_views_when_one_view_fails(monkeypatch):
+    real = W.view_preview
+
+    def flaky(room, segments, view="xy", *a, **k):
+        if view == "yz":
+            raise ValueError("x")
+        return real(room, segments, view, *a, **k)
+    monkeypatch.setattr(W, "view_preview", flaky)
+    p, err = W.safe_preview(_fake_res())
+    assert err is None and list(p["views"]) == ["xy", "xz"] and p["default_view"] == "xy"
+    assert any("YZ" in n for n in p["views"]["xy"]["notes"])
+
+
+def test_safe_preview_default_falls_to_first_available_view_when_xy_fails(monkeypatch):
+    real = W.view_preview
+
+    def flaky(room, segments, view="xy", *a, **k):
+        if view == "xy":
+            raise ValueError("x")
+        return real(room, segments, view, *a, **k)
+    monkeypatch.setattr(W, "view_preview", flaky)
+    p, err = W.safe_preview(_fake_res())
+    assert err is None and list(p["views"]) == ["xz", "yz"] and p["default_view"] == "xz"
+
+
+def test_safe_preview_size_guard_drops_to_the_default_view_then_to_text(monkeypatch):
+    full, _ = W.safe_preview(_fake_res())
+    n_all = len(json.dumps(full, ensure_ascii=False).encode("utf-8"))
+    n_xy = len(json.dumps(full["views"]["xy"], ensure_ascii=False).encode("utf-8"))
+    monkeypatch.setattr(W, "PREVIEW_MAX_BYTES", n_xy + 400)
+    assert n_all > W.PREVIEW_MAX_BYTES
+    p, err = W.safe_preview(_fake_res())
+    assert err is None and list(p["views"]) == ["xy"] and any("資料量" in n for n in p["views"]["xy"]["notes"])
+    monkeypatch.setattr(W, "PREVIEW_MAX_BYTES", 100)
+    p, err = W.safe_preview(_fake_res())
+    assert p is None and err == W.PREVIEW_UNAVAILABLE
+
+
+def test_preview_byte_cap_is_modest_and_above_a_typical_job(srv):
+    assert W.PREVIEW_MAX_BYTES <= 1_000_000 < W.MAX_BODY + 1
+    j = run_job(srv)
+    assert len(json.dumps(j["preview"], ensure_ascii=False).encode("utf-8")) < 60_000
+
+
+def test_app_switches_views_with_dom_buttons_and_event_listeners():
+    js = W.APP_JS
+    for kw in ('createElement("button")', 'addEventListener("click"', '"aria-pressed"', 'type = "button"',
+               '"XY 俯視"', '"XZ 前視"', '"YZ 側視"', "XZ 立面示意", "YZ 立面示意", "pr.views", "default_view"):
+        assert kw in js, kw
+    assert "onclick" not in js and ".onclick" not in js and "innerHTML" not in js and "eval(" not in js
+    assert "http://" not in js and "https://" not in js
+    body = js[js.index("function drawPreview"):js.index("function renderResult")]
+    assert "clear(holder)" in body and "show(" in body                 # 切換時重畫
+    assert '"views"' in body or "className = \"views\"" in body or 'className = "views"' in body
+    assert "aria-pressed" in W.APP_CSS and ".views" in W.APP_CSS
+
+
+def test_app_draws_axis_labels_and_view_specific_legend():
+    js = W.APP_JS
+    assert "vw.h" in js and "vw.v" in js and "fillText(" in js
+    for kw in ("沿 Y 向的段顯示為點", "沿 X 向的段顯示為點", "垂直段顯示為點", "vw.side", "vw.title"):
+        assert kw in js, kw
+    assert "legendText(vw, obs, hs, jt)" in js
+
+
+def test_index_still_has_four_sections_and_one_script_with_view_switching(srv):
+    html_ = call(srv, "GET", T(srv))[2].decode("utf-8")
+    assert html_.count("<section") == 4 and re.findall(r"<script[^>]*>", html_) == ['<script src="app.js">']
+    assert "<button" not in html_.split("④ 結果下載")[1]                # 切換按鈕由 app.js 以 DOM 建立
+
+
+# ───────────── 起訖點標籤避讓（階段 3 第三刀追加：YZ 起點與終點重合時標籤重疊） ─────────────
+def test_app_places_start_end_labels_with_a_layout_helper():
+    js = W.APP_JS
+    assert "function groupMarkers(" in js and "function layoutLabels(" in js and "function boxHit(" in js
+    body = js[js.index("function drawView"):js.index("function drawPreview")]
+    assert "layoutLabels(groupMarkers(marks, MARK_TOL)" in body and "measureText(s).width" in body
+    assert 'fillText("起點"' not in body and 'fillText("終點"' not in body       # 標籤一律經過排版
+    assert body.index("drawJoint(ctx, jt") < body.index("if (pv.start)") < body.index("layoutLabels(")
+    helpers = js[js.index("function groupMarkers"):js.index("// ── end label layout ──")]
+    assert '"／"' in helpers and "Math.min(Math.max(" in helpers               # 重合合併；貼邊時夾回畫布內
+
+
+_NODE = shutil.which("node")
+_LABEL_DRIVER = r"""
+var measure = function (s) { return s.length * 12; };
+function run(marks, w, h) {
+  var g = groupMarkers(marks, MARK_TOL);
+  return {groups: g, labs: layoutLabels(g, measure, w, h, LABEL_H)};
+}
+function m(x, y, label) { return {x: x, y: y, label: label}; }
+var out = {
+  same: run([m(100, 100, "起點"), m(100, 100, "終點1")], 640, 280),
+  allsame: run([m(50, 60, "起點"), m(50, 60, "終點1"), m(51, 61, "終點2"), m(50, 60, "終點3")], 640, 280),
+  near: run([m(100, 100, "起點"), m(109, 103, "終點1"), m(100, 110, "終點2"), m(112, 96, "終點3")], 640, 280),
+  edge: run([m(636, 4, "起點"), m(636, 10, "終點1"), m(2, 278, "終點2"), m(638, 276, "終點3")], 640, 280),
+  plain: run([m(100, 100, "起點"), m(400, 200, "終點1")], 640, 280)
+};
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def _label_boxes(case):
+    return [(l["x"], l["y"] - 12, l["x"] + len(l["text"]) * 12, l["y"] + 2) for l in case["labs"]]
+
+
+def _overlap(a, b):
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+@pytest.mark.skipif(_NODE is None, reason="node 未安裝")
+def test_label_layout_merges_coincident_points_and_never_overlaps_in_node(tmp_path):
+    js = W.APP_JS
+    helpers = js[js.index("  var MARK_TOL"):js.index("// ── end label layout ──")]
+    f = tmp_path / "labels.js"
+    f.write_text('"use strict";\n' + helpers + _LABEL_DRIVER, encoding="utf-8")
+    r = subprocess.run([_NODE, str(f)], capture_output=True, timeout=60)
+    assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+    out = json.loads(r.stdout.decode("utf-8"))
+    assert [l["text"] for l in out["same"]["labs"]] == ["起點／終點1"]
+    assert [l["text"] for l in out["allsame"]["labs"]] == ["起點／終點1／終點2／終點3"]
+    assert [l["text"] for l in out["near"]["labs"]] == ["起點", "終點1", "終點2", "終點3"]
+    assert [l["text"] for l in out["edge"]["labs"]] == ["起點", "終點1", "終點2", "終點3"]
+    for name in ("same", "allsame", "near", "edge", "plain"):
+        case = out[name]
+        boxes = _label_boxes(case)
+        for b in boxes:                                                    # 全部在畫布內
+            assert 0 <= b[0] and b[2] <= 640 and 0 <= b[1] and b[3] <= 280, (name, b)
+        for i in range(len(boxes)):                                        # 標籤彼此不重疊
+            for j in range(i + 1, len(boxes)):
+                assert not _overlap(boxes[i], boxes[j]), (name, i, j)
+        marks = [(g["x"] - 6, g["y"] - 6, g["x"] + 6, g["y"] + 6) for g in case["groups"]]
+        if name != "edge":                                                 # 有空間時也不蓋住任何記號
+            for b in boxes:
+                assert not any(_overlap(b, mk) for mk in marks), (name, b)
+    s, e = out["plain"]["labs"]                                            # 不擁擠時維持原本位置（右上／右上）
+    assert (s["x"], s["y"]) == (107, 93) and (e["x"], e["y"]) == (407, 193)
