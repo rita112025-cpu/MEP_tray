@@ -35,16 +35,32 @@ broken.Segments[0].End = (double[])broken.Segments[0].Start.Clone();
 broken.Segments.Add(new SegmentDto { Id = broken.Segments[0].Id });
 Check(ModelLoader.Validate(broken).Count >= 4, "壞模型被偵測（版本/寬度/零長度/重複 id）");
 
-// 匯入器目前只支援無旋轉、無平移的模型座標；拒絕無法正確套用的變換。
+// 只支援「平移 origin + 繞 Z 軸旋轉」；軸與 rotation_deg 不一致、非繞 Z 的軸、非有限數值一律在匯入前被拒絕。
 foreach (var change in new Action<TrayModel>[] {
-    m => m.CoordinateSystem.Origin = new[] { 100.0, 0.0, 0.0 },
-    m => m.CoordinateSystem.AxisX = new[] { 0.0, 1.0, 0.0 },
-    m => m.CoordinateSystem.RotationDeg = 90.0,
+    m => m.CoordinateSystem.AxisX = new[] { 0.0, 1.0, 0.0 },                 // 軸與 rotation_deg=0 不一致
+    m => m.CoordinateSystem.RotationDeg = 90.0,                              // 只改角度、軸未同步
+    m => { m.CoordinateSystem.AxisZ = new[] { 1.0, 0.0, 0.0 }; },            // 非繞 Z 軸
+    m => m.CoordinateSystem.Origin = new[] { double.NaN, 0.0, 0.0 },
+    m => m.CoordinateSystem.Origin = new[] { 1.0, 2.0 },
+    m => m.CoordinateSystem.RotationDeg = double.PositiveInfinity,
 })
 {
     var transformed = ModelLoader.Load(args[0]);
     change(transformed);
-    Check(ModelLoader.Validate(transformed).Count > 0, "不支援的座標變換在匯入前被拒絕");
+    Check(ModelLoader.Validate(transformed).Count > 0, "不一致或非有限的座標變換在匯入前被拒絕");
+}
+foreach (var deg in new[] { 30.0, 90.0, -45.0, 180.0 })
+{
+    var local = ModelLoader.Load(args[0]);
+    var th = deg * Math.PI / 180.0;
+    local.CoordinateSystem.Origin = new[] { 2000.0, -1000.0, 500.0 };
+    local.CoordinateSystem.RotationDeg = deg;
+    local.CoordinateSystem.AxisX = new[] { Math.Cos(th), Math.Sin(th), 0.0 };
+    local.CoordinateSystem.AxisY = new[] { -Math.Sin(th), Math.Cos(th), 0.0 };
+    Check(ModelLoader.Validate(local).Count == 0, $"origin 平移 + 繞 Z 旋轉 {deg}° 且軸一致時通過驗證");
+    var p = ModelLoader.ToBasis(local.CoordinateSystem, new[] { 1000.0, 0.0, 300.0 });
+    Check(Math.Abs(p[0] - (2000 + 1000 * Math.Cos(th))) < 1e-9 && Math.Abs(p[1] - (-1000 + 1000 * Math.Sin(th))) < 1e-9 && Math.Abs(p[2] - 800) < 1e-9,
+          $"ToBasis = origin + Rz({deg}°)·點");
 }
 var duplicateJoint = ModelLoader.Load(args[0]);
 duplicateJoint.Joints.Add(duplicateJoint.Joints[0]);

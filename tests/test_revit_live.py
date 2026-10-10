@@ -18,7 +18,8 @@ TOL_MM = 0.5
 def test_write_scenarios_writes_setup_files_next_to_their_models(tmp_path):
     L.write_scenarios(tmp_path)
     setup_files = sorted(p.name for p in tmp_path.glob("*.setup.json"))
-    assert setup_files == ["i2_pbp_moved.setup.json", "j1_shared_translate.setup.json", "j2_shared_rotated.setup.json"]
+    assert setup_files == ["i2_pbp_moved.setup.json", "j1_shared_translate.setup.json", "j2_shared_rotated.setup.json",
+                           "l3_shared_local_rot45_tee.setup.json"]
     st = json.loads((tmp_path / "i2_pbp_moved.setup.json").read_text(encoding="utf-8"))
     assert st == {"move_pbp_mm": [5000.0, -3000.0, 0.0]}
     m = json.loads((tmp_path / "i2_pbp_moved.json").read_text(encoding="utf-8"))
@@ -250,3 +251,69 @@ def test_live_shared_coordinates_land_where_revit_reads_the_same_shared_point(li
     assert math.dist(tray["StartMm"], seg["start"]) > 1000       # 不是原樣放在模型座標，否則此測試無鑑別力
     # 3) 旋轉量：模型方向到內部方向的 XY 旋轉量大小等於設定的真北角度
     assert abs(abs(L.xy_rotation_deg(seg, tray)) - abs(angle_deg)) <= 0.01
+
+
+# ───────────── 模型自帶 origin + 繞 Z 旋轉（slice 3）─────────────
+def test_local_frame_scenarios_carry_consistent_origin_axes_and_rotation():
+    sc = L.scenarios()
+    assert set(L.LOCAL_FRAMES) <= set(sc)
+    for name, (_, basis, origin, rot) in L.LOCAL_FRAMES.items():
+        cs = sc[name]["coordinate_system"]
+        assert cs["basis"] == basis and cs["origin"] == list(origin) and cs["rotation_deg"] == rot
+        th = math.radians(rot)
+        assert math.dist(cs["axis_x"], [math.cos(th), math.sin(th), 0]) < 1e-12
+        assert math.dist(cs["axis_y"], [-math.sin(th), math.cos(th), 0]) < 1e-12
+        assert cs["axis_z"] == [0.0, 0.0, 1.0]
+        assert any(abs(v) > 0 for v in origin) and 0 < abs(rot) < 180
+
+
+def test_to_basis_and_angle_diff_helpers():
+    cs = {"origin": [2000.0, -1000.0, 500.0], "rotation_deg": 90.0}
+    assert math.dist(L.to_basis(cs, [1000.0, 0.0, 300.0]), [2000.0, 0.0, 800.0]) < 1e-9
+    assert L.to_basis(None, [1, 2, 3]) == [1.0, 2.0, 3.0]
+    assert abs(L.angle_diff_deg(350.0, 10.0) + 20.0) < 1e-9 and abs(L.angle_diff_deg(-170.0, 170.0) - 20.0) < 1e-9
+
+
+def test_mismatch_helpers_apply_the_model_local_frame():
+    cs = {"origin": [100.0, 0.0, 0.0], "rotation_deg": 90.0}
+    model = {"coordinate_system": cs, "segments": [{"id": "S0", "start": [0, 0, 0], "end": [1000, 0, 0]}], "joints": []}
+    rep = {"CreatedTrays": ["S0=1"], "Inspection": {"Trays": [
+        {"Id": "1", "StartMm": [100, 0, 0], "EndMm": [100, 1000, 0], "SharedStartMm": [100, 0, 0], "SharedEndMm": [100, 1000, 0]}]}}
+    assert L.endpoint_mismatches(model, rep, (0, 0, 0)) == [] and L.shared_mismatches(model, rep) == []
+    model["coordinate_system"] = {"origin": [0.0, 0.0, 0.0], "rotation_deg": 0.0}           # 忽略區域座標系就必須被抓到
+    assert L.endpoint_mismatches(model, rep, (0, 0, 0)) and L.shared_mismatches(model, rep)
+
+
+@pytest.mark.revit
+@pytest.mark.parametrize("name,kinds", [("l1_local_rot90_tee", {"tee"}), ("l2_local_rot30_elbow", {"elbow"})])
+def test_live_local_frame_places_trays_and_fittings_at_origin_plus_rotated_points(live, name, kinds):
+    _, basis, origin, rot = L.LOCAL_FRAMES[name]
+    rep, m = live["reports"][name], live["models"][name]
+    assert rep["Committed"] is True and rep["Abort"] is None and rep["Basis"] == basis == "INTERNAL_ORIGIN"
+    assert len(_trays(rep)) == len(m["segments"])
+    assert L.endpoint_mismatches(m, rep, (0, 0, 0), TOL_MM) == []
+    assert {j["Kind"] for j in rep["Joints"]} == kinds and all(j["Status"] == "OK" for j in rep["Joints"])
+    assert rep["Inspection"]["FittingCount"] == len(rep["Joints"])
+    trays = {t["Id"]: t for t in _trays(rep)}
+    created = dict(x.split("=", 1) for x in rep["CreatedTrays"])
+    for seg in m["segments"]:
+        t = trays[created[seg["id"]]]
+        # 剛體：XY 旋轉量等於 rotation_deg（長度因接頭端被 fitting 修剪，不比對）
+        assert abs(L.angle_diff_deg(L.xy_rotation_deg(seg, t), rot)) <= 0.05
+    assert math.dist(_trays(rep)[0]["StartMm"], m["segments"][0]["start"]) > 1000   # 不是原樣放在模型座標
+
+
+@pytest.mark.revit
+def test_live_shared_basis_with_local_frame_reads_back_the_basis_point(live):
+    name = "l3_shared_local_rot45_tee"
+    _, _, origin, rot = L.LOCAL_FRAMES[name]
+    st = live["setups"][name]
+    assert st["requested_project_position"]["angle_deg"] == L.L3_SHARED_ANGLE_DEG
+    rep, m = live["reports"][name], live["models"][name]
+    assert rep["Committed"] is True and rep["Abort"] is None and rep["Basis"] == "SHARED_COORDINATES"
+    assert L.shared_mismatches(m, rep, TOL_MM) == []
+    assert {j["Kind"] for j in rep["Joints"]} == {"tee"} and all(j["Status"] == "OK" for j in rep["Joints"])
+    seg = m["segments"][0]
+    t = {x["Id"]: x for x in _trays(rep)}[dict(c.split("=", 1) for c in rep["CreatedTrays"])[seg["id"]]]
+    # 區域旋轉 +45° 與共用座標 → 內部的 −30° 疊加
+    assert abs(L.angle_diff_deg(L.xy_rotation_deg(seg, t), rot - L.L3_SHARED_ANGLE_DEG)) <= 0.05

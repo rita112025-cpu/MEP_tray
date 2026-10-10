@@ -4,6 +4,26 @@
 
 本輪只驗證與修正既有路徑，不新增產品功能。所有下表 runtime 狀態與 build 分開；Python baseline 122 tests 與第一次 benchmark 留在 HANDOFF。
 
+## Revit 2025.5 模型自帶 origin 與繞 Z 旋轉（stage 4 slice 3，2026-10-10）
+
+語意：`basis 座標 = origin + Rz(rotation_deg)·模型點`（mm，逆時針為正），basis 座標再依 INTERNAL_ORIGIN／PROJECT_BASE_POINT／SHARED_COORDINATES 換成 Revit 內部座標。`schema_version` 維持 1：origin 0、rotation 0 的舊檔意義不變，非零值以前就被匯入器拒絕，所以沒有舊檔語意被改變，也不需要遷移說明。
+
+- C# `ModelLoader.Validate`：origin 與 rotation_deg 須為有限數；`axis_x=(cosθ,sinθ,0)`、`axis_y=(−sinθ,cosθ,0)`、`axis_z=(0,0,1)` 須在 1e-6 內與 rotation_deg 一致，否則拒絕（不能忽略任何變換）。`ModelLoader.ToBasis` 為共同換算；共用座標的自我檢查改比對換算後的 basis 座標。
+- Python `export_revit.coordinate_system`／`build_model` 新增 `origin_mm`、`rotation_deg`（預設 0），軸向量由角度導出。**管線與 manifest 尚未傳入**，目前僅 Python API；網頁入口留給 slice 4。
+- Core SelfTest 新增：軸與角度不一致、非繞 Z 軸、NaN／長度錯誤的 origin、無限大角度被拒絕；origin 平移加 30°／90°／−45°／180° 且軸一致時通過，`ToBasis` 與 origin + Rz·點相符。`pytest -m revit tests/test_revit_dotnet.py`：1 passed。
+- 新實機場景（Revit 2025.5 AutoRun）：
+
+| 場景 | 設定 | 結果 |
+|---|---|---|
+| `l1_local_rot90_tee` | INTERNAL_ORIGIN，origin (2000, −1000, 500)，90° | Committed、tee OK、fitting 1；S001 模型 (1000,1000,3000)→ 內部 (1000, 0, 3500)，XY 旋轉 90.0° |
+| `l2_local_rot30_elbow` | INTERNAL_ORIGIN，origin (−3000, 4000, 0)，30° | Committed、elbow OK、fitting 1；兩段 XY 旋轉 30.0°（內部方向非軸向） |
+| `l3_shared_local_rot45_tee` | SHARED_COORDINATES，共用座標位移 (12000, −7000, 1500) 加真北 30°，origin (500, 500, 0)，區域旋轉 45° | Committed、tee OK、fitting 1；`GetProjectPosition` 讀回 S001 起點共用座標 (500, 1914.214, 3000) = origin + R45·(1000, 1000)；內部 XY 旋轉 15.0°（45° − 30°） |
+
+- 端點比對（非接頭端）：Revit 讀回內部座標（INTERNAL）或 `GetProjectPosition` 共用座標（SHARED）與 `origin + Rz·模型點` 差皆 ≤ 0.5 mm。
+- `pytest -m revit`：18 passed（47.15 s）；結束後無殘留 `Revit.exe`，`%APPDATA%` 的 AutoRun 清單已移除。證據：`output/revit2025_local_frame/models/`（未納入 Git）。
+- 環境事故（與程式無關）：前兩次重跑因 Revit 彈出「AddInId 重複」模態對話框（`TaskDialog_External_Tools_Duplicate_ClientId`，只有「Close」）而逾時；原因是使用者安裝目錄同時有 `MepTray.addin` 與舊的 `MepTray.Validation.addin`（同一 AddInId）。使用者把後者改名為 `.bak` 後通過。再有第二份同 ID 的清單，實機測試會再次卡住。
+- **未驗證**：旋轉後的四通（cross）與 union 接頭、非 Z 軸旋轉（不支援，會被拒絕）、PBP 自身旋轉、Survey Point 移動、連結檔共用座標、Revit 2027。管線／網頁尚未提供 origin／rotation 入口。
+
 ## Revit 2025.5 共用座標（stage 4 slice 2，2026-10-10）
 
 `basis = SHARED_COORDINATES` 不再被拒絕：匯入器以 `doc.ActiveProjectLocation.GetTotalTransform()` 把模型點（mm，視為共用座標 EastWest／NorthSouth／Elevation）換成 Revit 內部座標，Z 軸旋轉隨真北角度。進 Transaction 前有自我檢查：把每個端點與接頭換算後的內部點交給 `GetProjectPosition` 讀回共用座標，與模型點差超過 0.5 mm 即中止、不動文件。
@@ -25,7 +45,7 @@
 - 結果：`pytest -m revit` 15 passed（117.91 s，含 2 個新場景測試）；Revit 結束後無殘留 `Revit.exe`。證據：`output/revit2025_shared/models/`（未納入 Git）。
 - 事故紀錄：第一次實測 Revit 在 `Document.Close` 發生存取違規（`0xc0000005`，coreclr.dll），原因懷疑為未釋放的 `ProjectPosition`／`ProjectLocation` 物件；加上 `using` 後未再發生。**根因未做獨立驗證**，只能說加上釋放後的 2 次實機執行（含本次）未再崩潰。
 - 測試收尾原本在 `autorun.done` 後立即檢查 Revit 是否結束，Revit 退出需數秒而偶發誤判；改為輪詢最多 30 秒（`wait_revit_exit`）。
-- **未驗證**：旋轉後的彎頭／三通／四通接頭（j1、j2 都只有單一直線段，無接頭）、Project Base Point 本身有旋轉或 Survey Point 被移動、從連結檔取得共用座標、PBP 不在內部原點時的共用座標、Revit 2027。模型自帶的原點與旋轉仍被拒絕（第 3 刀）。
+- **未驗證**：旋轉後的四通／union 接頭（j1、j2 只有單一直線段；slice 3 已補驗三通與彎頭）、Project Base Point 本身有旋轉或 Survey Point 被移動、從連結檔取得共用座標、PBP 不在內部原點時的共用座標、Revit 2027。模型自帶的原點與旋轉仍被拒絕（第 3 刀）。
 
 ## develop 合併前完整 gate（2026-10-09，commit fbb5dde）
 
@@ -149,10 +169,12 @@ Static PASS 只表示已讀 interface/caller/source 並確認該範圍的防護�
 | Coordinate transform：PROJECT_BASE_POINT 非零位置平移（PBP 移動 (5000, −3000, 0) mm，僅 XY、Angle=0） | PASS | PASS | BLOCKED | PASS — Revit 2025.5 AutoRun（2026-10-09，`i2_pbp_moved` 讀回端點 = 模型點 + PBP 位置，誤差 < 1e-9 mm；`pytest -m revit` 14 passed；未簽署建置須人工按「Load Once」） |
 | Coordinate transform：UNSPECIFIED 基準拒絕 | PASS | PASS | BLOCKED | PASS（拒絕）— AutoRun 2026-10-09 `c_unspecified` 未建元件 |
 | Coordinate transform：SHARED_COORDINATES 平移（EW／NS／Elev）與 30° 真北旋轉，單一直線段 | PASS | PASS | — | PASS — Revit 2025.5 AutoRun（2026-10-10，`j1_shared_translate`、`j2_shared_rotated`；`GetProjectPosition` 讀回端點共用座標 = 模型點；`pytest -m revit` 15 passed） |
-| Coordinate transform：共用座標旋轉後的彎頭／三通／四通接頭 | PASS | PASS | — | UNVERIFIED |
+| Coordinate transform：旋轉後的三通、彎頭接頭（模型 origin + 繞 Z 旋轉；INTERNAL 30°／90°，SHARED 疊加 45° 後淨旋轉 15°） | PASS | PASS | — | PASS — Revit 2025.5 AutoRun（2026-10-10，`l1_local_rot90_tee`、`l2_local_rot30_elbow`、`l3_shared_local_rot45_tee`：tee／elbow Status=OK）；`pytest -m revit` 18 passed |
+| Coordinate transform：旋轉後的四通（cross）與 union 接頭 | PASS | PASS | — | UNVERIFIED |
 | Coordinate transform：PBP 旋轉（Angle≠0）、PBP Z 位移與 Level 互動 | NOT SUPPORTED（只平移、不套用旋轉） | — | — | UNVERIFIED |
 | Coordinate transform：Survey Point 移動、從連結檔取得的共用座標 | NOT SUPPORTED | — | — | UNVERIFIED |
-| Coordinate transform：模型 origin 非零、非標準 axis、rotation_deg 非零拒絕 | PASS（拒絕） | PASS | BLOCKED | UNVERIFIED |
+| Coordinate transform：模型自帶 origin 平移 + 繞 Z 軸旋轉（INTERNAL_ORIGIN／SHARED_COORDINATES） | PASS | PASS | PASS（2026-10-10 SelfTest，含 30°／90°／−45°／180° 的 ToBasis） | PASS — Revit 2025.5 AutoRun（2026-10-10，`l1`／`l2`／`l3`，端點誤差 ≤ 0.5 mm） |
+| Coordinate transform：模型 axis 與 rotation_deg 不一致、非繞 Z 軸、非有限數值拒絕 | PASS（拒絕） | PASS | PASS（2026-10-10 SelfTest） | NOT APPLICABLE（匯入前 Validate 拒絕，以 SelfTest 驗證） |
 | Revit 2027（任何功能） | — | — | — | UNVERIFIED（本機未安裝） |
 | Duplicate fitting detection：重複 joint ID／重複線段引用；不宣稱幾何全面去重 | PASS | PASS | BLOCKED | UNVERIFIED |
 | Segment reference validation：存在性、段數、null、唯一 ID | PASS | PASS | BLOCKED | UNVERIFIED |
@@ -168,7 +190,7 @@ Python export/roundtrip 已執行通過；C# Cross-language assertions 已 build
 - Survey Point：NOT SUPPORTED，程式未取得 Survey Point。
 - Shared Coordinates：已實作並於 Revit 2025.5 驗證（2026-10-10，見上方共用座標節）：`ActiveProjectLocation.GetTotalTransform()` 換算，進 Transaction 前以 `GetProjectPosition` 讀回自我檢查。旋轉後的接頭、Survey Point 移動、連結檔共用座標 UNVERIFIED。
 - Link transform：NOT SUPPORTED，沒有 RevitLinkInstance / GetTransform caller。
-- 模型 origin 非零、非標準 axis 或 rotation_deg 非零：拒絕，不能忽略變換。
+- 模型 `coordinate_system`：origin 平移加繞 Z 軸旋轉已實作並驗證（2026-10-10，見上方 slice 3 節）；axis 與 rotation_deg 不一致、非繞 Z 軸、非有限數值：拒絕，不能忽略變換。
 
 前兩者與 Shared Coordinates 已實作；Revit 2025.5 AutoRun 已驗證 PBP 非零 XY 平移（Angle=0、Z 不動）與 Shared Coordinates 平移＋30° 旋轉（單一直線段），其餘座標變換與 Revit 2027 仍 UNVERIFIED。README、未指定 basis 的選擇對話框與匯入結果 UI 均明確揭露此限制。
 
