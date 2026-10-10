@@ -41,7 +41,7 @@ public class AutoRunApp : IExternalApplication
         using var js = JsonDocument.Parse(File.ReadAllText(setupPath));
         var root = js.RootElement;
         foreach (var prop in root.EnumerateObject())
-            if (prop.Name != "move_pbp_mm") throw new InvalidDataException($"未知的 setup 鍵 '{prop.Name}'");
+            if (prop.Name != "move_pbp_mm" && prop.Name != "set_project_position") throw new InvalidDataException($"未知的 setup 鍵 '{prop.Name}'");
         var log = new Dictionary<string, object?> { ["setup"] = setupPath, ["before"] = RevitImporter.ReadCoordinates(doc) };
         if (root.TryGetProperty("move_pbp_mm", out var mv))
         {
@@ -75,6 +75,36 @@ public class AutoRunApp : IExternalApplication
             log["after"] = RevitImporter.ReadCoordinates(doc);
             if (moved.DistanceTo(delta) > MepTray.Core.Units.MmToFeet(0.5))
                 throw new InvalidOperationException("PBP 移動結果與要求不符：" + JsonSerializer.Serialize(log, Indented));
+        }
+        if (root.TryGetProperty("set_project_position", out var sp))
+        {
+            double Get(string k) => sp.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.Number && double.IsFinite(v.GetDouble())
+                ? v.GetDouble() : throw new InvalidDataException($"set_project_position.{k} 必須是有限數值");
+            double ew = Get("ew_mm"), ns = Get("ns_mm"), elev = Get("elev_mm"), angDeg = Get("angle_deg");
+            using var loc = doc.ActiveProjectLocation ?? throw new InvalidOperationException("找不到 ActiveProjectLocation");
+            using var pos = new ProjectPosition(MepTray.Core.Units.MmToFeet(ew), MepTray.Core.Units.MmToFeet(ns),
+                                          MepTray.Core.Units.MmToFeet(elev), angDeg * Math.PI / 180.0);
+            using var tx = new Transaction(doc, "MEP Tray test setup: set project position");
+            tx.Start();
+            try
+            {
+                loc.SetProjectPosition(XYZ.Zero, pos);
+                doc.Regenerate();
+                var st = tx.Commit();
+                if (st != TransactionStatus.Committed)
+                    throw new InvalidOperationException($"設定 ProjectPosition 的 Transaction 未能 Commit（狀態 {st}）");
+            }
+            catch
+            {
+                if (tx.GetStatus() == TransactionStatus.Started) tx.RollBack();
+                throw;
+            }
+            log["requested_project_position"] = new { ew_mm = ew, ns_mm = ns, elev_mm = elev, angle_deg = angDeg };
+            log["after_project_position"] = RevitImporter.ReadCoordinates(doc);
+            var got = RevitImporter.ReadCoordinates(doc).ActiveProjectPosition!;
+            if (Math.Abs(got.EastWestMm - ew) > 0.5 || Math.Abs(got.NorthSouthMm - ns) > 0.5 ||
+                Math.Abs(got.ElevationMm - elev) > 0.5 || Math.Abs(got.AngleRad - angDeg * Math.PI / 180.0) > 1e-6)
+                throw new InvalidOperationException("ProjectPosition 設定結果與要求不符：" + JsonSerializer.Serialize(log, Indented));
         }
         return JsonSerializer.Serialize(log, Indented);
     }

@@ -138,17 +138,27 @@ def _nearest_segment_id(pt, segs) -> str:
     return f"S{min(range(len(segs)), key=lambda i: (d(segs[i]), i)) + 1:03d}"
 
 
-def coordinate_system(basis: str = "UNSPECIFIED") -> dict:
+def coordinate_system(basis: str = "UNSPECIFIED", origin_mm=(0.0, 0.0, 0.0), rotation_deg: float = 0.0) -> dict:
+    """模型座標系。basis 座標 = origin + Rz(rotation_deg)·模型點（mm）；只支援繞 Z 軸旋轉，軸向量由角度導出。"""
     if basis not in BASES:
         raise ValueError(f"basis 需為 {BASES}")
-    return {"basis": basis, "origin": [0.0, 0.0, 0.0], "unit": "mm",
-            "axis_x": [1.0, 0.0, 0.0], "axis_y": [0.0, 1.0, 0.0], "axis_z": [0.0, 0.0, 1.0],
-            "rotation_deg": 0.0,
-            "note": "原點=輸入座標系原點（不平移）。對應 Revit 的哪一個基準由 basis 指定；UNSPECIFIED 時匯入器拒絕執行。"}
+    if len(origin_mm) != 3 or not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                                      for v in origin_mm):
+        raise ValueError("origin_mm 需為 3 個有限數（mm）")
+    if isinstance(rotation_deg, bool) or not isinstance(rotation_deg, (int, float)) or not math.isfinite(rotation_deg):
+        raise ValueError("rotation_deg 需為有限數（度）")
+    th = math.radians(rotation_deg)
+    c, s = math.cos(th), math.sin(th)
+    return {"basis": basis, "origin": [float(v) for v in origin_mm], "unit": "mm",
+            "axis_x": [c + 0.0, s + 0.0, 0.0], "axis_y": [-s + 0.0, c + 0.0, 0.0], "axis_z": [0.0, 0.0, 1.0],
+            "rotation_deg": float(rotation_deg),
+            "note": "basis 座標 = origin + Rz(rotation_deg)·模型點（mm，繞 Z 軸逆時針為正）；origin 預設 0、rotation_deg 預設 0 時不平移不旋轉。"
+                    "對應 Revit 的哪一個基準由 basis 指定；UNSPECIFIED 時匯入器拒絕執行。"}
 
 
 def build_model(inp: Inputs, route: Route, reports: list, gov: dict, run_id: str,
-                type_name: str | None = None, basis: str = "UNSPECIFIED", notes=()) -> dict:
+                type_name: str | None = None, basis: str = "UNSPECIFIED", notes=(),
+                origin_mm=(0.0, 0.0, 0.0), rotation_deg: float = 0.0) -> dict:
     segs = split_segments(route)
     findings = []
     for rep in reports:
@@ -163,7 +173,7 @@ def build_model(inp: Inputs, route: Route, reports: list, gov: dict, run_id: str
                 if math.dist(a, b) * 1000 < REVIT_MIN_SEGMENT_MM]
     return {
         FIELDS["SchemaVersion"]: SCHEMA_VERSION, FIELDS["RunId"]: run_id, FIELDS["Units"]: "mm",
-        FIELDS["CoordinateSystem"]: coordinate_system(basis),
+        FIELDS["CoordinateSystem"]: coordinate_system(basis, origin_mm, rotation_deg),
         FIELDS["Tray"]: {FIELDS["TypeName"]: type_name, FIELDS["WidthMm"]: inp.tray_w_mm,
                          FIELDS["HeightMm"]: inp.tray_h_mm, FIELDS["Kind"]: inp.tray_type},
         FIELDS["Segments"]: [{FIELDS["Id"]: f"S{i + 1:03d}", FIELDS["Start"]: _mm(a), FIELDS["End"]: _mm(b)}

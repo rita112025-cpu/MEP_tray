@@ -146,6 +146,10 @@ def _inputs(d: ReportData) -> str:
             ("橋架類型", i.tray_type), ("起點 (m)", fmt(i.start)), ("終點 (m)", "；".join(fmt(e) for e in i.ends)),
             ("規範（依勾選順序）", ", ".join(d.codes)), ("格距 (m)", d.route.cell_m),
             ("Revit CableTrayType 名稱", opts.get("type_name")), ("Revit 座標基準", opts.get("basis"))]
+    if opts.get("origin_mm") is not None:
+        rows.append(("模型原點 (mm)", fmt(opts["origin_mm"])))
+    if opts.get("rotation_deg") is not None:
+        rows.append(("模型繞 Z 旋轉 (度，逆時針為正)", fmt(opts["rotation_deg"])))
     body = [table(["項目", "值"], rows, "輸入摘要")]
     if i.cables_defaulted:
         body.append('<p class="warn">未輸入電纜資料：填充率以預設電纜（Ø20 mm × 10 條）計算。</p>')

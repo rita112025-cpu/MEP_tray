@@ -165,10 +165,13 @@ def test_verification_matrix_marks_pbp_translation_verified_and_keeps_the_rest_u
     assert len(pbp) == 1 and "UNVERIFIED" not in pbp[0], pbp
     gui = pbp[0].rstrip(" |").split(" | ")[-1]
     assert gui.startswith("PASS") and "Revit 2025.5" in gui and "Load Once" in gui, gui
-    for kw in ("PBP 旋轉", "Survey Point", "模型 origin 非零", "Revit 2027"):
+    for kw in ("PBP 旋轉", "Survey Point", "旋轉後的四通", "Revit 2027"):
         row = [r for r in rows if kw in r]
         assert len(row) == 1 and row[0].rstrip(" |").endswith(("UNVERIFIED", "UNVERIFIED（本機未安裝）")), (kw, row)
     assert "runtime 未驗證" not in text("VERIFICATION.md").split("## Coordinate scope")[1].split("\n## ")[0]
+    local = [r for r in rows if "模型自帶 origin 平移" in r]
+    assert len(local) == 1 and local[0].rstrip(" |").split(" | ")[-1].startswith("PASS"), local
+    assert "schema_version" in text("VERIFICATION.md") and "不需要遷移說明" in text("VERIFICATION.md")
 
 
 # ───────────── CI 與發布流程 ─────────────

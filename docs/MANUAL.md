@@ -9,7 +9,7 @@
 1. 啟動：`python -m mep_tray.webui`，複製終端機印出的網址（含 token）到瀏覽器。
 2. 填尺寸：房間 X／Y／Z（公尺）、橋架寬度與高度（mm）、橋架用途（電力／訊號）、起點與終點座標（公尺）。終點最多 3 個（多終點會產生分支）。
 3. 勾規範：至少一套。多套同時勾選時，每個參數取最嚴格的值，並在報告中註明由哪一套決定。
-4. 選障礙物檔（可略）：上傳 JSON，格式見第 2 節。
+4. 選障礙物檔（可略）：上傳 JSON，格式見第 2 節。另可在「Revit 座標基準」選擇模型座標對應 Revit 的哪個基準（預設「未指定」），並在「進階：模型原點與旋轉」填模型原點（mm）與繞 Z 軸旋轉角（度，預設 0 = 不平移不旋轉）。
 5. 按「執行」。同時只跑一個工作；忙碌時按鈕會回報「已有一個工作在執行」，等它完成再按。工作無法取消。
 6. 結果區顯示：狀態、各項發現、XY 平面示意（俯視；含障礙物投影（依類型著色的斜線框）、吊架（黑色 ×）、接頭（彎頭／三通／四通／直接頭各用不同記號）與比例尺；標示「示意圖，非施工圖」；圖層筆數過多時只畫前幾百個並註明；示意上方三個按鈕可切換 XY 俯視／XZ 前視（X 向右、Z 向上）／YZ 側視（Y 向右、Z 向上），預設 XY；各視角以該平面的房間範圍等比例縮放，與視平面垂直的段畫成點，障礙物畫成該平面投影（不分前後深度），畫布上標有軸向）、下載連結（DXF、DWG、Revit 匯入 JSON、HTML 報告、manifest）。報告用瀏覽器「列印 → 另存 PDF」。示意不是施工圖，尺寸以下載檔與報告為準。
 
@@ -38,9 +38,10 @@
 
 ## 3. 座標與單位
 
-- 原點為你輸入的座標系原點；工具不假設它對應 Revit 專案基準點、測量點或 Shared Coordinates（Shared Coordinates 不支援）。
+- 模型的 `coordinate_system` 可帶 `origin`（mm）與 `rotation_deg`（繞 Z 軸，逆時針為正）：basis 座標 = origin + Rz(rotation_deg)·模型點。`axis_x`／`axis_y`／`axis_z` 須與 rotation_deg 一致（只支援繞 Z 軸），不一致、非有限數值一律在匯入前拒絕；`schema_version` 仍為 1，原點 0、旋轉 0 的舊檔照常匯入。網頁介面與管線（`pipeline.run(origin_mm=…, rotation_deg=…)`）都可設定，也可用 Python API（`export_revit.build_model`）。原點與旋轉只改變匯入 Revit 用的模型座標，路徑預覽與 DXF 仍使用房間的本地座標。
+- 原點為你輸入的座標系原點；工具不假設它對應 Revit 專案基準點、測量點或 Shared Coordinates；對應哪一個由你選擇的 basis 決定（SHARED_COORDINATES 會依目前文件的 Project Location 換算，含真北旋轉）。
 - 介面與 `obstacles` 用公尺；DXF 與匯入 JSON 用 mm；Revit 匯入腳本內再換算成英呎。
-- Revit 座標基準欄位預設「未指定」（UNSPECIFIED），不會被猜成任何一種。
+- Revit 座標基準欄位預設「未指定」（UNSPECIFIED），不會被猜成任何一種。介面可選：未指定、Revit 內部原點、專案基準點（PROJECT_BASE_POINT）、共用座標（SHARED_COORDINATES，含真北旋轉）。**測量點（Survey Point）不是獨立選項**：Revit 的共用座標系以測量點定義，要用測量點／共用座標請選共用座標。模型原點與旋轉只在選定基準後才有意義；基準為「未指定」時匯入器仍會拒絕。
 
 ## 規範表（5 套）
 
@@ -92,6 +93,8 @@
 | route／`endpoint_blocked` | 起點或終點落在障礙物淨距內 | 移動起訖點或障礙物 |
 | validate／`invalid_input` | 欄位不合法 | 檢查數值與範圍 |
 | validate／`no_codes` | 沒有勾規範 | 至少勾一項 |
+| validate／`invalid_basis` | 座標基準不合法 | 從清單選一個基準 |
+| validate／`invalid_coordinate_system` | 模型原點或旋轉角不合法 | 原點需 3 個有限數字（mm），旋轉角需有限數字（度） |
 | rules／`invalid_rules` | 規範設定有問題 | 檢查 `rules.json` 與代號 |
 | output／`run_exists` | 版本編號衝突 | 再按一次 |
 | io／`os_error` | 寫入輸出失敗 | 檢查磁碟空間與權限 |
@@ -126,7 +129,7 @@
 ## 8. 限制（務必閱讀）
 
 1. **所有規範值皆為未驗證的設計預設值**，無法視為任何法規的合規結論；第 5 套 `MRT_APPX_C` 的數值來自文字抽取，附件A矩陣個別格值須回查原檔。
-2. **Revit**：只在 Revit 2025.5 驗證過建立與提交（直線、彎頭、三通、四通）與儲存重開（人工確認）；2026-10-09 AutoRun 另驗證場景端點與 Comments 讀回、union、過短線段回滾，以及專案基準點（PBP）非零 XY 平移（未簽署建置須人工按「Load Once」）。PBP 旋轉、Z 位移、測量點（Survey Point）仍未驗證，Shared Coordinates 依設計拒絕；其他回滾路徑未驗證，見 [VERIFICATION.md](VERIFICATION.md)。Revit 2027 相容性未驗證。交付是**系統族建模匯入器，不是 .rfa**。
+2. **Revit**：只在 Revit 2025.5 驗證過建立與提交（直線、彎頭、三通、四通）與儲存重開（人工確認）；2026-10-09 AutoRun 另驗證場景端點與 Comments 讀回、union、過短線段回滾，以及專案基準點（PBP）非零 XY 平移（未簽署建置須人工按「Load Once」）。Shared Coordinates 基準另以非零東西／南北／高程與 30° 真北旋轉驗證，模型自帶 origin 平移與繞 Z 旋轉（含三通、彎頭，旋轉後 15°、30°、90°）也已驗證；旋轉後的四通與 union 接頭未驗證。PBP 旋轉、Z 位移、測量點（Survey Point）仍未驗證；其他回滾路徑未驗證，見 [VERIFICATION.md](VERIFICATION.md)。Revit 2027 相容性未驗證。交付是**系統族建模匯入器，不是 .rfa**。
 3. **AutoCAD**：只在本機以 AutoCAD 2027 的 `accoreconsole.exe` 驗證（稽核 0 錯誤、DWG 為 AC1032）。其他版本與機器未驗證。
 4. **網頁介面**只在內建瀏覽器驗證。真實按 Enter 送出、視覺外觀、其他瀏覽器、螢幕閱讀器為 **HUMAN TEST PENDING**。自行驗證：(a) 在 Chrome／Edge 開網址；(b) 在最後一個欄位按 Enter，確認會執行一次；(c) 只用 Tab 走完全部欄位，確認每個都有可讀的名稱；(d) 螢幕閱讀器朗讀錯誤訊息。
 5. 符號連結的下載防護測試在這台機器 **被略過（未驗證）**。

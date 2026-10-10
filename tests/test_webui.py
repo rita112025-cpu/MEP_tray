@@ -442,7 +442,7 @@ def test_web_limits_match_the_router_limit_and_use_its_grid_formula():
     from mep_tray import router
     assert W.MAX_GRID_CELLS == inspect.signature(router.route_tray).parameters["max_cells"].default
     assert W.MAX_OBSTACLE_WORK == router.MAX_OBSTACLE_WORK if hasattr(W, "MAX_OBSTACLE_WORK") else True
-    assert "grid_cells" in inspect.getsource(W.validate_request)                           # 不自己重寫網格公式
+    assert "grid_cells" in inspect.getsource(W.validate_request_full)                           # 不自己重寫網格公式
 
 
 def obstacle(**kw):
@@ -1376,3 +1376,74 @@ def test_label_layout_merges_coincident_points_and_never_overlaps_in_node(tmp_pa
                 assert not any(_overlap(b, mk) for mk in marks), (name, b)
     s, e = out["plain"]["labs"]                                            # 不擁擠時維持原本位置（右上／右上）
     assert (s["x"], s["y"]) == (107, 93) and (e["x"], e["y"]) == (407, 193)
+
+
+# ───────────── 座標基準（slice 4）─────────────
+def test_coordinate_system_defaults_and_valid_values_are_parsed():
+    inp, codes, coord = W.validate_request_full(good())
+    assert coord == {"basis": "UNSPECIFIED", "origin_mm": (0.0, 0.0, 0.0), "rotation_deg": 0.0}
+    assert W.validate_request(good()) == (inp, codes) or len(W.validate_request(good())) == 2
+    body = {**good(), "coordinate_system": {"basis": "SHARED_COORDINATES", "origin_mm": [1000, -2000.5, 300],
+                                            "rotation_deg": -45}}
+    assert W.validate_request_full(body)[2] == {"basis": "SHARED_COORDINATES",
+                                                "origin_mm": (1000.0, -2000.5, 300.0), "rotation_deg": -45.0}
+    only_basis = {**good(), "coordinate_system": {"basis": "INTERNAL_ORIGIN"}}
+    assert W.validate_request_full(only_basis)[2]["origin_mm"] == (0.0, 0.0, 0.0)
+
+
+@pytest.mark.parametrize("cs,field,code", [
+    ({"basis": "SURVEY_POINT"}, "coordinate_system.basis", "invalid_choice"),      # 測量點不是獨立基準
+    ({"basis": 5}, "coordinate_system.basis", "invalid_choice"),
+    ({"basis": "internal_origin"}, "coordinate_system.basis", "invalid_choice"),
+    ({"origin_mm": [1, 2]}, "coordinate_system.origin_mm", "invalid_type"),
+    ({"origin_mm": "1,2,3"}, "coordinate_system.origin_mm", "invalid_type"),
+    ({"origin_mm": [1, 2, "3"]}, "coordinate_system.origin_mm[2]", "invalid_number"),
+    ({"origin_mm": [True, 2, 3]}, "coordinate_system.origin_mm[0]", "invalid_number"),
+    ({"origin_mm": [1, float("inf"), 3]}, "coordinate_system.origin_mm[1]", "invalid_number"),
+    ({"origin_mm": [W.MAX_ORIGIN_MM + 1, 0, 0]}, "coordinate_system.origin_mm[0]", "out_of_range"),
+    ({"origin_mm": [None, 0, 0]}, "coordinate_system.origin_mm[0]", "invalid_number"),
+    ({"rotation_deg": 361}, "coordinate_system.rotation_deg", "out_of_range"),
+    ({"rotation_deg": True}, "coordinate_system.rotation_deg", "invalid_number"),
+    ({"rotation_deg": None}, "coordinate_system.rotation_deg", "invalid_number"),
+    ({"rotation_deg": float("nan")}, "coordinate_system.rotation_deg", "invalid_number"),
+    ({"axis_x": [1, 0, 0]}, "coordinate_system", "unknown_field"),
+])
+def test_coordinate_system_validation_cases(cs, field, code):
+    expect_field({**good(), "coordinate_system": cs}, field, code)
+    expect_field({**good(), "coordinate_system": [1, 2]}, "coordinate_system", "invalid_type")
+
+
+def test_index_offers_basis_origin_and_rotation_with_explicit_labels_and_no_survey_point(srv):
+    html_ = call(srv, "GET", T(srv))[2].decode("utf-8")
+    opts = re.findall(r'<option value="([A-Z_]+)"', html_)
+    assert [o for o in opts if o in ("UNSPECIFIED", "INTERNAL_ORIGIN", "PROJECT_BASE_POINT", "SHARED_COORDINATES",
+                                     "SURVEY_POINT")] == ["UNSPECIFIED", "INTERNAL_ORIGIN", "PROJECT_BASE_POINT",
+                                                          "SHARED_COORDINATES"]
+    assert re.search(r'value="UNSPECIFIED" selected', html_)                       # 預設仍是未指定
+    ids = ["coordinate_system_basis", "coordinate_system_origin_mm0", "coordinate_system_origin_mm1",
+           "coordinate_system_origin_mm2", "coordinate_system_rotation_deg"]
+    for i in ids:
+        assert f'id="{i}"' in html_ and f'<label for="{i}">' in html_, i
+    assert "<details" in html_ and "進階：模型原點與旋轉" in html_
+    # 伺服器回報的欄位名稱必須能對到頁面上的控制項（與前端 fid() 相同規則）
+    for f in ("coordinate_system.basis", "coordinate_system.origin_mm[0]", "coordinate_system.origin_mm[1]",
+              "coordinate_system.origin_mm[2]", "coordinate_system.rotation_deg"):
+        assert re.sub(r"\[(\d+)\]", r"\1", f).replace(".", "_") in ids, f
+    js = call(srv, "GET", T(srv, "app.js"))[2].decode("utf-8")
+    assert "coordinate_system_basis" in js and "req.coordinate_system" in js and "det.open = true" in js
+
+
+def test_run_with_coordinate_system_reaches_the_model_manifest_and_report(srv):
+    body = {**good(), "coordinate_system": {"basis": "SHARED_COORDINATES", "origin_mm": [1500, -500, 250],
+                                            "rotation_deg": 30}}
+    j = run_job(srv, body)
+    assert j["state"] == "done", j
+    lr = V.load_version(j["run_id"])
+    assert lr.ok
+    o = lr.manifest["options"]
+    assert o["basis"] == "SHARED_COORDINATES" and o["origin_mm"] == [1500.0, -500.0, 250.0] and o["rotation_deg"] == 30.0
+    by = {f["kind"]: f["href"] for f in j["files"]}
+    model = json.loads(call(srv, "GET", by["revit_json"])[2].decode("utf-8"))
+    cs = model["coordinate_system"]
+    assert cs["basis"] == "SHARED_COORDINATES" and cs["origin"] == [1500.0, -500.0, 250.0] and cs["rotation_deg"] == 30.0
+    assert "模型原點 (mm)" in call(srv, "GET", by["report"])[2].decode("utf-8")
