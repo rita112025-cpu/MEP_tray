@@ -4,6 +4,28 @@
 
 本輪只驗證與修正既有路徑，不新增產品功能。所有下表 runtime 狀態與 build 分開；Python baseline 122 tests 與第一次 benchmark 留在 HANDOFF。
 
+## develop 發布前完整 gate：階段 4（2026-10-10，commit 34185f7）
+
+對象：`origin/develop` 於 PR #14 合併後（`34185f7`），在獨立 worktree 執行，準備併入 `master`。涵蓋階段 4 的 slice 1～5（#6、#7、#12、#13、#14）。環境：Windows 11、Python 3.12、.NET SDK 10、本機 AutoCAD（accoreconsole）、Revit 2025.5。
+
+| 項目 | 結果 |
+|---|---|
+| CI（GitHub Actions，`develop` push，#14 合併後） | 成功（4 分 20 秒） |
+| `git diff --check`（整棵樹） | 通過 |
+| `python -m compileall -q mep_tray tests` | 通過 |
+| C# `MepTray.Core`／`MepTray.Core.SelfTest` Release 建置 | 0 警告、0 錯誤 |
+| C# SelfTest 執行（net10.0，Python 實際匯出的模型） | ALL PASS |
+| `python -m pytest -q` | 619 passed、1 skipped、23 deselected（119.77 s）；本次無失敗 |
+| `python -m pytest -m slow` | 1 passed |
+| `python -m pytest -m autocad` | 4 passed；前後皆無殘留 AutoCAD 程序 |
+| `python -m pytest -m revit` | 18 passed（81.47 s）；結束後無殘留 `Revit.exe`，Addins 資料夾與測試前相同 |
+
+- Revit 18 項含：原有場景（直線、彎頭、三通、四通、union、回滾、拒絕等）、PBP 非零平移、共用座標（平移、平移＋30° 旋轉）、模型自帶 origin 與繞 Z 旋轉（INTERNAL 的 90° 三通與 30° 彎頭、SHARED 疊加 45° 的三通）與 Core SelfTest。**slice 4 只改網頁與管線，沒有新增 Revit 場景**，所以這次 Revit 結果代表 slice 2、3 的行為在合併後的 `develop` 上未退化，不是網頁產物的匯入驗證。
+- 先前紀錄的網頁偶發連線錯誤（`ConnectionAbortedError`）本次預設 pytest 未出現；**根因仍未查明**，不能因此視為已解決（見上方 2026-10-09 的 develop 合併前完整 gate 小節與追蹤任務）。
+- Revit 實機測試的環境條件：外掛未簽署，需人工按「Load Once」；`%APPDATA%\Autodesk\Revit\Addins\2025` 內不得有兩份 AddInId 相同的清單，否則 Revit 會彈出模態對話框而使測試逾時（已記於 slice 3 節）。
+- **未執行**：Revit 2027、AutoCAD 2027（本機未安裝）。
+- **仍未驗證**：旋轉後的四通（cross）與 union 接頭、PBP 自身旋轉、Survey Point 移動、連結檔共用座標、PBP 不在內部原點時的共用座標、網頁產生的 JSON 實際匯入 Revit、網頁的螢幕閱讀器／行動版面／鍵盤操作；DLL 未簽章，僅適用本機使用。
+
 ## 網頁介面選座標基準、模型原點與旋轉（stage 4 slice 4，2026-10-10）
 
 網頁介面新增「Revit 座標基準」：基準選單（未指定／Revit 內部原點／專案基準點／共用座標）與「進階：模型原點與旋轉」（原點 X/Y/Z mm、繞 Z 旋轉角度），請求欄位 `coordinate_system: {basis, origin_mm, rotation_deg}`，省略時等同先前行為（未指定、原點 0、旋轉 0）。`pipeline.run` 新增 `origin_mm`、`rotation_deg`，寫入 Revit JSON、manifest `options` 與 HTML 報告。
