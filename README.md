@@ -16,7 +16,7 @@ python -m mep_tray.webui
 
 ## 版本
 
-- 目前版本：v0.4.0（2026-10-09，首個 tag；發布說明：https://github.com/rita112025-cpu/MEP_tray/releases/tag/v0.4.0 ）。版本號格式與發布流程見 [RELEASE](docs/RELEASE.md)。
+- 目前版本：v0.5.0（2026-10-10；發布說明：https://github.com/rita112025-cpu/MEP_tray/releases/tag/v0.5.0 ）。前一版 v0.4.0（2026-10-09，首個 tag；發布說明：https://github.com/rita112025-cpu/MEP_tray/releases/tag/v0.4.0 ）。版本號格式與發布流程見 [RELEASE](docs/RELEASE.md)。
 - 發布版本號不代表任何規範或 Revit／AutoCAD 實機驗收已完成；驗證狀態以 [VERIFICATION](docs/VERIFICATION.md) 為準。
 
 ## 文件
