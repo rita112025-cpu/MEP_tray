@@ -186,7 +186,8 @@ def _created_iso(now) -> str:
 
 
 def _build_manifest(inp, codes, run_id, type_name, basis, notes, gov, rules_d, route, reports, model,
-                    span, span_source, dxf, jpath, disclosures, make_dwg, created, report_path=None) -> dict:
+                    span, span_source, dxf, jpath, disclosures, make_dwg, created, report_path=None,
+                    origin_mm=None, rotation_deg=None) -> dict:
     """環境只在「允許使用 CAD」時才探測（make_dwg=False 承諾絕不碰外部程式，連偵測也不做 → 記為 None=未探測）。"""
     if make_dwg is not False:
         env = {"acad_available": acad.find_accore() is not None, "acad_version": dxf.acad_version,
@@ -200,7 +201,8 @@ def _build_manifest(inp, codes, run_id, type_name, basis, notes, gov, rules_d, r
         span_m=span, span_source=span_source,
         files={"dxf": dxf.dxf, "dwg": dxf.dwg, "revit_json": jpath, "report": report_path},
         dwg_note=dxf.dwg_note,
-        acad_audit=dxf.acad_audit, disclosures=disclosures, environment=env)
+        acad_audit=dxf.acad_audit, disclosures=disclosures, environment=env,
+        origin_mm=origin_mm, rotation_deg=rotation_deg)
 
 
 def _dedupe(codes) -> list:
@@ -215,7 +217,8 @@ def _dedupe(codes) -> list:
 def run(inputs: Inputs, codes: Sequence[str], run_id: str, *, type_name: str | None = None,
         basis: str = "UNSPECIFIED", make_dwg: bool | None = True, rules: dict | None = None,
         notes: Sequence[str] = (), cell_m: float | None = None,
-        now: datetime | None = None) -> RunResult:
+        now: datetime | None = None, origin_mm: Sequence[float] = (0.0, 0.0, 0.0),
+        rotation_deg: float = 0.0) -> RunResult:
     """執行完整管線。make_dwg: True/None=偵測到 AutoCAD/ODA 才轉 DWG；False=絕不啟動外部程式。
     codes 去重並保序；大小寫不正規化（未知代號會被明確拒絕，如 "cns"）。
     cell_m 不為 None 時覆寫 inputs.cell_m（呼叫端如 UI 不必改 Inputs 就能控制格距）；None=沿用 inputs.cell_m
@@ -238,6 +241,10 @@ def run(inputs: Inputs, codes: Sequence[str], run_id: str, *, type_name: str | N
         return _fail(run_id, inp, codes, "output", "run_exists", f"run_id 已存在，拒絕覆寫: {run_id}")
     if basis not in R.BASES:
         return _fail(run_id, inp, codes, "validate", "invalid_basis", f"basis 需為 {R.BASES}")
+    try:
+        R.coordinate_system(basis, origin_mm, rotation_deg)       # origin／rotation 的有限數與型別檢查（與匯出器同一套）
+    except ValueError as e:
+        return _fail(run_id, inp, codes, "validate", "invalid_coordinate_system", str(e))
     if type_name is not None and (not isinstance(type_name, str) or not type_name.strip()
                                   or len(type_name) > MAX_TYPE_NAME
                                   or any(ord(c) < 32 or ord(c) == 127 for c in type_name)):
@@ -276,7 +283,8 @@ def run(inputs: Inputs, codes: Sequence[str], run_id: str, *, type_name: str | N
 
     reports = {"clash": check_route(inp, route, gov), "compliance": check_compliance(inp, route, gov)}
     rep_list = [reports["clash"], reports["compliance"]]
-    model = R.build_model(inp, route, rep_list, gov, run_id, type_name=type_name, basis=basis, notes=extra)
+    model = R.build_model(inp, route, rep_list, gov, run_id, type_name=type_name, basis=basis, notes=extra,
+                          origin_mm=origin_mm, rotation_deg=rotation_deg)
     disclosures = [sanitize_text(n) for n in base_notes(inp, gov, rep_list, extra)]
     stats = _scrub(_stats(route, reports, model, span, span_source))
 
@@ -302,13 +310,14 @@ def run(inputs: Inputs, codes: Sequence[str], run_id: str, *, type_name: str | N
             created = _created_iso(now)                             # 兩次建立 manifest 共用同一個建立時間
             common = (inp, codes, run_id, type_name, basis, notes, gov, rules_d, route, reports, model,
                       span, span_source, dxf, jpath, disclosures, make_dwg, created)
-            m0 = _build_manifest(*common)                           # 尚未含報告：報告的檔案表列的就是這些
+            coord = {"origin_mm": origin_mm, "rotation_deg": rotation_deg}
+            m0 = _build_manifest(*common, **coord)                  # 尚未含報告：報告的檔案表列的就是這些
             rpath = out_path(run_id, f"report_{run_id}.html", stage)
             doc = RP.render_report_data(RP.ReportData(run_id, inp, codes, gov, route, reports, stats, m0,
                                                       disclosures, sanitize_text(dxf.dwg_note), dxf.acad_audit))
             with open(rpath, "x", encoding="utf-8", newline="\n") as fh:
                 fh.write(doc)
-            manifest = _build_manifest(*common, report_path=rpath)  # 最終 manifest：files 含報告，最後寫入
+            manifest = _build_manifest(*common, report_path=rpath, **coord)  # 最終 manifest：files 含報告，最後寫入
             V.write_manifest(stage / run_id, manifest)             # 整個資料夾隨 rename 一起發佈
             err = _publish(stage / run_id, final)
         except FileExistsError as e:

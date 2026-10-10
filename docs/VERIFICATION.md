@@ -4,12 +4,24 @@
 
 本輪只驗證與修正既有路徑，不新增產品功能。所有下表 runtime 狀態與 build 分開；Python baseline 122 tests 與第一次 benchmark 留在 HANDOFF。
 
+## 網頁介面選座標基準、模型原點與旋轉（stage 4 slice 4，2026-10-10）
+
+網頁介面新增「Revit 座標基準」：基準選單（未指定／Revit 內部原點／專案基準點／共用座標）與「進階：模型原點與旋轉」（原點 X/Y/Z mm、繞 Z 旋轉角度），請求欄位 `coordinate_system: {basis, origin_mm, rotation_deg}`，省略時等同先前行為（未指定、原點 0、旋轉 0）。`pipeline.run` 新增 `origin_mm`、`rotation_deg`，寫入 Revit JSON、manifest `options` 與 HTML 報告。
+
+- **測量點（Survey Point）不是獨立選項**：Revit 的共用座標系以測量點定義，要用測量點座標請選共用座標；介面與文件都明確寫出，不提供沒有實作的基準。
+- **manifest options 只在非預設時多出 `origin_mm`／`rotation_deg`**，因此沒用到這項功能的既有輸入雜湊、版本比對與 run id 不變（`tests/test_pipeline.py` 以明確 0 與預設相同雜湊驗證）。
+- 驗證在伺服器端：基準必須在清單內（`SURVEY_POINT`、小寫、非字串一律 `invalid_choice`）、原點為 3 個有限數且每軸 ±100,000,000 mm、旋轉 ±360 度、不接受 bool／字串數字／未知鍵；管線另有 `invalid_coordinate_system` 結構化失敗（不留資料夾）。
+- 前端：欄位有明確 `<label for>`；錯誤欄位位於收合的「進階」內時自動展開並聚焦；伺服器回報的欄位名稱與前端控制項 id 的對應有測試。
+- 自動測試：預設 `pytest`：619 passed、1 skipped、23 deselected；新增 pipeline／webui 測試涵蓋預設值、驗證表、頁面控制項、端到端（POST → 工作 → manifest／模型 JSON／報告）。
+- **瀏覽器實測（內建瀏覽器，本機伺服器，2026-10-10）**：原點 X 留空時顯示「模型原點 X (mm) 必須是數字」，「進階」自動展開、焦點移到該欄位、`aria-invalid=true`；填入共用座標、原點 (1500, −500, 250) mm、旋轉 30° 後執行，完成並提供 DXF／DWG／JSON／報告／manifest 下載；產生的 JSON `coordinate_system` 為 SHARED_COORDINATES、origin [1500, −500, 250]、rotation_deg 30、軸向量與角度一致；manifest options 與報告列相同。執行時本機 AutoCAD 轉出了 DWG，之後無殘留 AutoCAD 程序。**螢幕閱讀器實測、行動版面與鍵盤操作未做**（只做了上述流程；截圖逾時，改以頁面文字與 DOM 狀態檢查）。
+- **未驗證**：由網頁產生的 JSON 實際匯入 Revit（匯入器與換算已在 slice 2/3 以同一個匯出器驗證，但這次的網頁產物沒有再丟進 Revit）；路徑預覽與 DXF 仍使用房間本地座標，不套用原點與旋轉。
+
 ## Revit 2025.5 模型自帶 origin 與繞 Z 旋轉（stage 4 slice 3，2026-10-10）
 
 語意：`basis 座標 = origin + Rz(rotation_deg)·模型點`（mm，逆時針為正），basis 座標再依 INTERNAL_ORIGIN／PROJECT_BASE_POINT／SHARED_COORDINATES 換成 Revit 內部座標。`schema_version` 維持 1：origin 0、rotation 0 的舊檔意義不變，非零值以前就被匯入器拒絕，所以沒有舊檔語意被改變，也不需要遷移說明。
 
 - C# `ModelLoader.Validate`：origin 與 rotation_deg 須為有限數；`axis_x=(cosθ,sinθ,0)`、`axis_y=(−sinθ,cosθ,0)`、`axis_z=(0,0,1)` 須在 1e-6 內與 rotation_deg 一致，否則拒絕（不能忽略任何變換）。`ModelLoader.ToBasis` 為共同換算；共用座標的自我檢查改比對換算後的 basis 座標。
-- Python `export_revit.coordinate_system`／`build_model` 新增 `origin_mm`、`rotation_deg`（預設 0），軸向量由角度導出。**管線與 manifest 尚未傳入**，目前僅 Python API；網頁入口留給 slice 4。
+- Python `export_revit.coordinate_system`／`build_model` 新增 `origin_mm`、`rotation_deg`（預設 0），軸向量由角度導出。slice 3 當時管線與 manifest 尚未傳入；slice 4 已補上（見上一節）。
 - Core SelfTest 新增：軸與角度不一致、非繞 Z 軸、NaN／長度錯誤的 origin、無限大角度被拒絕；origin 平移加 30°／90°／−45°／180° 且軸一致時通過，`ToBasis` 與 origin + Rz·點相符。`pytest -m revit tests/test_revit_dotnet.py`：1 passed。
 - 新實機場景（Revit 2025.5 AutoRun）：
 
@@ -22,7 +34,7 @@
 - 端點比對（非接頭端）：Revit 讀回內部座標（INTERNAL）或 `GetProjectPosition` 共用座標（SHARED）與 `origin + Rz·模型點` 差皆 ≤ 0.5 mm。
 - `pytest -m revit`：18 passed（47.15 s）；結束後無殘留 `Revit.exe`，`%APPDATA%` 的 AutoRun 清單已移除。證據：`output/revit2025_local_frame/models/`（未納入 Git）。
 - 環境事故（與程式無關）：前兩次重跑因 Revit 彈出「AddInId 重複」模態對話框（`TaskDialog_External_Tools_Duplicate_ClientId`，只有「Close」）而逾時；原因是使用者安裝目錄同時有 `MepTray.addin` 與舊的 `MepTray.Validation.addin`（同一 AddInId）。使用者把後者改名為 `.bak` 後通過。再有第二份同 ID 的清單，實機測試會再次卡住。
-- **未驗證**：旋轉後的四通（cross）與 union 接頭、非 Z 軸旋轉（不支援，會被拒絕）、PBP 自身旋轉、Survey Point 移動、連結檔共用座標、Revit 2027。管線／網頁尚未提供 origin／rotation 入口。
+- **未驗證**：旋轉後的四通（cross）與 union 接頭、非 Z 軸旋轉（不支援，會被拒絕）、PBP 自身旋轉、Survey Point 移動、連結檔共用座標、Revit 2027。（管線與網頁入口已於 slice 4 補上。）
 
 ## Revit 2025.5 共用座標（stage 4 slice 2，2026-10-10）
 
