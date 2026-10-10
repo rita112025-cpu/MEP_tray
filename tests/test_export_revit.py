@@ -166,3 +166,27 @@ def test_field_names_unique_per_scope_and_model_uses_them():
     for k in (R.FIELDS["Segments"], R.FIELDS["Joints"], R.FIELDS["Tray"], R.FIELDS["CoordinateSystem"]):
         assert k in m
     assert set(m["segments"][0]) == {R.FIELDS["Id"], R.FIELDS["Start"], R.FIELDS["End"]}
+
+
+def test_coordinate_system_origin_and_z_rotation_derive_consistent_axes():
+    import math
+    cs = R.coordinate_system("INTERNAL_ORIGIN", (2000, -1000, 500), 30)
+    th = math.radians(30)
+    assert cs["origin"] == [2000.0, -1000.0, 500.0] and cs["rotation_deg"] == 30.0
+    assert cs["axis_x"] == [math.cos(th), math.sin(th), 0.0] and cs["axis_y"] == [-math.sin(th), math.cos(th), 0.0]
+    assert cs["axis_z"] == [0.0, 0.0, 1.0]
+    d = R.coordinate_system("INTERNAL_ORIGIN")
+    assert d["origin"] == [0.0, 0.0, 0.0] and d["axis_x"] == [1.0, 0.0, 0.0] and d["axis_y"] == [0.0, 1.0, 0.0]
+    assert "-0.0" not in repr(d["axis_x"] + d["axis_y"])
+    for bad in ((1, 2), (1, 2, float("nan")), (1, 2, True), (1, 2, "3")):
+        with pytest.raises(ValueError, match="origin_mm"):
+            R.coordinate_system("INTERNAL_ORIGIN", bad)
+    for bad in (float("inf"), float("nan"), True, "90"):
+        with pytest.raises(ValueError, match="rotation_deg"):
+            R.coordinate_system("INTERNAL_ORIGIN", (0, 0, 0), bad)
+
+
+def test_build_model_passes_origin_and_rotation_through_and_keeps_schema_v1():
+    m, _, _ = model([(10, 1, 3)], basis="SHARED_COORDINATES", origin_mm=(1, 2, 3), rotation_deg=45)
+    assert m["schema_version"] == 1
+    assert m["coordinate_system"]["origin"] == [1.0, 2.0, 3.0] and m["coordinate_system"]["rotation_deg"] == 45.0

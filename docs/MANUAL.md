@@ -38,6 +38,7 @@
 
 ## 3. 座標與單位
 
+- 模型的 `coordinate_system` 可帶 `origin`（mm）與 `rotation_deg`（繞 Z 軸，逆時針為正）：basis 座標 = origin + Rz(rotation_deg)·模型點。`axis_x`／`axis_y`／`axis_z` 須與 rotation_deg 一致（只支援繞 Z 軸），不一致、非有限數值一律在匯入前拒絕；`schema_version` 仍為 1，原點 0、旋轉 0 的舊檔照常匯入。目前只能由 Python API（`export_revit.build_model(origin_mm=…, rotation_deg=…)`）設定，管線與網頁介面尚未提供入口。
 - 原點為你輸入的座標系原點；工具不假設它對應 Revit 專案基準點、測量點或 Shared Coordinates；對應哪一個由你選擇的 basis 決定（SHARED_COORDINATES 會依目前文件的 Project Location 換算，含真北旋轉）。
 - 介面與 `obstacles` 用公尺；DXF 與匯入 JSON 用 mm；Revit 匯入腳本內再換算成英呎。
 - Revit 座標基準欄位預設「未指定」（UNSPECIFIED），不會被猜成任何一種。
@@ -126,7 +127,7 @@
 ## 8. 限制（務必閱讀）
 
 1. **所有規範值皆為未驗證的設計預設值**，無法視為任何法規的合規結論；第 5 套 `MRT_APPX_C` 的數值來自文字抽取，附件A矩陣個別格值須回查原檔。
-2. **Revit**：只在 Revit 2025.5 驗證過建立與提交（直線、彎頭、三通、四通）與儲存重開（人工確認）；2026-10-09 AutoRun 另驗證場景端點與 Comments 讀回、union、過短線段回滾，以及專案基準點（PBP）非零 XY 平移（未簽署建置須人工按「Load Once」）。Shared Coordinates 基準另以非零東西／南北／高程與 30° 真北旋轉驗證（單一直線段；旋轉後的彎頭／三通接頭未驗證）。PBP 旋轉、Z 位移、測量點（Survey Point）仍未驗證；其他回滾路徑未驗證，見 [VERIFICATION.md](VERIFICATION.md)。Revit 2027 相容性未驗證。交付是**系統族建模匯入器，不是 .rfa**。
+2. **Revit**：只在 Revit 2025.5 驗證過建立與提交（直線、彎頭、三通、四通）與儲存重開（人工確認）；2026-10-09 AutoRun 另驗證場景端點與 Comments 讀回、union、過短線段回滾，以及專案基準點（PBP）非零 XY 平移（未簽署建置須人工按「Load Once」）。Shared Coordinates 基準另以非零東西／南北／高程與 30° 真北旋轉驗證，模型自帶 origin 平移與繞 Z 旋轉（含三通、彎頭，旋轉後 15°、30°、90°）也已驗證；旋轉後的四通與 union 接頭未驗證。PBP 旋轉、Z 位移、測量點（Survey Point）仍未驗證；其他回滾路徑未驗證，見 [VERIFICATION.md](VERIFICATION.md)。Revit 2027 相容性未驗證。交付是**系統族建模匯入器，不是 .rfa**。
 3. **AutoCAD**：只在本機以 AutoCAD 2027 的 `accoreconsole.exe` 驗證（稽核 0 錯誤、DWG 為 AC1032）。其他版本與機器未驗證。
 4. **網頁介面**只在內建瀏覽器驗證。真實按 Enter 送出、視覺外觀、其他瀏覽器、螢幕閱讀器為 **HUMAN TEST PENDING**。自行驗證：(a) 在 Chrome／Edge 開網址；(b) 在最後一個欄位按 Enter，確認會執行一次；(c) 只用 Tab 走完全部欄位，確認每個都有可讀的名稱；(d) 螢幕閱讀器朗讀錯誤訊息。
 5. 符號連結的下載防護測試在這台機器 **被略過（未驗證）**。

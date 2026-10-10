@@ -33,12 +33,14 @@ ADDINS_DIR = Path(os.environ["APPDATA"]) / "Autodesk" / "Revit" / "Addins" / REV
 MANIFEST_NAME = "MepTray.AutoRun.addin"
 
 
-def _routed_model(ends, name, basis="INTERNAL_ORIGIN", type_name="__FIRST__"):
+def _routed_model(ends, name, basis="INTERNAL_ORIGIN", type_name="__FIRST__", origin_mm=(0.0, 0.0, 0.0),
+                  rotation_deg=0.0):
     i = Inputs(start=(1, 1, 3), ends=ends)
     r = route_tray(i.room_box(), i.start, i.ends, [], 0.3, 0.1, "power", GOV, cell=0.25)
     place_hangers(r, GOV["span_max_m"].value)
     reps = [check_route(i, r, GOV), check_compliance(i, r, GOV)]
-    return R.build_model(i, r, reps, GOV, name, type_name=type_name, basis=basis)
+    return R.build_model(i, r, reps, GOV, name, type_name=type_name, basis=basis,
+                         origin_mm=origin_mm, rotation_deg=rotation_deg)
 
 
 def _manual_model(segs_m, name, basis="INTERNAL_ORIGIN", type_name="__FIRST__"):
@@ -64,7 +66,18 @@ def scenarios() -> dict[str, dict]:
     s["j2_shared_rotated"] = _routed_model([(10, 1, 3)], "j2_shared_rotated", basis="SHARED_COORDINATES")
     s["k_unsupported"] = _manual_model([((0, 5, 3), a), (a, (5, 10, 3)), (a, (5, 5, 0))], "k_unsupported")
     s["i2_pbp_moved"] = _routed_model([(10, 1, 3)], "i2_pbp_moved", basis="PROJECT_BASE_POINT")
+    for name, (ends, basis, origin, rot) in LOCAL_FRAMES.items():
+        s[name] = _routed_model(ends, name, basis=basis, origin_mm=origin, rotation_deg=rot)
     return s
+
+
+# 模型自帶的區域座標系（origin + 繞 Z 旋轉）：名稱 → (終點, basis, origin_mm, rotation_deg)
+LOCAL_FRAMES = {
+    "l1_local_rot90_tee": ([(10, 1, 3), (6, 5, 3)], "INTERNAL_ORIGIN", (2000.0, -1000.0, 500.0), 90.0),
+    "l2_local_rot30_elbow": ([(10, 5, 3)], "INTERNAL_ORIGIN", (-3000.0, 4000.0, 0.0), 30.0),
+    "l3_shared_local_rot45_tee": ([(10, 1, 3), (6, 5, 3)], "SHARED_COORDINATES", (500.0, 500.0, 0.0), 45.0),
+}
+L3_SHARED_ANGLE_DEG = 30.0
 
 
 # 非零 PBP 位移（mm）；不動 Z，避免牽涉 Level 高程
@@ -80,7 +93,8 @@ def setups() -> dict[str, dict]:
     """各場景匯入前要套用的文件座標設定（檔名 <場景>.setup.json）。"""
     return {"i2_pbp_moved": {"move_pbp_mm": list(I2_PBP_DELTA_MM)},
             "j1_shared_translate": {"set_project_position": {**J_SHARED_POS, "angle_deg": 0.0}},
-            "j2_shared_rotated": {"set_project_position": {**J_SHARED_POS, "angle_deg": J2_ANGLE_DEG}}}
+            "j2_shared_rotated": {"set_project_position": {**J_SHARED_POS, "angle_deg": J2_ANGLE_DEG}},
+            "l3_shared_local_rot45_tee": {"set_project_position": {**J_SHARED_POS, "angle_deg": L3_SHARED_ANGLE_DEG}}}
 
 
 def validate_setup(d) -> list[str]:
@@ -117,9 +131,10 @@ def shared_mismatches(model: dict, report: dict, tol_mm: float = 0.5) -> list[st
             p = s[key]
             if any(math.dist(p, q) < 1.0 for q in joint_pts):
                 continue
-            d = math.dist(p, t[got_key])
+            b = to_basis(model.get("coordinate_system"), p)
+            d = math.dist(b, t[got_key])
             if d > tol_mm:
-                bad.append(f"{s['id']}.{key}: 模型 {p} 共用座標讀回 {t[got_key]} 差 {d:.3f} mm")
+                bad.append(f"{s['id']}.{key}: 模型 {p}（basis 座標 {b}）共用座標讀回 {t[got_key]} 差 {d:.3f} mm")
     return bad
 
 
@@ -128,6 +143,22 @@ def xy_rotation_deg(model_seg: dict, tray: dict) -> float:
     mx, my = (model_seg["end"][i] - model_seg["start"][i] for i in (0, 1))
     tx, ty = (tray["EndMm"][i] - tray["StartMm"][i] for i in (0, 1))
     return math.degrees(math.atan2(mx * ty - my * tx, mx * tx + my * ty))
+
+
+def to_basis(cs: dict | None, p) -> list[float]:
+    """模型區域座標 → basis 座標（mm）：origin + Rz(rotation_deg)·點；沒有 coordinate_system 時視為恆等。"""
+    if not cs:
+        return [float(v) for v in p]
+    th = math.radians(cs["rotation_deg"])
+    c, s = math.cos(th), math.sin(th)
+    o = cs["origin"]
+    return [o[0] + c * p[0] - s * p[1], o[1] + s * p[0] + c * p[1], o[2] + p[2]]
+
+
+def angle_diff_deg(a: float, b: float) -> float:
+    """a − b 正規化到 (-180, 180]。"""
+    d = (a - b) % 360.0
+    return d - 360.0 if d > 180.0 else d
 
 
 def endpoint_mismatches(model: dict, report: dict, offset_mm, tol_mm: float = 0.5) -> list[str]:
@@ -146,7 +177,8 @@ def endpoint_mismatches(model: dict, report: dict, offset_mm, tol_mm: float = 0.
             p = s[key]
             if any(math.dist(p, q) < 1.0 for q in joint_pts):
                 continue
-            exp = [p[i] + offset_mm[i] for i in range(3)]
+            b = to_basis(model.get("coordinate_system"), p)
+            exp = [b[i] + offset_mm[i] for i in range(3)]
             d = math.dist(exp, t[got_key])
             if d > tol_mm:
                 bad.append(f"{s['id']}.{key}: 期望 {exp} 讀回 {t[got_key]} 差 {d:.3f} mm")

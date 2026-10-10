@@ -141,8 +141,12 @@ public static class RevitImporter
                 return rep;
         }
 
-        XYZ ToXyz(double[] a) =>
-            place(new XYZ(Units.MmToFeet(a[0]), Units.MmToFeet(a[1]), Units.MmToFeet(a[2])));
+        double[] InBasis(double[] a) => ModelLoader.ToBasis(m.CoordinateSystem, a);   // 模型區域座標 → basis 座標（mm）
+        XYZ ToXyz(double[] a)
+        {
+            var b = InBasis(a);
+            return place(new XYZ(Units.MmToFeet(b[0]), Units.MmToFeet(b[1]), Units.MmToFeet(b[2])));
+        }
 
         var levels = new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>().ToList();
         if (levels.Count == 0) { rep.Abort = "文件中沒有任何 Level"; return rep; }
@@ -168,8 +172,9 @@ public static class RevitImporter
             var pairs = new List<(string Id, double[] Model, XYZ Internal)>();
             foreach (var (s, p1, p2) in coords) { pairs.Add((s.Id + ".start", s.Start, p1)); pairs.Add((s.Id + ".end", s.End, p2)); }
             foreach (var j in m.Joints) pairs.Add((j.Id, j.Point, jointPts[j.Id]));
-            foreach (var (id, model, internalPt) in pairs)
+            foreach (var (id, localPt, internalPt) in pairs)
             {
+                var model = InBasis(localPt);
                 using var pp = loc.GetProjectPosition(internalPt);
                 var back = new[] { Units.FeetToMm(pp.EastWest), Units.FeetToMm(pp.NorthSouth), Units.FeetToMm(pp.Elevation) };
                 var d = Math.Sqrt(Math.Pow(back[0] - model[0], 2) + Math.Pow(back[1] - model[1], 2) + Math.Pow(back[2] - model[2], 2));
