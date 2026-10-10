@@ -242,3 +242,33 @@ def test_dwg_conversions_are_serialised_across_concurrent_runs(monkeypatch, tmp_
     errors = {rid: (r.error.to_dict() if r.error else None) for rid, r in results.items()}    # 失敗時印出真因
     assert all(r.ok and r.files["dwg"] is not None for r in results.values()), errors
     assert peak[0] == 1 and len(calls) == 6                    # 每個 run 兩趟，且從未同時執行
+
+
+# ---------- 座標基準／模型原點與旋轉（slice 4）----------
+def test_origin_and_rotation_reach_revit_json_and_manifest_options_but_defaults_leave_options_unchanged(isolate):
+    default = P.run(Inputs(), ALL, "co0", make_dwg=False, basis="SHARED_COORDINATES")
+    assert default.ok and set(default.manifest["options"]) == {"type_name", "basis", "notes"}
+    moved = P.run(Inputs(), ALL, "co1", make_dwg=False, basis="SHARED_COORDINATES",
+                  origin_mm=(1000, -2000, 300), rotation_deg=30)
+    assert moved.ok
+    assert moved.manifest["options"]["origin_mm"] == [1000.0, -2000.0, 300.0]
+    assert moved.manifest["options"]["rotation_deg"] == 30.0
+    cs = json.loads(moved.files["revit_json"].read_text(encoding="utf-8"))["coordinate_system"]
+    assert cs["basis"] == "SHARED_COORDINATES" and cs["origin"] == [1000.0, -2000.0, 300.0] and cs["rotation_deg"] == 30.0
+    assert moved.manifest["hashes"]["input_sha256"] != default.manifest["hashes"]["input_sha256"]
+    assert "模型原點 (mm)" in moved.files["report"].read_text(encoding="utf-8")
+    assert "模型原點 (mm)" not in default.files["report"].read_text(encoding="utf-8")
+
+
+def test_explicit_zero_origin_and_rotation_hash_like_the_defaults(isolate):
+    a = P.run(Inputs(), ALL, "co2", make_dwg=False, basis="INTERNAL_ORIGIN")
+    b = P.run(Inputs(), ALL, "co3", make_dwg=False, basis="INTERNAL_ORIGIN", origin_mm=(0, 0, 0), rotation_deg=0)
+    assert a.ok and b.ok and a.manifest["hashes"]["input_sha256"] == b.manifest["hashes"]["input_sha256"]
+
+
+@pytest.mark.parametrize("kw", [{"origin_mm": (1, 2)}, {"origin_mm": (1, 2, float("nan"))}, {"origin_mm": (1, 2, True)},
+                                {"rotation_deg": float("inf")}, {"rotation_deg": "30"}, {"rotation_deg": True}])
+def test_invalid_origin_or_rotation_is_a_structured_validate_failure_and_leaves_nothing(isolate, kw):
+    r = P.run(Inputs(), ALL, "co4", make_dwg=False, basis="INTERNAL_ORIGIN", **kw)
+    assert not r.ok and (r.error.stage, r.error.code) == ("validate", "invalid_coordinate_system")
+    assert not (isolate / "co4").exists(), "失敗不得留下資料夾"

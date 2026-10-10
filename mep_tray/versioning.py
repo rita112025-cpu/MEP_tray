@@ -117,13 +117,20 @@ def normalize_inputs(inp) -> dict:
     return d
 
 
-def normalize_options(type_name=None, basis="UNSPECIFIED", notes=()) -> dict:
-    return {"type_name": type_name, "basis": basis, "notes": list(notes)}
+def normalize_options(type_name=None, basis="UNSPECIFIED", notes=(), origin_mm=None, rotation_deg=None) -> dict:
+    """origin_mm／rotation_deg 只在非預設（原點非 0／旋轉非 0）時才寫入，所以沒用到的舊輸入雜湊與版本比對不變。"""
+    opts = {"type_name": type_name, "basis": basis, "notes": list(notes)}
+    if origin_mm is not None and [float(v) for v in origin_mm] != [0.0, 0.0, 0.0]:
+        opts["origin_mm"] = [float(v) for v in origin_mm]
+    if rotation_deg is not None and float(rotation_deg) != 0.0:
+        opts["rotation_deg"] = float(rotation_deg)
+    return opts
 
 
-def input_material(inp, codes, *, type_name=None, basis="UNSPECIFIED", notes=()) -> dict:
+def input_material(inp, codes, *, type_name=None, basis="UNSPECIFIED", notes=(),
+                   origin_mm=None, rotation_deg=None) -> dict:
     return scrub({"inputs": normalize_inputs(inp), "codes": list(codes),
-                  "options": normalize_options(type_name, basis, notes)})
+                  "options": normalize_options(type_name, basis, notes, origin_mm, rotation_deg)})
 
 
 def input_hash(inp, codes, **opts) -> str:
@@ -170,8 +177,10 @@ def result_section(route, reports: dict, joints: int, span_m: float, span_source
 def build_manifest(*, run_id: str, created_at: str, inp, codes, type_name=None, basis="UNSPECIFIED",
                    notes=(), gov: dict, rules: dict, route, reports: dict, joints: int,
                    span_m: float, span_source: str, files: dict, dwg_note: str = "",
-                   acad_audit=None, disclosures=(), environment: dict | None = None) -> dict:
-    material = input_material(inp, codes, type_name=type_name, basis=basis, notes=notes)
+                   acad_audit=None, disclosures=(), environment: dict | None = None,
+                   origin_mm=None, rotation_deg=None) -> dict:
+    material = input_material(inp, codes, type_name=type_name, basis=basis, notes=notes,
+                              origin_mm=origin_mm, rotation_deg=rotation_deg)
     snapshot = scrub(gov_snapshot(gov))
     result = scrub(result_section(route, reports, joints, span_m, span_source))
     fmeta = {}

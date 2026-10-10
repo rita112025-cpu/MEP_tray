@@ -46,6 +46,12 @@ MAX_BODY = 1_048_576                  # POST 本文上限 1 MB
 MAX_OBSTACLE_BYTES = 262_144          # 障礙物整體序列化上限 256 KB
 MAX_OBSTACLES = 200
 MAX_END_POINTS = 3
+MAX_ORIGIN_MM = 100_000_000           # 模型原點每軸上限（mm，100 km；遠超過 Revit 可用範圍，只擋明顯的輸入錯誤）
+# 座標基準選項（只列匯入器實際支援的三種加「未指定」）。測量點（Survey Point）不是獨立基準：
+# Revit 的共用座標系就是以測量點定義的，要用測量點座標請選 SHARED_COORDINATES。
+BASIS_LABELS = (("UNSPECIFIED", "未指定（匯入 Revit 時再選）"), ("INTERNAL_ORIGIN", "Revit 內部原點"),
+                ("PROJECT_BASE_POINT", "專案基準點（Project Base Point）"),
+                ("SHARED_COORDINATES", "共用座標（Shared Coordinates，含真北旋轉）"))
 MAX_JSON_DEPTH = 20
 MAX_CONNECTIONS = 16
 SOCKET_TIMEOUT_S = 15
@@ -148,11 +154,35 @@ def _point(v, field, room, what) -> tuple:
     return p
 
 
+def _coordinate_options(raw) -> dict:
+    """座標基準／模型原點／繞 Z 旋轉。省略 = 未指定、原點 0、旋轉 0（與先前行為一致）。"""
+    if raw is None:
+        return {"basis": "UNSPECIFIED", "origin_mm": (0.0, 0.0, 0.0), "rotation_deg": 0.0}
+    c = _obj(raw, "coordinate_system", ("basis", "origin_mm", "rotation_deg"), required=False)
+    basis = c.get("basis", "UNSPECIFIED")
+    allowed = [b for b, _ in BASIS_LABELS]
+    if not isinstance(basis, str) or basis not in allowed:
+        raise ApiError(400, "invalid_choice", f"座標基準必須是 {allowed} 之一", "coordinate_system.basis")
+    o = c.get("origin_mm", [0, 0, 0])
+    if not isinstance(o, list) or len(o) != 3:
+        raise ApiError(400, "invalid_type", "模型原點必須是 3 個數字 [x, y, z]（mm）", "coordinate_system.origin_mm")
+    origin = tuple(_num(v, f"coordinate_system.origin_mm[{i}]", -MAX_ORIGIN_MM, MAX_ORIGIN_MM, f"模型原點 {a.upper()} (mm)")
+                   for i, (a, v) in enumerate(zip("xyz", o)))
+    rot = _num(c.get("rotation_deg", 0), "coordinate_system.rotation_deg", -360, 360, "旋轉角 (度)")
+    return {"basis": basis, "origin_mm": origin, "rotation_deg": rot}
+
+
 def validate_request(body: dict, rules: dict | None = None):
     """回傳 (Inputs, codes)。任何不合法一律 ApiError(400)。UI 與管線共用同一組上限常數與 router 的網格公式。"""
+    return validate_request_full(body, rules)[:2]
+
+
+def validate_request_full(body: dict, rules: dict | None = None):
+    """同 validate_request，另回傳座標選項 dict（basis／origin_mm／rotation_deg）。"""
     rules = rules or load_rules()
-    top = _obj(body, "request", ("room", "tray", "start", "ends", "codes", "cell_m", "cable", "obstacles"),
-               required=False)
+    top = _obj(body, "request", ("room", "tray", "start", "ends", "codes", "cell_m", "cable", "obstacles",
+                                 "coordinate_system"), required=False)
+    coord = _coordinate_options(top.get("coordinate_system"))
     for k in ("room", "tray", "start", "ends", "codes"):
         if k not in top:
             raise ApiError(400, "missing_field", f"缺少欄位: {k}", k)
@@ -230,7 +260,7 @@ def validate_request(body: dict, rules: dict | None = None):
         if work > MAX_OBSTACLE_WORK:
             raise ApiError(400, "obstacle_work_limit", f"障礙物範圍過大或過多（估算工作量 {work:,} 超過 {MAX_OBSTACLE_WORK:,}），"
                            f"請縮小障礙物、減少數量或放大格距", "obstacles")
-    return inp, codes
+    return inp, codes, coord
 
 
 # ───────────────────────── 錯誤 → 人話 ─────────────────────────
@@ -243,6 +273,8 @@ HUMAN = {
     ("route", "endpoint_blocked"): ("起點或終點落在障礙物淨距範圍內", "請移動起訖點或障礙物，或確認未貼近牆面與天花。"),
     ("validate", "invalid_input"): ("輸入不合法", "請檢查各欄位的數值與範圍。"),
     ("validate", "no_codes"): ("請至少勾選一套規範", "規範勾選區需要至少一項。"),
+    ("validate", "invalid_basis"): ("座標基準不合法", "請從清單中選擇一個座標基準。"),
+    ("validate", "invalid_coordinate_system"): ("模型原點或旋轉角不合法", "原點需為 3 個有限數字（mm），旋轉角需為有限數字（度）。"),
     ("rules", "invalid_rules"): ("規範設定有問題", "請檢查 rules.json 或勾選的規範代號。"),
     ("output", "run_exists"): ("版本編號衝突", "請再按一次執行。"),
     ("io", "os_error"): ("寫入輸出資料夾失敗", "請確認磁碟空間與資料夾權限後再試。"),
@@ -497,7 +529,7 @@ class JobManager:
         self.jobs: OrderedDict = OrderedDict()
         self._thread: threading.Thread | None = None
 
-    def submit(self, inp: Inputs, codes: list) -> str:
+    def submit(self, inp: Inputs, codes: list, coord: dict | None = None) -> str:
         with self._lock:
             if self._running is not None:
                 raise ApiError(409, "busy", "已有一個工作在執行，請等它完成後再試。")
@@ -506,16 +538,17 @@ class JobManager:
             self.jobs[jid] = {"state": "running"}
             while len(self.jobs) > self.keep:
                 self.jobs.popitem(last=False)
-        self._thread = threading.Thread(target=self._work, args=(jid, inp, codes), daemon=True)
+        self._thread = threading.Thread(target=self._work, args=(jid, inp, codes, coord), daemon=True)
         self._thread.start()
         return jid
 
-    def _work(self, jid: str, inp: Inputs, codes: list) -> None:
+    def _work(self, jid: str, inp: Inputs, codes: list, coord: dict | None = None) -> None:
+        coord = coord or {}
         try:
             res = None
             for _ in range(3):
-                run_id = V.new_run_id(inp, codes)
-                res = P.run(inp, codes, run_id, make_dwg=self.make_dwg)
+                run_id = V.new_run_id(inp, codes, **coord)
+                res = P.run(inp, codes, run_id, make_dwg=self.make_dwg, **coord)
                 if res.ok or res.error.code != "run_exists":
                     break
             out = self._view(res)
@@ -631,7 +664,11 @@ APP_JS = r"""
     var box = $("form-errors");
     var p = text("p", message, "err"); p.id = "err-" + box.childNodes.length; box.appendChild(p);
     var el = field ? $(fid(field)) : null;
-    if (el) { el.setAttribute("aria-invalid", "true"); el.setAttribute("aria-describedby", p.id); if (el.focus) el.focus(); }
+    if (el) {
+      var det = el.closest ? el.closest("details") : null;
+      if (det) det.open = true;                                  // 錯誤欄位在收合的「進階」裡時先展開，焦點才看得到
+      el.setAttribute("aria-invalid", "true"); el.setAttribute("aria-describedby", p.id); if (el.focus) el.focus();
+    }
   }
   function status(msg) { $("status").textContent = msg; }
 
@@ -653,6 +690,11 @@ APP_JS = r"""
     var cs = document.querySelectorAll("input[name=code]:checked");
     for (var j = 0; j < cs.length; j++) req.codes.push(cs[j].value);
     if (obstacles) req.obstacles = obstacles;
+    req.coordinate_system = {
+      basis: $("coordinate_system_basis").value,
+      origin_mm: [num("coordinate_system_origin_mm0"), num("coordinate_system_origin_mm1"), num("coordinate_system_origin_mm2")],
+      rotation_deg: num("coordinate_system_rotation_deg")
+    };
     return req;
   }
 
@@ -1015,6 +1057,9 @@ def render_index(token: str, rules: dict) -> str:
                    + xyz(f"ends{i}", f"終點 {i + 1}", ((10, 1, 3) if i == 0 else ("", "", "")))
                    for i in range(MAX_END_POINTS))
     cells = "".join(f'<option value="{c:g}"{" selected" if c == 0.25 else ""}>{c:g} m</option>' for c in CELLS)
+    basis_opts = "".join(f'<option value="{esc(b)}"{" selected" if b == "UNSPECIFIED" else ""}>{esc(t)}</option>'
+                         for b, t in BASIS_LABELS)
+    origin = "".join(num(f"coordinate_system_origin_mm{i}", f"模型原點 {a.upper()} (mm)", 0) for i, a in enumerate("xyz"))
     kinds = ('<span class="choice"><input type="radio" name="tray_kind" id="tray_kind_power" value="power" checked>'
              '<label for="tray_kind_power">電力橋架</label></span>'
              '<span class="choice"><input type="radio" name="tray_kind" id="tray_kind_signal" value="signal">'
@@ -1038,7 +1083,14 @@ def render_index(token: str, rules: dict) -> str:
 {field("cell_m", "格距", f'<select id="cell_m" name="cell_m">{cells}</select>')}
 {field("obstacle_file", "障礙物 JSON 檔（選填；不上傳＝空房間）", '<input id="obstacle_file" type="file" accept=".json,application/json" aria-describedby="obstacle_status">')}</div>
 <p id="obstacle_status" class="hint" role="status"></p>
-<p class="hint">0.25 m 約數秒；0.1 m 可能需數十秒；0.05 m 僅小房間可選。</p></fieldset></section>
+<p class="hint">0.25 m 約數秒；0.1 m 可能需數十秒；0.05 m 僅小房間可選。</p></fieldset>
+<fieldset><legend>Revit 座標基準（選填）</legend>
+<div class="row">{field("coordinate_system_basis", "座標基準", f'<select id="coordinate_system_basis" name="coordinate_system_basis" aria-describedby="basis_hint">{basis_opts}</select>')}</div>
+<p id="basis_hint" class="hint">模型座標要對應 Revit 的哪個基準。「未指定」時匯入器會拒絕，需在匯入 Revit 時由你選擇，不會自動假設。測量點（Survey Point）不是獨立選項；要用測量點／共用座標請選「共用座標」。</p>
+<details id="coord_advanced"><summary>進階：模型原點與旋轉</summary>
+<p class="hint">基準座標＝模型原點＋繞 Z 軸旋轉（逆時針為正）後的模型點。預設 0 表示不平移、不旋轉。路徑預覽仍畫在房間的本地座標，不套用這個轉換。</p>
+<div class="row" role="group" aria-label="模型原點 (mm)">{origin}</div>
+<div class="row">{num("coordinate_system_rotation_deg", "繞 Z 軸旋轉角 (度)", 0)}</div></details></fieldset></section>
 <section aria-labelledby="h-codes"><h2 id="h-codes">② 規範勾選</h2>
 <fieldset id="codes" tabindex="-1"><legend>採用的規範（自動採用最嚴格條件）</legend>{codes}</fieldset>
 <p class="banner">{esc(BANNER_FIXED)}</p></section>
@@ -1261,8 +1313,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._not_found()
         try:
             body = self._read_body()
-            inp, codes = validate_request(parse_json_body(body), self.server.rules)
-            jid = self.server.jobs.submit(inp, codes)
+            inp, codes, coord = validate_request_full(parse_json_body(body), self.server.rules)
+            jid = self.server.jobs.submit(inp, codes, coord)
         except ApiError as e:
             return self._error(e)
         self._json(202, {"job_id": jid})
