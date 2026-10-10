@@ -20,6 +20,9 @@ public sealed class TrayInfo
     public string Id { get; set; } = "";
     public double[] StartMm { get; set; } = new double[3];
     public double[] EndMm { get; set; } = new double[3];
+    /// <summary>端點經 ProjectLocation.GetProjectPosition 讀回的共用座標（EastWest, NorthSouth, Elevation；mm）。</summary>
+    public double[] SharedStartMm { get; set; } = new double[3];
+    public double[] SharedEndMm { get; set; } = new double[3];
     public double WidthMm { get; set; }
     public double HeightMm { get; set; }
     public string Comments { get; set; } = "";
@@ -93,6 +96,7 @@ public sealed class ImportReport
 public static class RevitImporter
 {
     const double ConnectorTolFeet = 0.002;   // ≈0.6 mm
+    const double SharedCheckTolMm = 0.5;
 
     public static ImportReport Import(Document? doc, TrayModel m, ImportOptions? opt = null)
     {
@@ -111,24 +115,34 @@ public static class RevitImporter
         rep.Basis = basis;
 
         rep.Phase = "resolve";
-        XYZ offset;
+        Func<XYZ, XYZ> place;   // 模型座標（英尺）→ Revit 內部座標（英尺）
         switch (basis)
         {
             case "INTERNAL_ORIGIN":
-                offset = XYZ.Zero;
+                place = p => p;
                 break;
             case "PROJECT_BASE_POINT":
                 var pbp = BasePoint.GetProjectBasePoint(doc);
                 if (pbp == null) { rep.Abort = "找不到 Project Base Point"; return rep; }
-                offset = pbp.Position;
+                var offset = pbp.Position;
+                place = p => p + offset;
                 break;
+            case "SHARED_COORDINATES":
+            {
+                using var loc = doc.ActiveProjectLocation;
+                if (loc == null) { rep.Abort = "找不到 ActiveProjectLocation，無法換算共用座標"; return rep; }
+                // 實測（Revit 2025.5）：GetTotalTransform() 把共用座標轉為內部座標，不需要 Inverse；下方自我檢查會再次驗證。
+                var sharedToInternal = loc.GetTotalTransform();
+                place = p => sharedToInternal.OfPoint(p);
+                break;
+            }
             default:
-                rep.Abort = $"基準 {basis} 尚未實作（目前支援 INTERNAL_ORIGIN、PROJECT_BASE_POINT）";
+                rep.Abort = $"基準 {basis} 尚未實作（目前支援 INTERNAL_ORIGIN、PROJECT_BASE_POINT、SHARED_COORDINATES）";
                 return rep;
         }
 
         XYZ ToXyz(double[] a) =>
-            new XYZ(Units.MmToFeet(a[0]), Units.MmToFeet(a[1]), Units.MmToFeet(a[2])) + offset;
+            place(new XYZ(Units.MmToFeet(a[0]), Units.MmToFeet(a[1]), Units.MmToFeet(a[2])));
 
         var levels = new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>().ToList();
         if (levels.Count == 0) { rep.Abort = "文件中沒有任何 Level"; return rep; }
@@ -145,6 +159,28 @@ public static class RevitImporter
         foreach (var s in m.Segments) coords.Add((s, ToXyz(s.Start), ToXyz(s.End)));   // 轉換失敗在此就會拋出，尚未進 Transaction
         var jointPts = m.Joints.ToDictionary(j => j.Id, j => ToXyz(j.Point));
         double widthFt = Units.MmToFeet(m.Tray.WidthMm), heightFt = Units.MmToFeet(m.Tray.HeightMm);
+
+        // 共用座標換算自我檢查（進 Transaction 前）：以 Revit 自己的 GetProjectPosition 把換算後的內部點讀回共用座標，
+        // 必須與模型點一致；方向（shared→internal）或旋轉符號有誤時在此中止，不動文件。
+        if (basis == "SHARED_COORDINATES")
+        {
+            using var loc = doc.ActiveProjectLocation;
+            var pairs = new List<(string Id, double[] Model, XYZ Internal)>();
+            foreach (var (s, p1, p2) in coords) { pairs.Add((s.Id + ".start", s.Start, p1)); pairs.Add((s.Id + ".end", s.End, p2)); }
+            foreach (var j in m.Joints) pairs.Add((j.Id, j.Point, jointPts[j.Id]));
+            foreach (var (id, model, internalPt) in pairs)
+            {
+                using var pp = loc.GetProjectPosition(internalPt);
+                var back = new[] { Units.FeetToMm(pp.EastWest), Units.FeetToMm(pp.NorthSouth), Units.FeetToMm(pp.Elevation) };
+                var d = Math.Sqrt(Math.Pow(back[0] - model[0], 2) + Math.Pow(back[1] - model[1], 2) + Math.Pow(back[2] - model[2], 2));
+                if (d > SharedCheckTolMm)
+                {
+                    rep.Abort = $"共用座標換算自我檢查失敗：{id} 模型 ({model[0]:F3}, {model[1]:F3}, {model[2]:F3}) mm，" +
+                                $"換算後由 Revit 讀回 ({back[0]:F3}, {back[1]:F3}, {back[2]:F3}) mm，差 {d:F3} mm";
+                    return rep;
+                }
+            }
+        }
 
         // ── 階段 2：Transaction。CableTray 建立/參數設定任何失敗 → 整批 Rollback ──
         rep.Phase = "transaction";
@@ -268,6 +304,8 @@ public static class RevitImporter
                 Id = ct.Id.ToString(),
                 StartMm = Mm(line.GetEndPoint(0)),
                 EndMm = Mm(line.GetEndPoint(1)),
+                SharedStartMm = SharedMm(doc, line.GetEndPoint(0)),
+                SharedEndMm = SharedMm(doc, line.GetEndPoint(1)),
                 WidthMm = Units.FeetToMm(ct.get_Parameter(BuiltInParameter.RBS_CABLETRAY_WIDTH_PARAM).AsDouble()),
                 HeightMm = Units.FeetToMm(ct.get_Parameter(BuiltInParameter.RBS_CABLETRAY_HEIGHT_PARAM).AsDouble()),
                 Comments = ct.get_Parameter(BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS)?.AsString() ?? "",
@@ -277,6 +315,14 @@ public static class RevitImporter
             .OfCategory(BuiltInCategory.OST_CableTrayFitting).WhereElementIsNotElementType().GetElementCount();
         ins.Coordinates = ReadCoordinates(doc);
         return ins;
+    }
+
+    static double[] SharedMm(Document doc, XYZ internalPt)
+    {
+        using var loc = doc.ActiveProjectLocation;
+        if (loc == null) return new double[3];
+        using var pp = loc.GetProjectPosition(internalPt);
+        return new[] { Units.FeetToMm(pp.EastWest), Units.FeetToMm(pp.NorthSouth), Units.FeetToMm(pp.Elevation) };
     }
 
     static double[] Mm(XYZ p) => new[] { Units.FeetToMm(p.X), Units.FeetToMm(p.Y), Units.FeetToMm(p.Z) };
@@ -292,10 +338,10 @@ public static class RevitImporter
             ProjectBasePoint = PointInfo(BasePoint.GetProjectBasePoint(doc)),
             SurveyPoint = PointInfo(BasePoint.GetSurveyPoint(doc)),
         };
-        var loc = doc.ActiveProjectLocation;
+        using var loc = doc.ActiveProjectLocation;
         if (loc != null)
         {
-            var pp = loc.GetProjectPosition(XYZ.Zero);
+            using var pp = loc.GetProjectPosition(XYZ.Zero);
             c.ActiveProjectPosition = new ProjectPositionInfo
             {
                 Location = loc.Name,
