@@ -4,6 +4,29 @@
 
 本輪只驗證與修正既有路徑，不新增產品功能。所有下表 runtime 狀態與 build 分開；Python baseline 122 tests 與第一次 benchmark 留在 HANDOFF。
 
+## Revit 2025.5 共用座標（stage 4 slice 2，2026-10-10）
+
+`basis = SHARED_COORDINATES` 不再被拒絕：匯入器以 `doc.ActiveProjectLocation.GetTotalTransform()` 把模型點（mm，視為共用座標 EastWest／NorthSouth／Elevation）換成 Revit 內部座標，Z 軸旋轉隨真北角度。進 Transaction 前有自我檢查：把每個端點與接頭換算後的內部點交給 `GetProjectPosition` 讀回共用座標，與模型點差超過 0.5 mm 即中止、不動文件。
+
+- **方向由實機決定，不是推導**：第一次實測以 `.Inverse` 換算，自我檢查讀回 (25000, −13000, 6000) mm（模型點 (1000, 1000, 3000)），代表方向相反而被中止；去掉 `.Inverse` 後通過。`GetTotalTransform()` 本身即共用 → 內部。
+- AutoRun 新增 setup 鍵 `set_project_position`（`ProjectLocation.SetProjectPosition(原點, …)`），匯入前設定並讀回。新場景：`j1_shared_translate`（EW 12000、NS −7000、Elev 1500 mm，Angle=0）與 `j2_shared_rotated`（同位移、Angle=30°）；原 `j_shared`（驗證拒絕）已移除。
+- Inspection 新增每段橋架端點的 `SharedStartMm`／`SharedEndMm`（`GetProjectPosition` 讀回）。
+
+| 檢查 | j1（Angle=0） | j2（Angle=30°） |
+|---|---|---|
+| 設定後 ActiveProjectPosition 讀回 | EW 12000、NS −7000、Elev 1500、Angle 0 | 同位移、Angle 30° |
+| PBP Position／SharedPosition（Revit 讀回） | (0,0,0)／(12000, −7000, 1500) | 同左 |
+| 模型 S001 | (1000,1000,3000)→(10000,1000,3000) | 同左 |
+| 橋架內部座標（讀回） | (−11000, 8000, 1500)→(−2000, 8000, 1500) | (−5526.279, 12428.203, 1500)→(2267.949, 7928.203, 1500) |
+| 端點共用座標（GetProjectPosition 讀回） | 等於模型點 | 等於模型點 |
+| 模型方向 → 內部方向的 XY 旋轉 | 0° | −30.0°（內部座標 = R(−30°)·(模型點 − PBP 共用座標)，與獨立計算相符） |
+
+- 獨立錨點：端點到 PBP 的距離與高差，等於模型點到 PBP 共用座標的距離與高差（PBP 內部／共用座標由 Revit 讀回，不經匯入器換算）。
+- 結果：`pytest -m revit` 15 passed（117.91 s，含 2 個新場景測試）；Revit 結束後無殘留 `Revit.exe`。證據：`output/revit2025_shared/models/`（未納入 Git）。
+- 事故紀錄：第一次實測 Revit 在 `Document.Close` 發生存取違規（`0xc0000005`，coreclr.dll），原因懷疑為未釋放的 `ProjectPosition`／`ProjectLocation` 物件；加上 `using` 後未再發生。**根因未做獨立驗證**，只能說加上釋放後的 2 次實機執行（含本次）未再崩潰。
+- 測試收尾原本在 `autorun.done` 後立即檢查 Revit 是否結束，Revit 退出需數秒而偶發誤判；改為輪詢最多 30 秒（`wait_revit_exit`）。
+- **未驗證**：旋轉後的彎頭／三通／四通接頭（j1、j2 都只有單一直線段，無接頭）、Project Base Point 本身有旋轉或 Survey Point 被移動、從連結檔取得共用座標、PBP 不在內部原點時的共用座標、Revit 2027。模型自帶的原點與旋轉仍被拒絕（第 3 刀）。
+
 ## develop 合併前完整 gate（2026-10-09，commit fbb5dde）
 
 對象：`origin/develop` 於 PR #8 合併後（`fbb5dde`），在獨立 worktree 執行，準備併入 `master`（PR #5）。環境：Windows 11、Python 3.12、.NET SDK 10、本機 AutoCAD（accoreconsole）、Revit 2025。
@@ -124,9 +147,11 @@ Static PASS 只表示已讀 interface/caller/source 並確認該範圍的防護�
 | 功能（明確範圍） | Static | Build | SelfTest | Revit GUI |
 |---|---|---|---|---|
 | Coordinate transform：PROJECT_BASE_POINT 非零位置平移（PBP 移動 (5000, −3000, 0) mm，僅 XY、Angle=0） | PASS | PASS | BLOCKED | PASS — Revit 2025.5 AutoRun（2026-10-09，`i2_pbp_moved` 讀回端點 = 模型點 + PBP 位置，誤差 < 1e-9 mm；`pytest -m revit` 14 passed；未簽署建置須人工按「Load Once」） |
-| Coordinate transform：SHARED_COORDINATES／UNSPECIFIED 基準拒絕 | PASS | PASS | BLOCKED | PASS（拒絕）— AutoRun 2026-10-09 `j_shared`、`c_unspecified` 未建元件 |
+| Coordinate transform：UNSPECIFIED 基準拒絕 | PASS | PASS | BLOCKED | PASS（拒絕）— AutoRun 2026-10-09 `c_unspecified` 未建元件 |
+| Coordinate transform：SHARED_COORDINATES 平移（EW／NS／Elev）與 30° 真北旋轉，單一直線段 | PASS | PASS | — | PASS — Revit 2025.5 AutoRun（2026-10-10，`j1_shared_translate`、`j2_shared_rotated`；`GetProjectPosition` 讀回端點共用座標 = 模型點；`pytest -m revit` 15 passed） |
+| Coordinate transform：共用座標旋轉後的彎頭／三通／四通接頭 | PASS | PASS | — | UNVERIFIED |
 | Coordinate transform：PBP 旋轉（Angle≠0）、PBP Z 位移與 Level 互動 | NOT SUPPORTED（只平移、不套用旋轉） | — | — | UNVERIFIED |
-| Coordinate transform：Survey Point 移動／SHARED_COORDINATES 基準匯入 | NOT SUPPORTED（依設計拒絕） | — | — | UNVERIFIED |
+| Coordinate transform：Survey Point 移動、從連結檔取得的共用座標 | NOT SUPPORTED | — | — | UNVERIFIED |
 | Coordinate transform：模型 origin 非零、非標準 axis、rotation_deg 非零拒絕 | PASS（拒絕） | PASS | BLOCKED | UNVERIFIED |
 | Revit 2027（任何功能） | — | — | — | UNVERIFIED（本機未安裝） |
 | Duplicate fitting detection：重複 joint ID／重複線段引用；不宣稱幾何全面去重 | PASS | PASS | BLOCKED | UNVERIFIED |
@@ -141,11 +166,11 @@ Python export/roundtrip 已執行通過；C# Cross-language assertions 已 build
 - Revit internal：mm→ft，直接使用模型座標。
 - Project Base Point：mm→ft 後加上 `BasePoint.Position`；只做位置平移，保持 internal axes，不套用旋轉。非零 XY 平移已於 Revit 2025.5 AutoRun 驗證 PASS（2026-10-09，見上方座標 oracle 節）；PBP 旋轉與 Z 位移 UNVERIFIED。
 - Survey Point：NOT SUPPORTED，程式未取得 Survey Point。
-- Shared Coordinates：NOT SUPPORTED；輸入此 basis 時 Import 回報尚未實作，未進 transaction。
+- Shared Coordinates：已實作並於 Revit 2025.5 驗證（2026-10-10，見上方共用座標節）：`ActiveProjectLocation.GetTotalTransform()` 換算，進 Transaction 前以 `GetProjectPosition` 讀回自我檢查。旋轉後的接頭、Survey Point 移動、連結檔共用座標 UNVERIFIED。
 - Link transform：NOT SUPPORTED，沒有 RevitLinkInstance / GetTransform caller。
 - 模型 origin 非零、非標準 axis 或 rotation_deg 非零：拒絕，不能忽略變換。
 
-前兩者已實作；Revit 2025.5 AutoRun 已驗證 PBP 非零 XY 平移（Angle=0、Z 不動），其餘座標變換與 Revit 2027 仍 UNVERIFIED。README、未指定 basis 的選擇對話框與匯入結果 UI 均明確揭露此限制。
+前兩者與 Shared Coordinates 已實作；Revit 2025.5 AutoRun 已驗證 PBP 非零 XY 平移（Angle=0、Z 不動）與 Shared Coordinates 平移＋30° 旋轉（單一直線段），其餘座標變換與 Revit 2027 仍 UNVERIFIED。README、未指定 basis 的選擇對話框與匯入結果 UI 均明確揭露此限制。
 
 ## Nested null regression matrix
 

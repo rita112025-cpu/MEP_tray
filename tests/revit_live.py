@@ -60,7 +60,8 @@ def scenarios() -> dict[str, dict]:
     s["g_cross"] = _manual_model([((0, 5, 3), a), (a, (10, 5, 3)), ((5, 0, 3), a), (a, (5, 10, 3))], "g_cross")
     s["h_union"] = _manual_model([((1, 1, 3), (4, 1, 3)), ((4, 1, 3), (8, 1, 3))], "h_union")
     s["i_pbp"] = _routed_model([(10, 1, 3)], "i_pbp", basis="PROJECT_BASE_POINT")
-    s["j_shared"] = _routed_model([(10, 1, 3)], "j_shared", basis="SHARED_COORDINATES")
+    s["j1_shared_translate"] = _routed_model([(10, 1, 3)], "j1_shared_translate", basis="SHARED_COORDINATES")
+    s["j2_shared_rotated"] = _routed_model([(10, 1, 3)], "j2_shared_rotated", basis="SHARED_COORDINATES")
     s["k_unsupported"] = _manual_model([((0, 5, 3), a), (a, (5, 10, 3)), (a, (5, 5, 0))], "k_unsupported")
     s["i2_pbp_moved"] = _routed_model([(10, 1, 3)], "i2_pbp_moved", basis="PROJECT_BASE_POINT")
     return s
@@ -68,12 +69,18 @@ def scenarios() -> dict[str, dict]:
 
 # 非零 PBP 位移（mm）；不動 Z，避免牽涉 Level 高程
 I2_PBP_DELTA_MM = (5000.0, -3000.0, 0.0)
-SETUP_KEYS = ("move_pbp_mm",)
+# 共用座標設定（ProjectLocation.SetProjectPosition(原點, …)）：東西、南北、高程平移與真北旋轉
+J_SHARED_POS = {"ew_mm": 12000.0, "ns_mm": -7000.0, "elev_mm": 1500.0}
+J2_ANGLE_DEG = 30.0
+SETUP_KEYS = ("move_pbp_mm", "set_project_position")
+PROJECT_POSITION_KEYS = ("ew_mm", "ns_mm", "elev_mm", "angle_deg")
 
 
 def setups() -> dict[str, dict]:
     """各場景匯入前要套用的文件座標設定（檔名 <場景>.setup.json）。"""
-    return {"i2_pbp_moved": {"move_pbp_mm": list(I2_PBP_DELTA_MM)}}
+    return {"i2_pbp_moved": {"move_pbp_mm": list(I2_PBP_DELTA_MM)},
+            "j1_shared_translate": {"set_project_position": {**J_SHARED_POS, "angle_deg": 0.0}},
+            "j2_shared_rotated": {"set_project_position": {**J_SHARED_POS, "angle_deg": J2_ANGLE_DEG}}}
 
 
 def validate_setup(d) -> list[str]:
@@ -86,7 +93,41 @@ def validate_setup(d) -> list[str]:
         if not (isinstance(v, list) and len(v) == 3
                 and all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in v)):
             errs.append("move_pbp_mm 必須是 3 個有限數值 [dx,dy,dz]（mm）")
+    if "set_project_position" in d:
+        v = d["set_project_position"]
+        if not (isinstance(v, dict) and set(v) == set(PROJECT_POSITION_KEYS)
+                and all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in v.values())):
+            errs.append("set_project_position 必須恰有 ew_mm、ns_mm、elev_mm、angle_deg 四個有限數值")
     return errs
+
+
+def shared_mismatches(model: dict, report: dict, tol_mm: float = 0.5) -> list[str]:
+    """比對 Revit 以 GetProjectPosition 讀回的橋架端點共用座標與模型點（共用座標基準）。
+    接頭處端點會被 fitting 修剪，故略過；找不到橋架算不符。"""
+    trays = {t["Id"]: t for t in (report.get("Inspection") or {}).get("Trays", [])}
+    created = dict(x.split("=", 1) for x in report.get("CreatedTrays", []))
+    joint_pts = [j["point"] for j in model.get("joints", [])]
+    bad = []
+    for s in model["segments"]:
+        t = trays.get(created.get(s["id"], ""))
+        if t is None:
+            bad.append(f"{s['id']}: 找不到讀回的橋架")
+            continue
+        for key, got_key in (("start", "SharedStartMm"), ("end", "SharedEndMm")):
+            p = s[key]
+            if any(math.dist(p, q) < 1.0 for q in joint_pts):
+                continue
+            d = math.dist(p, t[got_key])
+            if d > tol_mm:
+                bad.append(f"{s['id']}.{key}: 模型 {p} 共用座標讀回 {t[got_key]} 差 {d:.3f} mm")
+    return bad
+
+
+def xy_rotation_deg(model_seg: dict, tray: dict) -> float:
+    """模型線段方向到 Revit 內部座標方向的 XY 平面旋轉角（度，逆時針為正，範圍 (-180, 180]）。"""
+    mx, my = (model_seg["end"][i] - model_seg["start"][i] for i in (0, 1))
+    tx, ty = (tray["EndMm"][i] - tray["StartMm"][i] for i in (0, 1))
+    return math.degrees(math.atan2(mx * ty - my * tx, mx * tx + my * ty))
 
 
 def endpoint_mismatches(model: dict, report: dict, offset_mm, tol_mm: float = 0.5) -> list[str]:
@@ -124,6 +165,16 @@ def write_scenarios(d: Path) -> None:
         if errs:
             raise ValueError(f"{name}.setup.json: " + "; ".join(errs))
         (d / f"{name}.setup.json").write_text(json.dumps(st), encoding="utf-8")
+
+
+def wait_revit_exit(timeout_s: float = 30.0) -> bool:
+    """autorun.done 之後 Revit 呼叫 Environment.Exit，但程序消失需要數秒；輪詢直到結束或逾時。"""
+    end = time.time() + timeout_s
+    while revit_running():
+        if time.time() > end:
+            return False
+        time.sleep(1)
+    return True
 
 
 def revit_running() -> bool:
