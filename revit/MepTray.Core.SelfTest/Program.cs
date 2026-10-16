@@ -119,5 +119,8 @@ var expected = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadA
 foreach (var (seg, body) in expected) Check(Comments.Body(model, seg) == body, $"Comments.Body 與 Python 一致: {seg}");
 Check(expected.Count > 0, "契約樣本非空");
 
+// 吊架族群盤點（HangerInventory.cs）；環境變數 MEPTRAY_INVENTORY_SAMPLE_DIR 指定時寫出範例 JSON/CSV 供 Python 驗證
+HangerInventoryTests.Run(Check, Environment.GetEnvironmentVariable("MEPTRAY_INVENTORY_SAMPLE_DIR"));
+
 Console.WriteLine(failures.Count == 0 ? "ALL PASS" : $"{failures.Count} FAILED");
 return failures.Count == 0 ? 0 : 1;

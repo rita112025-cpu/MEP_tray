@@ -10,4 +10,14 @@
     <VendorId>MEPT</VendorId>
     <VendorDescription>MEP_tray</VendorDescription>
   </AddIn>
+  <AddIn Type="Command">
+    <Name>吊架族群盤點</Name>
+    <Assembly>MepTrayImport.dll</Assembly>
+    <AddInId>d7c0eb26-64e8-4dca-83fc-d89401323bcf</AddInId>
+    <FullClassName>MepTray.Revit.HangerInventoryCommand</FullClassName>
+    <Text>吊架族群盤點</Text>
+    <Description>盤點目前專案已載入的族與實例、指定資料夾或單一 .rfa 的參數/公式/各類型值/放置方式；輸出 JSON 與 CSV。未使用修改交易，不載入族，族檔關閉時不儲存</Description>
+    <VendorId>MEPT</VendorId>
+    <VendorDescription>MEP_tray</VendorDescription>
+  </AddIn>
 </RevitAddIns>
