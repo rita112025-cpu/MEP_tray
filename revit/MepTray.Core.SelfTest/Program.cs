@@ -2,11 +2,11 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using MepTray.Core;
 
-// 用法: SelfTest <model.json> <expected_comments.json>
+// 用法: SelfTest <model.json> <expected_comments.json> [obstacles_fixture_out.json]
 var failures = new List<string>();
 void Check(bool ok, string what) { if (!ok) failures.Add(what); Console.WriteLine($"{(ok ? "PASS" : "FAIL")}  {what}"); }
 
-if (args.Length != 2) { Console.Error.WriteLine("usage: SelfTest <model.json> <expected_comments.json>"); return 2; }
+if (args.Length is < 2 or > 3) { Console.Error.WriteLine("usage: SelfTest <model.json> <expected_comments.json> [obstacles_fixture_out.json]"); return 2; }
 
 // 單位
 Check(Units.MmToFeet(304.8) == 1.0, "304.8 mm = 1 ft");
@@ -118,6 +118,9 @@ Check(ModelLoader.Validate(straight).Count == 0, "empty optional collections acc
 var expected = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(args[1]))!;
 foreach (var (seg, body) in expected) Check(Comments.Body(model, seg) == body, $"Comments.Body 與 Python 一致: {seg}");
 Check(expected.Count > 0, "契約樣本非空");
+
+// 障礙物匯出幾何核心（Obstacles.cs）
+ObstacleTests.Run(Check, args.Length == 3 ? args[2] : null);
 
 Console.WriteLine(failures.Count == 0 ? "ALL PASS" : $"{failures.Count} FAILED");
 return failures.Count == 0 ? 0 : 1;
