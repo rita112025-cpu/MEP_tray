@@ -333,7 +333,8 @@ public class HangerInventoryCommand : IExternalCommand
 
     // ───────── B. .rfa 族檔 ─────────
 
-    static FamilyEntry ScanRfa(RevitApp app, string folder, string path, int? appYear, List<string> openedByTool)
+    /// <summary>亦供「讀取目標吊架族」重用（同樣唯讀、Close(false)）。</summary>
+    internal static FamilyEntry ScanRfa(RevitApp app, string folder, string path, int? appYear, List<string> openedByTool)
     {
         var e = new FamilyEntry { Source = "rfa", FilePath = path, FamilyName = Path.GetFileNameWithoutExtension(path) };
         e.HangerLike = HangerInventory.IsHangerLike(e.FamilyName, Path.GetRelativePath(folder, path));

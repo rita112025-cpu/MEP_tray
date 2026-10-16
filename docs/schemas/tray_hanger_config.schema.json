@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rita112025-cpu/MEP_tray/docs/schemas/tray_hanger_config.schema.json",
+  "title": "MEP_tray 橋架吊架放置設定 v1（Revit 實際放置用）",
+  "description": "Revit「匯入橋架＋吊架」與「選取橋架補吊架」共用的執行設定。全部長度 mm。所有數值皆無預設，缺漏時工具拒絕執行並指出欄位；工具不把任何數值當成規範值。族參數名稱、插入點偏移、修正角、放置方式必須取自目標族的實測/盤點結果，不得依族或類型名稱（例如 圓形/矩形）推測用途。hanger_config.schema.json 仍為多系統（含導管/配管、斜/垂直）的保留 schema。",
+  "type": "object",
+  "required": ["units", "supported_object", "family", "placement_mode", "max_spacing_mm", "start_offset_mm", "end_offset_mm",
+               "short_run_policy", "near_fitting", "widen_left_mm", "widen_right_mm", "insertion_to_bearing_mm",
+               "orientation_correction_deg", "parameter_map", "rod_length", "dedupe"],
+  "properties": {
+    "units": { "const": "mm" },
+    "supported_object": { "enum": ["cable_tray"], "description": "v1 只支援 Cable Tray；核心演算與物件種類無關，導管之後擴充。" },
+    "family": {
+      "type": "object", "required": ["family_name", "type_name"],
+      "properties": { "family_name": { "type": "string", "minLength": 1 }, "type_name": { "type": "string", "minLength": 1 } }
+    },
+    "placement_mode": { "enum": ["level", "workplane"], "description": "需與族的 FamilyPlacementType 一致（OneLevelBased→level、WorkPlaneBased→workplane）；需主體/面的族 v1 不支援。" },
+    "max_spacing_mm": { "type": "number", "exclusiveMinimum": 0, "description": "最大支撐間距；依專案規範填寫。" },
+    "start_offset_mm": { "type": "number", "minimum": 0, "description": "自橋架起點（建立接頭後的實際端點）內縮。" },
+    "end_offset_mm": { "type": "number", "minimum": 0 },
+    "short_run_policy": { "enum": ["midpoint", "skip"], "description": "段長小於起+終內縮時：置中 1 支並警告，或不放並列為失敗。" },
+    "near_fitting": {
+      "type": "object", "required": ["enabled"],
+      "properties": { "enabled": { "type": "boolean" }, "max_distance_mm": { "type": "number", "exclusiveMinimum": 0 } }
+    },
+    "widen_left_mm": { "type": "number", "minimum": 0, "description": "橫擔相對橋架寬度在行進方向左側的加長量。" },
+    "widen_right_mm": { "type": "number", "minimum": 0 },
+    "insertion_to_bearing_mm": { "type": "number", "description": "族插入點到承托面（橋架底）的垂直距離；插入點在承托面下方為正。需由族實測。" },
+    "orientation_correction_deg": { "type": "number", "description": "族在旋轉 0° 時橫擔方向與橋架行進方向的修正角（逆時針為正）。需由族實測。" },
+    "parameter_map": {
+      "type": "object", "required": ["cross_member_length"],
+      "properties": { "cross_member_length": { "$ref": "#/$defs/param_ref" } }
+    },
+    "rod_length": {
+      "type": "object", "required": ["mode"],
+      "properties": {
+        "mode": { "enum": ["none", "fixed"] },
+        "value_mm": { "type": "number", "exclusiveMinimum": 0 },
+        "param": { "$ref": "#/$defs/param_ref" }
+      },
+      "description": "fixed 需族有對應長度參數；沒有時預檢列為 unsupported。固定吊桿長度不能繞過族的主體需求。"
+    },
+    "dedupe": {
+      "type": "object", "required": ["tolerance_mm", "angle_tolerance_deg"],
+      "properties": {
+        "tolerance_mm": { "type": "number", "exclusiveMinimum": 0 },
+        "angle_tolerance_deg": { "type": "number", "minimum": 0, "exclusiveMaximum": 90 }
+      }
+    }
+  },
+  "$defs": {
+    "param_ref": {
+      "type": "object", "required": ["name", "scope"],
+      "properties": { "name": { "type": "string", "minLength": 1 }, "scope": { "enum": ["type", "instance"] } }
+    }
+  }
+}

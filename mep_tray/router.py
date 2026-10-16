@@ -47,6 +47,8 @@ class Route:
     hangers: list[Vec] = field(default_factory=list)
     cell_m: float = 0.0
     junctions: list = field(default_factory=list)   # [(點, 分支索引)]
+    hanger_params: dict | None = None               # place_hangers 使用的佈置參數（mm）
+    hanger_layout: dict | None = None               # supports.layout 結果（含 issues）
 
 
 def rule_key(kind: str, tray_type: str, rules: dict[str, Governing]) -> str:
@@ -325,20 +327,24 @@ def _uniq(pts: list[Vec]) -> list[Vec]:
 
 
 def place_hangers(route: Route, span_max_m: float, near_bend_m: float = 0.3) -> list[Vec]:
-    """每段：兩端內縮 near_bend_m 設吊架，中間等分且間距 ≤ span_max_m。"""
-    hs: list[Vec] = []
-    for a, b in route.segments:
-        L = dist(a, b)
-        if L <= 1e-9:
-            continue
-        off = min(near_bend_m, L / 2)
-        usable = L - 2 * off
-        k = max(1, math.ceil(usable / span_max_m)) if usable > 1e-9 else 0
-        ts = [off / L]
-        ts += [(off + usable * i / k) / L for i in range(1, k + 1)] if k else []
-        for t in ts:
-            hs.append(tuple(round(a[i] + (b[i] - a[i]) * t, 6) for i in range(3)))
-    route.hangers = _uniq(hs)
+    """吊架點：改由 mep_tray.supports 核心計算（與 Revit 端、web 預覽、hanger_supports 同一套規則）。
+    在分支接入點切段後，每條連續水平段兩端內縮 near_bend_m、中間等分且每一間距 ≤ span_max_m；
+    段長不足兩端內縮時置中 1 支。斜段／垂直段不放置，列入 route.hanger_layout["issues"]。"""
+    from . import supports as S
+    from .export_revit import build_joints, split_segments
+    segs = split_segments(route)
+    joints = build_joints(segs) if segs else []
+    params = {"units": "mm", "max_spacing_mm": span_max_m * 1000, "start_offset_mm": near_bend_m * 1000,
+              "end_offset_mm": near_bend_m * 1000, "short_run_policy": "midpoint", "near_fitting": {"enabled": False}}
+    model_like = {"tray": {"width_mm": 1.0, "height_mm": 1.0},   # 只取點位；寬高由 export_revit 依輸入重算
+                  "segments": [{"id": f"S{i + 1:03d}", "start": [v * 1000 for v in a], "end": [v * 1000 for v in b]}
+                               for i, (a, b) in enumerate(segs)],
+                  "joints": joints}
+    pieces, links = S.pieces_from_model(model_like)
+    lay = S.layout(pieces, links, params)
+    route.hanger_params = params
+    route.hanger_layout = lay
+    route.hangers = [tuple(round(v / 1000, 6) for v in sp["point_mm"]) for sp in lay["supports"]]
     return route.hangers
 
 

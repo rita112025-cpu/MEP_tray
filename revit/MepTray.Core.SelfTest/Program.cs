@@ -122,5 +122,13 @@ Check(expected.Count > 0, "契約樣本非空");
 // 吊架族群盤點（HangerInventory.cs）；環境變數 MEPTRAY_INVENTORY_SAMPLE_DIR 指定時寫出範例 JSON/CSV 供 Python 驗證
 HangerInventoryTests.Run(Check, Environment.GetEnvironmentVariable("MEPTRAY_INVENTORY_SAMPLE_DIR"));
 
+// 吊架支撐點核心（Supports.cs）；MEPTRAY_SUPPORT_CONTRACT 指向 Python 產生的契約案例時一併比對
+SupportTests.Run(Check, Environment.GetEnvironmentVariable("MEPTRAY_SUPPORT_CONTRACT"));
+var oldJson = JsonNode.Parse(File.ReadAllText(args[0]))!.AsObject();
+oldJson.Remove("hanger_supports"); oldJson.Remove("hanger_layout"); oldJson.Remove("hangers");
+var oldModel = ModelLoader.Parse(oldJson.ToJsonString());
+Check(ModelLoader.Validate(oldModel).Count == 0 && oldModel.HangerSupports is null, "舊 JSON（無吊架欄位）仍可通過驗證並匯入橋架");
+Check(model.HangerSupports is { Count: > 0 }, "新 JSON 的 hanger_supports 可讀");
+
 Console.WriteLine(failures.Count == 0 ? "ALL PASS" : $"{failures.Count} FAILED");
 return failures.Count == 0 ? 0 : 1;

@@ -37,13 +37,14 @@ report.render_report（自含 HTML，無 JS）──► pipeline._publish（暫�
 | `clash.py` / `compliance.py` | 幾何與規範檢查，輸出 `Finding` |
 | `findings.py` | `Finding`、`Report`、`SCHEMA_VERSION` |
 | `export_dxf.py` / `acad.py` | DXF 輸出（固定中繼資料）；AutoCAD 稽核與 DWG |
-| `export_revit.py` | Revit 匯入 JSON 與 C# 常數產生 |
+| `export_revit.py` | Revit 匯入 JSON 與 C# 常數產生；`hanger_supports`／`hanger_layout`（橋架參考座標，未建接頭前） |
+| `supports.py` | 吊架支撐點純邏輯核心（間距、內縮、短段、共線合併、接頭本體排除、近接頭加強、去重／重跑、族座標換算、設定驗證）；`router.place_hangers`、web 預覽、JSON 與 C# `MepTray.Core.Supports` 共用同一規則（契約測試 `tests/test_supports.py`） |
 | `versioning.py` | manifest、版本掃描、比對、引擎指紋 |
 | `report.py` | HTML 報告與差異報告 |
 | `disclosure.py` | 固定揭露文字（橫幅、範圍說明、Revit 狀態、引擎變動說明） |
 | `sanitize.py` / `paths.py` | 路徑／機敏字串清理；輸出路徑與 run_id 規則 |
 | `webui.py` | 本機 HTTP 服務與前端 |
-| `revit/MepTray.Core`、`MepTrayImport` | C# 模型、單位、Comments 與匯入器 |
+| `revit/MepTray.Core`、`MepTrayImport` | C# 模型、單位、Comments、`Supports`（吊架核心）與匯入器；`HangerPlacer`／`AddHangersCommand`（吊架放置，兩個入口共用） |
 
 ## 3. 決定性
 

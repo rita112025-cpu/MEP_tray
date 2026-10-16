@@ -48,3 +48,27 @@ def test_inventory_default_folder_and_no_hardcoded_rules():
     core = (ROOT / "revit" / "MepTray.Core" / "HangerInventory.cs").read_text(encoding="utf-8")
     for src in (code, core):
         assert not re.search(r"\b(1000|255)\b", src)                  # 不把支撐間距/接頭距離寫死
+
+def test_hanger_commands_registered_with_manual_transaction():
+    import re as _re
+    xml = (SRC / "MepTray.addin").read_text(encoding="utf-8")
+    assert "<FullClassName>MepTray.Revit.AddHangersCommand</FullClassName>" in xml
+    run_cs = (SRC / "HangerRun.cs").read_text(encoding="utf-8")
+    assert _re.search(r"\[Transaction\(TransactionMode\.Manual\)\]\s*public class AddHangersCommand", run_cs)
+    imp = (SRC / "ImportCommand.cs").read_text(encoding="utf-8")
+    assert "TransactionGroup" in imp and "Assimilate" in imp and "RollBack" in imp
+    placer = (SRC / "HangerPlacer.cs").read_text(encoding="utf-8")
+    assert "SubTransaction" in placer and "Unblock" not in placer
+    ps = (SRC.parent.parent / "scripts" / "install_revit_addin.ps1").read_text(encoding="utf-8")
+    assert "foreach ($a in $addin.RevitAddIns.AddIn)" in ps          # 逐一檢查 manifest 內每個命令類別
+    for cls in ("TargetFamilyCommand", "CalibrateHangerCommand"):
+        assert f"<FullClassName>MepTray.Revit.{cls}</FullClassName>" in xml
+    tgt = (SRC / "TargetFamilyCommand.cs").read_text(encoding="utf-8")
+    assert _re.search(r"\[Transaction\(TransactionMode\.ReadOnly\)\]\s*public class TargetFamilyCommand", tgt)
+    assert "new Transaction" not in tgt and ".Save(" not in tgt and ".SaveAs(" not in tgt
+    cal = (SRC / "CalibrateHangerCommand.cs").read_text(encoding="utf-8")
+    assert _re.search(r"\[Transaction\(TransactionMode\.Manual\)\]\s*public class CalibrateHangerCommand", cal)
+    assert "group.RollBack()" in cal and "trial?.RollBack()" in cal
+    assert "SaveAs" not in cal and "EditFamily" not in cal          # 不開啟/儲存原族檔
+    inv = (SRC / "HangerInventoryCommand.cs").read_text(encoding="utf-8")
+    assert "[Transaction(TransactionMode.ReadOnly)]" in inv
