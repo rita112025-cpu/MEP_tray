@@ -16,7 +16,7 @@ public static class HangerCalibration
 {
     public const string DefaultTargetRfa = @"F:\學習revit&MEP_PLAN\Revit課程資料\鑫亞電通\Autodesk 機電元件\04_台灣專用元件族\13_固定工具\APP風管及電纜線架\吊架(角鐵).rfa";
     public const string DefaultTargetType = "矩形";
-    public const string CalTypeSuffix = " [MEPTRAY CAL]";
+    public const string CalTypeSuffix = " (MEPTRAY CAL)";
 
     static string Hex(byte[] b) => Convert.ToHexString(b).ToLowerInvariant();
 

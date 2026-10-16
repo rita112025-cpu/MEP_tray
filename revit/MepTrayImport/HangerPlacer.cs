@@ -371,13 +371,13 @@ public static class HangerPlacer
         if (!p.Set(Units.MmToFeet(mm))) throw new InvalidOperationException($"{what}參數「{name}」設定失敗");
     }
 
-    /// <summary>類型參數需依橋架寬度變化時：建立或重用工具專用類型（名稱含 [MEPTRAY …]），絕不修改原類型。</summary>
+    /// <summary>類型參數需依橋架寬度變化時：建立或重用工具專用類型（名稱含 (MEPTRAY …)），絕不修改原類型。</summary>
     static FamilySymbol ToolType(Document doc, FamilySymbol orig, HangerConfig cfg, HangerItem it, Dictionary<string, FamilySymbol> cache)
     {
         var parts = new List<string>();
         if (cfg.CrossMemberLength!.Scope == "type") parts.Add("L" + it.CrossMemberLengthMm.ToString("0.###", CultureInfo.InvariantCulture));
         if (cfg.RodMode == "fixed" && cfg.RodParam!.Scope == "type") parts.Add("R" + it.RodLengthMm!.Value.ToString("0.###", CultureInfo.InvariantCulture));
-        var name = $"{orig.Name} [MEPTRAY {string.Join(" ", parts)}]";
+        var name = $"{orig.Name} (MEPTRAY {string.Join(" ", parts)})";
         if (cache.TryGetValue(name, out var c)) return c;
         var sym = new FilteredElementCollector(doc).OfClass(typeof(FamilySymbol)).Cast<FamilySymbol>()
                       .FirstOrDefault(s => s.FamilyName == orig.FamilyName && s.Name == name)

@@ -24,7 +24,7 @@ namespace MepTray.Revit;
 /// <summary>
 /// 「校正目標吊架」：在一段水平 Cable Tray 中點放 1 支測試吊架供目視檢查；量測候選參數 +Δ 的幾何效果；
 /// 取消＝回滾校正建立的一切（含本命令載入的族）；確認＝回滾測試吊架與量測，只把校正值與族身分寫入設定檔。
-/// 原類型不修改（測試用工具類型 "[MEPTRAY CAL]"，隨測試回滾）；原族檔不開啟、不儲存。
+/// 原類型不修改（測試用工具類型 "(MEPTRAY CAL)"，隨測試回滾）；原族檔不開啟、不儲存。
 /// </summary>
 [Transaction(TransactionMode.Manual)]
 public class CalibrateHangerCommand : IExternalCommand
