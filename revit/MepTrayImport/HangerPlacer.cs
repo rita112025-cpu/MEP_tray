@@ -50,10 +50,10 @@ public sealed class HangerRunReport
 
     public string Summary()
     {
-        var s = $"批次 {BatchId}（{Outcome}）\n計畫吊架 {Items.Count}：新增 {Count("new") + Count("created")}、已存在 {Count("exists")}、待確認 {Count("pending")}、失敗 {Count("failed")}";
+        var s = $"批次 {BatchId}（{Outcome}）\n計畫吊架 {Items.Count}：新增 {Count("new") + Count("created")}、已存在 {Count("exists")}、待確認 {Count("pending") + LayoutIssues.Count(i => i.Level == "pending")}、失敗 {Count("failed")}";
         if (Count("created") > 0) s += $"\n已建立 {Count("created")}";
         if (PreflightErrors.Count > 0) s += "\n預檢失敗（未建立任何吊架）：\n  " + string.Join("\n  ", PreflightErrors);
-        var bad = LayoutIssues.Where(i => i.Level is "failed" or "unsupported" or "warning").ToList();
+        var bad = LayoutIssues.Where(i => i.Level is "failed" or "unsupported" or "warning" or "pending").ToList();
         if (bad.Count > 0)
             s += "\n佈置問題：\n  " + string.Join("\n  ", bad.Take(30).Select(i => $"[{i.Level}] {i.Code} {i.PieceId} @({i.LocationMm[0]:F0},{i.LocationMm[1]:F0},{i.LocationMm[2]:F0}) {i.Detail}"))
                  + (bad.Count > 30 ? $"\n  …其餘 {bad.Count - 30} 筆見報告檔" : "");

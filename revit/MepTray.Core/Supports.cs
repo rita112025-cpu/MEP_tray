@@ -54,6 +54,7 @@ public sealed class HangerConfig
 {
     public double MaxSpacingMm, StartOffsetMm, EndOffsetMm;
     public string ShortRunPolicy = "";
+    public string SpacingMode = "even";
     public bool NearFittingEnabled;
     public double? NearFittingMaxDistanceMm;
     // 以下僅放置用（layout-only 讀取時可能為預設值）
@@ -73,6 +74,7 @@ public sealed class HangerConfig
 public static class HangerConfigReader
 {
     public static readonly string[] ShortPolicies = { "midpoint", "skip" };
+    public static readonly string[] SpacingModes = { "even", "fixed" };
     public static readonly string[] PlacementModes = { "level", "workplane" };
     public static readonly string[] Scopes = { "type", "instance" };
     public static readonly string[] RodModes = { "none", "fixed" };
@@ -103,6 +105,7 @@ public static class HangerConfigReader
         }
         if (Missing(c, "short_run_policy")) e.Add("short_run_policy：缺少（midpoint 或 skip）");
         else if (Array.IndexOf(ShortPolicies, Str(c["short_run_policy"])) < 0) e.Add("short_run_policy：需為 midpoint 或 skip");
+        if (c.ContainsKey("spacing_mode") && Array.IndexOf(SpacingModes, Str(c["spacing_mode"])) < 0) e.Add("spacing_mode：需為 even 或 fixed（未填 = even）");
         if (Missing(c, "near_fitting")) e.Add("near_fitting：缺少（不加強時填 {\"enabled\": false}）");
         else if (c["near_fitting"] is not JsonObject nf || nf["enabled"] is not JsonValue ev || !ev.TryGetValue<bool>(out var en))
             e.Add("near_fitting.enabled：需為 true/false");
@@ -194,6 +197,7 @@ public static class HangerConfigReader
             StartOffsetMm = Num(c["start_offset_mm"])!.Value,
             EndOffsetMm = Num(c["end_offset_mm"])!.Value,
             ShortRunPolicy = Str(c["short_run_policy"])!,
+            SpacingMode = c.ContainsKey("spacing_mode") ? Str(c["spacing_mode"])! : "even",
             NearFittingEnabled = nf["enabled"]!.GetValue<bool>(),
         };
         if (cfg.NearFittingEnabled) cfg.NearFittingMaxDistanceMm = Num(nf["max_distance_mm"]);
@@ -375,6 +379,17 @@ public static class Supports
                 {
                     issues.Add(Issue("failed", "short_run", first.Id, At(L / 2), $"{cid} 長 {L:F1} mm 小於起終點內縮和 {aOff + bOff:F1} mm，未放置"));
                     continue;
+                }
+            }
+            else if (cfg.SpacingMode == "fixed" && usable > Eps)
+            {
+                int n = (int)Math.Floor(usable / s + 1e-9);
+                for (int i = 0; i <= n; i++) Add(aOff + s * i, "spacing");
+                var rem = usable - s * n;
+                if (rem > 1e-6)
+                {
+                    double x0 = aOff + s * n, x1 = L - bOff;
+                    issues.Add(Issue("pending", "fixed_remainder", last.Id, At(x0), $"{cid} 固定間距 {s:F1} mm 排至終點剩餘 {rem:F3} mm（位置 {x0:F1}–{x1:F1} mm），終點未放支撐，待確認（人工決定是否補點）"));
                 }
             }
             else

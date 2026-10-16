@@ -25,6 +25,22 @@ static class SupportTests
         r = Supports.Layout(new[] { P("A", new[] { 0.0, 0, 3000 }, new[] { 6000.0, 0, 3000 }) }, none, Cfg(c => c["max_spacing_mm"] = 1000.0));
         var st = r.Supports.Select(s => s.StationMm).ToList();
         Check(st.Count == 7 && st.Zip(st.Skip(1)).All(z => z.Second - z.First <= 1000 + 1e-6), "支撐點：不可整除時等分，所有間距 ≤ 上限");
+        // 固定間距：6095.483 mm、內縮 0、1500 → 0..6000，剩餘 95.483 列待確認
+        r = Supports.Layout(new[] { P("A", new[] { 0.0, 0, 0 }, new[] { 6095.483, 0, 0 }) }, none,
+            Cfg(c => { c["spacing_mode"] = "fixed"; c["start_offset_mm"] = 0.0; c["end_offset_mm"] = 0.0; }));
+        Check(r.Supports.Select(s => s.StationMm).SequenceEqual(new[] { 0.0, 1500, 3000, 4500, 6000 })
+              && r.Issues.Count == 1 && r.Issues[0].Code == "fixed_remainder" && r.Issues[0].Level == "pending"
+              && r.Issues[0].LocationMm[0] == 6000 && r.Issues[0].Detail.Contains("95.483"), "固定間距：剩餘段不放終點支撐，列待確認");
+        // 固定間距：剛好整除 → 終點正常放置、無問題
+        r = Supports.Layout(new[] { P("A", new[] { 0.0, 0, 0 }, new[] { 6600.0, 0, 0 }) }, none, Cfg(c => c["spacing_mode"] = "fixed"));
+        Check(r.Supports.Select(s => s.StationMm).SequenceEqual(new[] { 300.0, 1800, 3300, 4800, 6300 }) && r.Issues.Count == 0, "固定間距：整除時終點正常放置");
+        // even 明示 = 預設
+        var ev0 = Supports.Layout(new[] { P("A", new[] { 0.0, 0, 0 }, new[] { 6095.483, 0, 0 }) }, none, Cfg());
+        var ev1 = Supports.Layout(new[] { P("A", new[] { 0.0, 0, 0 }, new[] { 6095.483, 0, 0 }) }, none, Cfg(c => c["spacing_mode"] = "even"));
+        Check(ev0.Supports.Select(s => s.StationMm).SequenceEqual(ev1.Supports.Select(s => s.StationMm)) && ev0.Issues.Count == ev1.Issues.Count
+              && ev0.Supports.Count == 5, "spacing_mode=even 與未填一致");
+        Check(HangerConfigReader.ValidateLayout(new JsonObject { ["units"] = "mm", ["max_spacing_mm"] = 1500.0, ["start_offset_mm"] = 0.0, ["end_offset_mm"] = 0.0,
+              ["short_run_policy"] = "skip", ["near_fitting"] = new JsonObject { ["enabled"] = false }, ["spacing_mode"] = "Fixed" }).Count(x => x.StartsWith("spacing_mode：")) == 1, "spacing_mode 驗證");
         // 短段
         r = Supports.Layout(new[] { P("A", new[] { 0.0, 0, 3000 }, new[] { 400.0, 0, 3000 }) }, none, Cfg());
         Check(r.Supports.Count == 1 && r.Supports[0].StationMm == 200 && r.Issues.Any(i => i.Code == "short_run" && i.Level == "warning"), "短段 midpoint：置中 1 支並警告");

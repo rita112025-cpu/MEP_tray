@@ -57,6 +57,46 @@ def test_non_divisible_never_exceeds_max(L, s):
     assert xs[0] == 300 and xs[-1] == pytest.approx(L - 300, abs=1e-3) and gaps_ok(xs, s)
 
 
+def test_fixed_spacing_remainder_pending():
+    c = cfg(max_spacing_mm=1500.0, start_offset_mm=0.0, end_offset_mm=0.0, spacing_mode="fixed")
+    r = S.layout([P("A", (0, 0, 0), (6095.483, 0, 0))], [], c)
+    assert stations(r) == [0, 1500, 3000, 4500, 6000]
+    iss = [i for i in r["issues"] if i["code"] == "fixed_remainder"]
+    assert len(iss) == 1 and iss[0]["level"] == "pending" and iss[0]["piece_id"] == "A"
+    assert iss[0]["location_mm"] == [6000, 0, 0] and "95.483" in iss[0]["detail"] and "6000.0–6095.5" in iss[0]["detail"]
+    assert len(r["issues"]) == 1
+
+
+def test_fixed_spacing_with_offsets_and_exact_multiple():
+    r = S.layout([P("A", (0, 0, 0), (6600, 0, 0))], [], cfg(spacing_mode="fixed"))
+    assert stations(r) == [300, 1800, 3300, 4800, 6300] and r["issues"] == []
+    r = S.layout([P("A", (0, 0, 0), (6000, 0, 0))], [], cfg(spacing_mode="fixed", start_offset_mm=0.0, end_offset_mm=0.0))
+    assert stations(r) == [0, 1500, 3000, 4500, 6000] and r["issues"] == []
+    r = S.layout([P("A", (0, 0, 0), (7000, 0, 0))], [], cfg(spacing_mode="fixed"))
+    assert stations(r) == [300, 1800, 3300, 4800, 6300] and [i["code"] for i in r["issues"]] == ["fixed_remainder"]
+
+
+def test_fixed_spacing_short_run_unchanged():
+    for pol in ("midpoint", "skip"):
+        a = S.layout([P("A", (0, 0, 0), (400, 0, 0))], [], cfg(short_run_policy=pol))
+        b = S.layout([P("A", (0, 0, 0), (400, 0, 0))], [], cfg(short_run_policy=pol, spacing_mode="fixed"))
+        assert a == b
+
+
+@pytest.mark.parametrize("L,s", [(6000, 1000), (7001, 1500), (12345, 2000), (6095.483, 1500)])
+def test_even_mode_explicit_equals_default(L, s):
+    pcs = [P("A", (0, 0, 0), (L, 0, 0))]
+    assert S.layout(pcs, [], cfg(max_spacing_mm=s, spacing_mode="even")) == S.layout(pcs, [], cfg(max_spacing_mm=s))
+
+
+def test_spacing_mode_validation():
+    assert S.validate_layout_config(cfg()) == []
+    assert S.validate_layout_config(cfg(spacing_mode="fixed")) == []
+    for bad in ("Fixed", "", None, 1):
+        e = S.validate_layout_config(cfg(spacing_mode=bad))
+        assert len(e) == 1 and e[0].startswith("spacing_mode：")
+
+
 def test_short_segment_policies():
     r = S.layout([P("A", (0, 0, 0), (400, 0, 0))], [], cfg())
     assert stations(r) == [200] and r["issues"][0]["code"] == "short_run" and r["issues"][0]["level"] == "warning"

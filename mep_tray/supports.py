@@ -17,6 +17,7 @@ import math
 GEOM_TOL_MM = 0.5            # 幾何判定容差（水平/共線/相接）；非規範值
 EPS = 1e-9
 SHORT_POLICIES = ("midpoint", "skip")
+SPACING_MODES = ("even", "fixed")             # 未填 = even
 PLACEMENT_MODES = ("level", "workplane")      # face/host-based 族 v1 不支援（預檢列為 failed）
 SCOPES = ("type", "instance")
 ROD_MODES = ("none", "fixed")
@@ -63,6 +64,8 @@ def validate_layout_config(cfg) -> list[str]:
         e.append("short_run_policy：缺少（midpoint 或 skip）")
     elif p not in SHORT_POLICIES:
         e.append("short_run_policy：需為 midpoint 或 skip")
+    if "spacing_mode" in cfg and cfg["spacing_mode"] not in SPACING_MODES:
+        e.append("spacing_mode：需為 even 或 fixed（未填 = even）")
     nf = cfg.get("near_fitting")
     if nf is None:
         e.append("near_fitting：缺少（不加強時填 {\"enabled\": false}）")
@@ -200,6 +203,7 @@ def layout(pieces: list[dict], links: list[dict], cfg: dict) -> dict:
     a_off = float(cfg["start_offset_mm"])
     b_off = float(cfg["end_offset_mm"])
     policy = cfg["short_run_policy"]
+    fixed = cfg.get("spacing_mode", "even") == "fixed"
     nf = cfg["near_fitting"]
     nf_d = float(nf["max_distance_mm"]) if nf["enabled"] else None
     issues: list[dict] = []
@@ -330,6 +334,15 @@ def layout(pieces: list[dict], links: list[dict], cfg: dict) -> dict:
                 issues.append(_issue("failed", "short_run", first[2], at(L / 2),
                                      f"{cid} 長 {L:.1f} mm 小於起終點內縮和 {a_off + b_off:.1f} mm，未放置"))
                 continue
+        elif fixed and usable > EPS:
+            n = math.floor(usable / s + 1e-9)
+            for i in range(n + 1):
+                add(a_off + s * i, "spacing")
+            rem = usable - s * n
+            if rem > 1e-6:
+                x0, x1 = a_off + s * n, L - b_off
+                issues.append(_issue("pending", "fixed_remainder", last[2], at(x0),
+                                     f"{cid} 固定間距 {s:.1f} mm 排至終點剩餘 {rem:.3f} mm（位置 {x0:.1f}–{x1:.1f} mm），終點未放支撐，待確認（人工決定是否補點）"))
         else:
             n = 0 if usable <= EPS else max(1, math.ceil(usable / s - 1e-9))
             if n == 0:
