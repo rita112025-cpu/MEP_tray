@@ -78,6 +78,7 @@ public sealed class HangerRunReport
 public static class HangerPlacer
 {
     public const string ToolSource = "MEP_tray";
+    public const string TrayToolVersion = "tray-hangers-v1";
     static readonly Guid SchemaGuid = new("4b6f2a1e-8d3c-4f57-9a0b-6e2d1c7f3a95");
     const double ReadbackTolMm = 0.5;
     const double ReadbackTolDeg = 0.05;
@@ -274,7 +275,8 @@ public static class HangerPlacer
     }
 
     // ── 5. 放置（呼叫端已開 Transaction，並在 TransactionGroup 內）──
-    public static void Execute(Document doc, HangerRunReport rep, HangerConfig cfg, Resolved res)
+    /// <param name="toolVersion">寫入 Extensible Storage 的 ToolVersion（橋架 = tray-hangers-v1；配管 = conduit-hangers-v1）。</param>
+    public static void Execute(Document doc, HangerRunReport rep, HangerConfig cfg, Resolved res, string toolVersion = TrayToolVersion)
     {
         var schema = GetSchema();
         var levels = new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>().OrderBy(l => l.Elevation).ToList();
@@ -312,7 +314,7 @@ public static class HangerPlacer
                 e.Set("DirectionDeg", F(it.TrayDirectionDeg));
                 e.Set("BatchId", rep.BatchId);
                 e.Set("SupportId", it.SupportId);
-                e.Set("ToolVersion", "tray-hangers-v1");
+                e.Set("ToolVersion", toolVersion);
                 fi.SetEntity(e);
                 var st = sub.Commit();
                 if (st != TransactionStatus.Committed) throw new InvalidOperationException($"SubTransaction 狀態 {st}");

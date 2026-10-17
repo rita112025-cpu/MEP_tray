@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rita112025-cpu/MEP_tray/docs/schemas/conduit_hanger_config.schema.json",
+  "title": "MEP_tray 配管吊架設定 v1（Revit「選取配管補吊架」用）",
+  "description": "兩支並排 Conduit 共用一支吊架。全部長度 mm。本檔只含配管專用欄位；族、校正、插入點、修正角、橫擔參數、吊桿、間距、起終內縮、固定間距、去重全部沿用 base_config 指向的橋架吊架設定（tray_hanger_config.schema.json，驗證與行為不變）。所有欄位皆無預設，缺漏時工具拒絕執行並指出欄位；不依類型名稱推測用途。",
+  "type": "object",
+  "required": ["units", "supported_object", "base_config", "conduits_per_hanger", "allowed_trade_sizes_mm", "cross_member", "pairing"],
+  "properties": {
+    "units": { "const": "mm" },
+    "supported_object": { "enum": ["conduit_pair"] },
+    "base_config": { "type": "string", "minLength": 1, "description": "橋架吊架設定檔路徑；相對路徑以本檔所在資料夾為基準。" },
+    "conduits_per_hanger": { "const": 2, "description": "v1 只支援兩支並排共用一支吊架。" },
+    "allowed_trade_sizes_mm": {
+      "type": "array", "minItems": 1, "items": { "type": "number", "exclusiveMinimum": 0 },
+      "description": "允許的配管管徑，比對 Revit BuiltInParameter.RBS_CONDUIT_DIAMETER_PARAM（Diameter(Trade Size)）；不在清單者列為待確認不放置。"
+    },
+    "cross_member": {
+      "type": "object", "required": ["value_mm", "basis"],
+      "properties": {
+        "value_mm": { "type": "number", "exclusiveMinimum": 0, "description": "橫擔長度；兩管外緣（最大中心距 + 外徑）必須 ≤ 此值。不加寬。" },
+        "basis": { "enum": ["parameter", "measured_length"], "description": "parameter：值直接寫入族的橫擔長度參數；measured_length：實測橫擔總長，依 base_config 校正（ratio、offset）換算為參數。" }
+      }
+    },
+    "pairing": {
+      "type": "object", "required": ["angle_tolerance_deg", "elevation_tolerance_mm"],
+      "properties": {
+        "angle_tolerance_deg": { "type": "number", "minimum": 0, "exclusiveMaximum": 90, "description": "平行判定容差。" },
+        "elevation_tolerance_mm": { "type": "number", "exclusiveMinimum": 0, "description": "同高程判定容差（中心高程差）。" }
+      }
+    }
+  }
+}

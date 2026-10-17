@@ -39,12 +39,13 @@ report.render_report（自含 HTML，無 JS）──► pipeline._publish（暫�
 | `export_dxf.py` / `acad.py` | DXF 輸出（固定中繼資料）；AutoCAD 稽核與 DWG |
 | `export_revit.py` | Revit 匯入 JSON 與 C# 常數產生；`hanger_supports`／`hanger_layout`（橋架參考座標，未建接頭前） |
 | `supports.py` | 吊架支撐點純邏輯核心（間距、內縮、短段、共線合併、接頭本體排除、近接頭加強、去重／重跑、族座標換算、設定驗證）；`router.place_hangers`、web 預覽、JSON 與 C# `MepTray.Core.Supports` 共用同一規則（契約測試 `tests/test_supports.py`） |
+| `conduit_supports.py` | 配管吊架（第一階段）純邏輯：兩支並排 Conduit 配對（平行、同高程、重疊、並排、管徑在允許清單、外緣 ≤ 橫擔）、吊架線＝兩管中線＝重疊段、放置尺寸（不加寬、橫擔固定）、配管設定驗證；間距／去重沿用 `supports.py`；與 C# `MepTray.Core.ConduitHangers` 共用同一規則（契約測試 `tests/test_conduit_supports.py`） |
 | `versioning.py` | manifest、版本掃描、比對、引擎指紋 |
 | `report.py` | HTML 報告與差異報告 |
 | `disclosure.py` | 固定揭露文字（橫幅、範圍說明、Revit 狀態、引擎變動說明） |
 | `sanitize.py` / `paths.py` | 路徑／機敏字串清理；輸出路徑與 run_id 規則 |
 | `webui.py` | 本機 HTTP 服務與前端 |
-| `revit/MepTray.Core`、`MepTrayImport` | C# 模型、單位、Comments、`Supports`（吊架核心）與匯入器；`HangerPlacer`／`AddHangersCommand`（吊架放置，兩個入口共用） |
+| `revit/MepTray.Core`、`MepTrayImport` | C# 模型、單位、Comments、`Supports`（吊架核心）、`ConduitHangers`（配管兩管配對／中線／橫擔外緣檢查）與匯入器；`HangerPlacer`／`AddHangersCommand`（吊架放置，兩個入口共用）、`AddConduitHangersCommand`（選取配管補吊架，沿用 `HangerPlacer`） |
 
 ## 3. 決定性
 

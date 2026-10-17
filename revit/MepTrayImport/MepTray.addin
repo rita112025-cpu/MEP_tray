@@ -31,6 +31,16 @@
     <VendorDescription>MEP_tray</VendorDescription>
   </AddIn>
   <AddIn Type="Command">
+    <Name>選取配管補吊架</Name>
+    <Assembly>MepTrayImport.dll</Assembly>
+    <AddInId>c9018b3f-09f7-4dd8-be8d-278400d182f4</AddInId>
+    <FullClassName>MepTray.Revit.AddConduitHangersCommand</FullClassName>
+    <Text>選取配管補吊架</Text>
+    <Description>對目前選取的 Conduit，兩支並排（平行、同高程、重疊、外緣在橫擔內、管徑符合設定）者共用一支吊架；單管或不符條件者列為待確認不放置（先預覽、再執行；重跑不重複；可一次 Undo）</Description>
+    <VendorId>MEPT</VendorId>
+    <VendorDescription>MEP_tray</VendorDescription>
+  </AddIn>
+  <AddIn Type="Command">
     <Name>讀取目標吊架族</Name>
     <Assembly>MepTrayImport.dll</Assembly>
     <AddInId>5e7b9c21-0f4a-4d3e-8b62-1a9c7d3e5f80</AddInId>

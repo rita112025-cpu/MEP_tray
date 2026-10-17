@@ -29,12 +29,12 @@ public static class HangerRun
     }
 
     /// <summary>在已開始的 TransactionGroup 內放置；例外往上拋（由呼叫端整批回滾）。</summary>
-    public static void Place(Document doc, HangerRunReport rep, HangerConfig cfg, HangerPlacer.Resolved res)
+    public static void Place(Document doc, HangerRunReport rep, HangerConfig cfg, HangerPlacer.Resolved res, string toolVersion = HangerPlacer.TrayToolVersion)
     {
         using var tx = HangerPlacer.StartTx(doc, "MEP Tray 放置吊架", rep.RevitWarnings);
         try
         {
-            HangerPlacer.Execute(doc, rep, cfg, res);
+            HangerPlacer.Execute(doc, rep, cfg, res, toolVersion);
             var st = tx.Commit();
             if (st != TransactionStatus.Committed) throw new InvalidOperationException($"吊架 Transaction 未能 Commit（狀態 {st}）");
         }

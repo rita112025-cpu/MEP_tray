@@ -1,0 +1,18 @@
+{
+  "$schema": "../schemas/conduit_hanger_config.schema.json",
+  "units": "mm",
+  "supported_object": "conduit_pair",
+  "base_config": "tray_hanger_config.json",
+  "conduits_per_hanger": 2,
+  "allowed_trade_sizes_mm": [75],
+  "cross_member": { "value_mm": 300, "basis": "parameter" },
+  "pairing": { "angle_tolerance_deg": 1, "elevation_tolerance_mm": 1 },
+  "_value_sources": {
+    "base_config": "族、校正、插入點、修正角、橫擔參數、吊桿、max_spacing_mm（1500）、spacing_mode（fixed，餘數待確認）、起終內縮、去重全部沿用此橋架吊架設定檔（相對於本檔所在資料夾）；使用者決定 2026-10-17：同一吊架族、同 1500 mm 固定間距",
+    "conduits_per_hanger": "2：使用者決定 2026-10-17（兩支 E75 並排共用一支吊架）",
+    "allowed_trade_sizes_mm": "[75]（E75，比對 Revit Diameter(Trade Size) = RBS_CONDUIT_DIAMETER_PARAM）：使用者決定 2026-10-17",
+    "cross_member.value_mm": "300（吊架寬度）、不加寬：使用者決定 2026-10-17",
+    "cross_member.basis": "parameter = 300 直接寫入族的橫擔長度參數（parameter_map.cross_member_length，即「吊架寬度」）；若 300 指實測橫擔總長請改 measured_length——待使用者確認",
+    "pairing": "angle 1°、elevation 1 mm：沿用橋架設定 dedupe 容差（使用者 2026-10-16）；兩管間距無規範值，只要求兩管外緣（最大中心距 + 外徑）落在 300 橫擔內"
+  }
+}
