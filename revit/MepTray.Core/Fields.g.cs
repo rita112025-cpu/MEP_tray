@@ -37,6 +37,8 @@ public static class Fields
     public const string Suggestion = "suggestion";
     public const string Code = "code";
     public const string Disclosures = "disclosures";
+    public const string HangerSupports = "hanger_supports";
+    public const string HangerLayout = "hanger_layout";
     public const int SchemaVersion_Value = 1;
     public const double RevitMinSegmentMm = 2.54;
     public const double MmPerFoot = 304.8;

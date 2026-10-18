@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rita112025-cpu/MEP_tray/docs/schemas/hanger_config.schema.json",
+  "title": "MEP_tray 吊架配置設定（保留 schema，尚未實作）",
+  "description": "預留給後續吊架自動配置使用。橋架、線槽(Conduit)、配管(Pipe) 分開設定；水平、斜向、垂直分開設定。所有數值均無預設值，必須由使用者依專案規範明確填寫；工具不得把任何規範值（例如某規範的支撐間距或接頭附近距離）當成強制預設。族/類型與參數對應必須來自「吊架族群盤點」報告中的實際名稱，不得由族名或類型名（例如 矩形/圓形）推測用途。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "systems"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "source_inventory": {
+      "description": "產生參數對應時依據的盤點報告（吊架族群盤點_*.json）路徑，供追溯。",
+      "type": "string"
+    },
+    "systems": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cable_tray": { "$ref": "#/$defs/system" },
+        "conduit": { "$ref": "#/$defs/system" },
+        "pipe": { "$ref": "#/$defs/system" }
+      }
+    }
+  },
+  "$defs": {
+    "length_mm": { "type": "number", "exclusiveMinimum": 0 },
+    "system": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "horizontal": { "$ref": "#/$defs/orientation_rule" },
+        "sloped": { "$ref": "#/$defs/orientation_rule" },
+        "vertical": { "$ref": "#/$defs/orientation_rule" }
+      }
+    },
+    "orientation_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "max_support_spacing_mm": { "$ref": "#/$defs/length_mm", "description": "最大支撐間距；由使用者依規範填寫，無預設。" },
+        "end_offset_mm": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "start": { "$ref": "#/$defs/length_mm" },
+            "end": { "$ref": "#/$defs/length_mm" }
+          }
+        },
+        "near_fitting": {
+          "description": "接頭（彎頭/T/十字）附近的支撐條件；由使用者填寫，無預設。",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "max_distance_mm": { "$ref": "#/$defs/length_mm" },
+            "fitting_kinds": { "type": "array", "items": { "enum": ["elbow", "tee", "cross", "union"] }, "uniqueItems": true }
+          }
+        },
+        "size_range_mm": {
+          "description": "此規則適用的寬度/管徑範圍（選填）。",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": { "min": { "type": "number", "minimum": 0 }, "max": { "type": "number", "minimum": 0 } }
+        },
+        "family": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["family_name", "type_name"],
+          "properties": {
+            "family_name": { "type": "string", "minLength": 1 },
+            "type_name": { "type": "string", "minLength": 1 }
+          }
+        },
+        "parameter_map": {
+          "description": "語意角色 → 族中實際參數（以盤點報告的名稱與識別填寫）。未填的角色不設定。",
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/param_ref" },
+          "properties": {
+            "width": { "$ref": "#/$defs/param_ref" },
+            "rod_length": { "$ref": "#/$defs/param_ref" },
+            "bar_offset": { "$ref": "#/$defs/param_ref" },
+            "diameter": { "$ref": "#/$defs/param_ref" }
+          }
+        }
+      }
+    },
+    "param_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "scope"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "scope": { "enum": ["type", "instance"] },
+        "shared_guid": { "type": "string" },
+        "builtin": { "type": "string" },
+        "value_rule": {
+          "description": "例如 tray_width_plus（橋架寬＋margin_mm）、distance_to_slab、fixed；尚未實作。",
+          "type": "object"
+        }
+      }
+    }
+  }
+}

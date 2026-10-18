@@ -10,4 +10,54 @@
     <VendorId>MEPT</VendorId>
     <VendorDescription>MEP_tray</VendorDescription>
   </AddIn>
+  <AddIn Type="Command">
+    <Name>吊架族群盤點</Name>
+    <Assembly>MepTrayImport.dll</Assembly>
+    <AddInId>d7c0eb26-64e8-4dca-83fc-d89401323bcf</AddInId>
+    <FullClassName>MepTray.Revit.HangerInventoryCommand</FullClassName>
+    <Text>吊架族群盤點</Text>
+    <Description>盤點目前專案已載入的族與實例、指定資料夾或單一 .rfa 的參數/公式/各類型值/放置方式；輸出 JSON 與 CSV。未使用修改交易，不載入族，族檔關閉時不儲存</Description>
+    <VendorId>MEPT</VendorId>
+    <VendorDescription>MEP_tray</VendorDescription>
+  </AddIn>
+  <AddIn Type="Command">
+    <Name>選取橋架補吊架</Name>
+    <Assembly>MepTrayImport.dll</Assembly>
+    <AddInId>a3e5c1d7-2b84-4f6a-9e13-58c0d4b7f2a6</AddInId>
+    <FullClassName>MepTray.Revit.AddHangersCommand</FullClassName>
+    <Text>選取橋架補吊架</Text>
+    <Description>對目前選取的 Cable Tray 依吊架設定批次補吊架（先預覽、再執行；不重建或移動橋架；重跑不重複；可一次 Undo）</Description>
+    <VendorId>MEPT</VendorId>
+    <VendorDescription>MEP_tray</VendorDescription>
+  </AddIn>
+  <AddIn Type="Command">
+    <Name>選取配管補吊架</Name>
+    <Assembly>MepTrayImport.dll</Assembly>
+    <AddInId>c9018b3f-09f7-4dd8-be8d-278400d182f4</AddInId>
+    <FullClassName>MepTray.Revit.AddConduitHangersCommand</FullClassName>
+    <Text>選取配管補吊架</Text>
+    <Description>對目前選取的 Conduit，兩支並排（平行、同高程、重疊、外緣在橫擔內、管徑符合設定）者共用一支吊架；單管或不符條件者列為待確認不放置（先預覽、再執行；重跑不重複；可一次 Undo）</Description>
+    <VendorId>MEPT</VendorId>
+    <VendorDescription>MEP_tray</VendorDescription>
+  </AddIn>
+  <AddIn Type="Command">
+    <Name>讀取目標吊架族</Name>
+    <Assembly>MepTrayImport.dll</Assembly>
+    <AddInId>5e7b9c21-0f4a-4d3e-8b62-1a9c7d3e5f80</AddInId>
+    <FullClassName>MepTray.Revit.TargetFamilyCommand</FullClassName>
+    <Text>讀取目標吊架族</Text>
+    <Description>唯讀讀取目標 .rfa（放置方式、主體需求、長度參數 type/instance/公式/可調、類型是否存在、檔案身分），可寫入吊架設定；不修改、不儲存族檔</Description>
+    <VendorId>MEPT</VendorId>
+    <VendorDescription>MEP_tray</VendorDescription>
+  </AddIn>
+  <AddIn Type="Command">
+    <Name>校正目標吊架</Name>
+    <Assembly>MepTrayImport.dll</Assembly>
+    <AddInId>c8d2e4f6-3a1b-4c5d-9e7f-2b4d6f8a0c13</AddInId>
+    <FullClassName>MepTray.Revit.CalibrateHangerCommand</FullClassName>
+    <Text>校正目標吊架</Text>
+    <Description>在選取的水平 Cable Tray 放 1 支測試吊架、量測參數效果，確認修正角與承托面偏移後寫入設定；取消全部回滾</Description>
+    <VendorId>MEPT</VendorId>
+    <VendorDescription>MEP_tray</VendorDescription>
+  </AddIn>
 </RevitAddIns>

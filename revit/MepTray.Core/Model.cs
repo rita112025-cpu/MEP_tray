@@ -46,6 +46,19 @@ public sealed class FindingDto
     [JsonPropertyName(Fields.Code)] public string? Code { get; set; }
 }
 
+/// <summary>hanger_supports 一筆（橋架參考座標＝模型區域座標，未建接頭前；mm）。舊 JSON 沒有此欄位時為 null。</summary>
+public sealed class HangerSupportDto
+{
+    [JsonPropertyName(Fields.Id)] public string Id { get; set; } = "";
+    [JsonPropertyName(Fields.SegmentId)] public string SegmentId { get; set; } = "";
+    [JsonPropertyName("station_mm")] public double StationMm { get; set; }
+    [JsonPropertyName("point_mm")] public double[] PointMm { get; set; } = new double[3];
+    [JsonPropertyName("direction_deg")] public double DirectionDeg { get; set; }
+    [JsonPropertyName("tray_width_mm")] public double TrayWidthMm { get; set; }
+    [JsonPropertyName("bearing_z_mm")] public double BearingZMm { get; set; }
+    [JsonPropertyName("reason")] public string Reason { get; set; } = "";
+}
+
 public sealed class TrayModel
 {
     [JsonPropertyName(Fields.SchemaVersion)] public int SchemaVersion { get; set; }
@@ -57,6 +70,8 @@ public sealed class TrayModel
     [JsonPropertyName(Fields.Joints)] public List<JointDto> Joints { get; set; } = new();
     [JsonPropertyName(Fields.Findings)] public List<FindingDto> Findings { get; set; } = new();
     [JsonPropertyName(Fields.Disclosures)] public List<string> Disclosures { get; set; } = new();
+    /// <summary>選用；舊 JSON 無此欄位仍可匯入橋架。</summary>
+    [JsonPropertyName(Fields.HangerSupports)] public List<HangerSupportDto>? HangerSupports { get; set; }
 }
 
 public static class ModelLoader
