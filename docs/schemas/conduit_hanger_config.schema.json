@@ -21,6 +21,14 @@
         "basis": { "enum": ["parameter", "measured_length"], "description": "parameter：值直接寫入族的橫擔長度參數；measured_length：實測橫擔總長，依 base_config 校正（ratio、offset）換算為參數。" }
       }
     },
+    "cross_member_single": {
+      "type": "object", "required": ["value_mm", "basis"],
+      "description": "選填。單管吊架：未配成對且非曖昧的有效配管單獨吊掛（吊架中心在管軸、全長、不加寬）。省略 = 單管列待確認不放置。單管橫擔若可能與鄰近配對吊架或其他未配對配管的橫擔在平面上重疊 → single_conflict 待確認。",
+      "properties": {
+        "value_mm": { "type": "number", "exclusiveMinimum": 0 },
+        "basis": { "enum": ["parameter", "measured_length"] }
+      }
+    },
     "pairing": {
       "type": "object", "required": ["angle_tolerance_deg", "elevation_tolerance_mm"],
       "properties": {

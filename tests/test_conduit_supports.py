@@ -40,6 +40,9 @@ def bcfg(**kw):
     return c
 
 
+SINGLE = {"value_mm": 200.0, "basis": "parameter"}      # 使用者決定 2026-10-18：單管 吊架寬度 200、不加寬
+
+
 def K(i, a, b, ts=75.0, od=75.0):
     return {"id": i, "start": list(map(float, a)), "end": list(map(float, b)), "trade_size_mm": ts, "outer_diameter_mm": od}
 
@@ -210,10 +213,11 @@ def contract_cases() -> dict:
             res = C.pair_conduits(conduits, cc)
             case["expect"] = res
             if base is not None:
-                lay = S.layout(C.conduit_pieces(res["pairs"]), [], base)
+                lay = S.layout(C.conduit_pieces(res["pairs"], res["singles"]), [], base)
+                sid = {x["id"] for x in res["singles"]}
                 case["base_cfg"] = base
                 case["layout"] = lay
-                case["placements"] = [C.conduit_placement(sp, base, cc) for sp in lay["supports"]]
+                case["placements"] = [C.conduit_placement(sp, base, cc, sp["piece_id"] in sid) for sp in lay["supports"]]
         cases.append(case)
 
     th = math.radians(0.5)
@@ -236,6 +240,19 @@ def contract_cases() -> dict:
                       K("3", (0, 5000, 0), (6000, 5000, 0)), K("4", (0, 5150, 0), (6000, 5150, 0))], ccfg(), bcfg())
     add("bad_geom", [K("S", (0, 0, 0), (6000, 0, 100)), K("V", (0, 0, 0), (0, 0, 3000)), K("Z", (1, 1, 1), (1, 1, 1))], ccfg())
     add("od_fallback", [K("1", (0, 0, 0), (6000, 0, 0), od=None), K("2", (0, 150, 0), (6000, 150, 0), od=None)], ccfg(), bcfg())
+    sc = ccfg(cross_member_single=SINGLE)
+    add("single_lone", [K("1", (0, 0, 3000), (6095.483, 0, 3000))], sc, bcfg())
+    add("single_measured", [K("1", (0, 0, 0), (3000, 0, 0))], ccfg(cross_member_single={"value_mm": 300.0, "basis": "measured_length"}), bcfg())
+    add("single_pair_mix", [K("1", (0, 0, 0), (6000, 0, 0)), K("2", (0, 100, 0), (6000, 100, 0)), K("3", (0, 400, 0), (6000, 400, 0)),
+                            K("4", (0, 5000, 0), (3000, 3000 + 5000, 0))], sc, bcfg())
+    add("single_conflict_pair", [K("1", (0, 0, 0), (6000, 0, 0)), K("2", (0, 100, 0), (6000, 100, 0)), K("3", (0, 200, 0), (6000, 200, 0), od=80.0)], sc)
+    add("single_ambiguous", [K("1", (0, 0, 0), (6000, 0, 0)), K("2", (0, 100, 0), (6000, 100, 0)), K("3", (0, 200, 0), (6000, 200, 0))], sc)
+    add("single_too_close", [K("1", (0, 0, 0), (6000, 0, 0)), K("2", (0, 50, 0), (6000, 50, 0))], sc)
+    add("single_wide", [K("1", (0, 0, 0), (6000, 0, 0)), K("2", (0, 230, 0), (6000, 230, 0))], sc, bcfg())
+    add("single_partial", [K("1", (0, 0, 0), (6000, 0, 0)), K("2", (6500, 150, 0), (1000, 150, 0)), K("3", (0, 3000, 0), (2000, 3000, 0)),
+                           K("5", (0, 0, 0), (0, 0, 3000))], sc, bcfg())
+    add("cfg_single_bad", [], ccfg(cross_member_single={"value_mm": -1}))
+    add("cfg_single_type", [], ccfg(cross_member_single=200))
     add("cfg_missing", [], {"units": "mm"})
     add("cfg_bad", [], ccfg(conduits_per_hanger=3, cross_member={"value_mm": 0}, pairing={"angle_tolerance_deg": 95}))
     return {"conduit_cases": cases}
@@ -261,7 +278,7 @@ def test_csharp_conduit_contract(tmp_path):
     finally:
         os.environ.pop("MEPTRAY_CONDUIT_CONTRACT", None)
     assert r.returncode == 0 and "ALL PASS" in r.stdout, r.stdout[-4000:] + r.stderr[-1000:]
-    assert r.stdout.count("配管契約[") >= 30
+    assert r.stdout.count("配管契約[") >= 60
 
 
 def test_level_placement_corrects_z_and_still_verifies_readback():
@@ -278,3 +295,92 @@ def test_level_placement_corrects_z_and_still_verifies_readback():
     assert "zNotes" in body and "PlaceInstance(doc, sym, cfg.PlacementMode, ins, it.RotationDeg, planes, levels, zNotes)" in placer
     assert "讀回插入點" in placer and "ReadbackTolMm" in placer                     # 讀回驗證仍在
     assert ".Delete(" not in body
+
+# ---------- 單管（使用者決定 2026-10-18） ----------
+def test_single_absent_keeps_previous_behaviour():
+    r = C.pair_conduits([K("1", (0, 0, 0), (6000, 0, 0))], ccfg())
+    assert r["singles"] == [] and codes(r) == [("unpaired", "1")]
+
+
+def test_single_lone_conduit_hung_full_length_on_axis():
+    r = C.pair_conduits([K("1", (0, 0, 3000), (6095.483, 0, 3000))], ccfg(cross_member_single=SINGLE))
+    assert r["pairs"] == [] and r["issues"] == []
+    sg = r["singles"][0]
+    assert sg["id"] == "1" and sg["start"] == [0, 0, 3000] and sg["end"] == [6095.483, 0, 3000] and sg["bearing_z_mm"] == 2962.5
+    lay = S.layout(C.conduit_pieces(r["pairs"], r["singles"]), [], bcfg())
+    assert [s["station_mm"] for s in lay["supports"]] == [0, 1500, 3000, 4500, 6000]
+    assert [(i["level"], i["code"]) for i in lay["issues"]] == [("pending", "fixed_remainder")]
+    assert all(s["point_mm"][1] == 0 and s["bearing_z_mm"] == 2962.5 for s in lay["supports"])   # 吊架中心在管軸，承托面 = 管底
+    p = C.conduit_placement(lay["supports"][1], bcfg(), ccfg(cross_member_single=SINGLE), single=True)
+    assert p["cross_member_param_mm"] == 200 and p["cross_member_length_mm"] == 300 and p["insertion_point_mm"] == [1500, 0, 2962.5]
+    pp = C.conduit_placement(lay["supports"][1], bcfg(), ccfg(cross_member_single=SINGLE))
+    assert pp["cross_member_param_mm"] == 300                                     # 配對仍為 300
+
+
+def test_single_pairs_unchanged_and_far_conduit_becomes_single():
+    r = C.pair_conduits([K("1", (0, 0, 0), (6000, 0, 0)), K("2", (0, 100, 0), (6000, 100, 0)), K("3", (0, 400, 0), (6000, 400, 0))],
+                        ccfg(cross_member_single=SINGLE))
+    assert [p["id"] for p in r["pairs"]] == ["1+2"] and [x["id"] for x in r["singles"]] == ["3"] and r["issues"] == []
+
+
+def test_single_conflicts_with_neighbouring_pair_hanger_pending():
+    # 配對中線 y=50；第 3 支外徑不同（無法配對）在 y=200：距中線 150 < (200+300)/2 → 橫擔可能重疊 → 待確認
+    r = C.pair_conduits([K("1", (0, 0, 0), (6000, 0, 0)), K("2", (0, 100, 0), (6000, 100, 0)), K("3", (0, 200, 0), (6000, 200, 0), od=80.0)],
+                        ccfg(cross_member_single=SINGLE))
+    assert [p["id"] for p in r["pairs"]] == ["1+2"] and r["singles"] == [] and codes(r) == [("single_conflict", "3")]
+    assert "1+2" in r["issues"][0]["detail"]
+
+
+def test_single_ambiguous_not_converted():
+    r = C.pair_conduits([K("1", (0, 0, 0), (6000, 0, 0)), K("2", (0, 100, 0), (6000, 100, 0)), K("3", (0, 200, 0), (6000, 200, 0))],
+                        ccfg(cross_member_single=SINGLE))
+    assert r["pairs"] == [] and r["singles"] == [] and [c for c, _ in codes(r)] == ["ambiguous_pair"] * 3
+
+
+def test_single_too_close_and_wide_cases():
+    r = C.pair_conduits([K("1", (0, 0, 0), (6000, 0, 0)), K("2", (0, 50, 0), (6000, 50, 0))], ccfg(cross_member_single=SINGLE))
+    assert r["singles"] == [] and codes(r) == [("too_close", "1+2"), ("single_conflict", "1"), ("single_conflict", "2")]
+    r = C.pair_conduits([K("1", (0, 0, 0), (6000, 0, 0)), K("2", (0, 230, 0), (6000, 230, 0))], ccfg(cross_member_single=SINGLE))
+    assert [x["id"] for x in r["singles"]] == ["1", "2"] and r["issues"] == []    # 兩支各自單管（230 ≥ 200，橫擔不重疊）
+
+
+def test_single_far_parallel_runs_both_hung():
+    r = C.pair_conduits([K("1", (0, 0, 0), (6000, 0, 0)), K("2", (0, 5000, 0), (6000, 5000, 0))], ccfg(cross_member_single=SINGLE))
+    assert [x["id"] for x in r["singles"]] == ["1", "2"] and r["issues"] == []
+
+
+def test_single_does_not_hang_pair_tails_or_bad_conduits():
+    r = C.pair_conduits([K("1", (0, 0, 0), (6000, 0, 0)), K("2", (6500, 150, 0), (1000, 150, 0)),
+                         K("9", (0, 3000, 0), (6000, 3000, 0), ts=50.0, od=50.0), K("S", (0, 0, 0), (6000, 0, 100))],
+                        ccfg(cross_member_single=SINGLE))
+    assert r["singles"] == [] and len(r["pairs"]) == 1
+    assert [c for c, _ in codes(r)] == ["diameter_not_allowed", "sloped", "unsupported_tail", "unsupported_tail"]
+
+
+def test_single_config_validation():
+    assert C.validate_conduit_config(ccfg(cross_member_single=SINGLE)) == []
+    assert C.error_fields(C.validate_conduit_config(ccfg(cross_member_single={"value_mm": -1}))) == \
+        ["cross_member_single.value_mm", "cross_member_single.basis"]
+    assert C.error_fields(C.validate_conduit_config(ccfg(cross_member_single=200))) == ["cross_member_single"]
+
+
+def test_dedupe_keys_and_cross_combination_cover():
+    pk, sk = C.pair_key("B", "A"), C.single_key("A")
+    assert pk == "conduit-pair:A|B" and sk == "conduit-single:A" and C.key_conduits(pk) == ["A", "B"] and C.key_conduits("tray-uid") == []
+    ex = [{"id": "h1", "source": "tool", "tray_key": pk}, {"id": "h2", "source": "tool", "tray_key": sk},
+          {"id": "h3", "source": "other", "tray_key": None}, {"id": "h4", "source": "tool", "tray_key": "conduit-single:C"},
+          {"id": "h5", "source": "tool", "tray_key": "some-tray-uid"}]
+    assert C.covering_hangers(sk, ex) == ["h1"]                  # 單管計畫，但該管已有配對吊架 → 不重複
+    assert C.covering_hangers(pk, ex) == ["h2"]                  # 配對計畫，但 A 已有單管吊架 → 不重複
+    assert C.covering_hangers(C.pair_key("A", "C"), ex) == ["h1", "h2", "h4"]
+    assert C.covering_hangers("some-tray-uid", ex) == []         # 橋架鍵不受影響
+
+
+def test_template_has_single_setting_sourced():
+    t = json.loads((ROOT / "docs" / "examples" / "conduit_hanger_config.template.json").read_text(encoding="utf-8"))
+    assert t["cross_member_single"] == {"value_mm": 200, "basis": "parameter"}
+    assert "2026-10-18" in t["_value_sources"]["cross_member_single"]
+    s = json.loads((ROOT / "docs" / "schemas" / "conduit_hanger_config.schema.json").read_text(encoding="utf-8"))
+    assert "cross_member_single" in s["properties"] and "cross_member_single" not in s["required"]
+    code = (SRC / "ConduitHangerRun.cs").read_text(encoding="utf-8")
+    assert "ConduitHangers.CoveringHangers" in code and "ConduitHangers.SingleKey" in code

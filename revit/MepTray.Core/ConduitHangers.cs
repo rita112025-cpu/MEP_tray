@@ -33,9 +33,23 @@ public sealed class ConduitPair
     public double BearingZMm { get; set; }
 }
 
+/// <summary>單管吊架段（使用者決定 2026-10-18；設定 cross_member_single 時才產生）：吊架中心在管軸、全長。</summary>
+public sealed class ConduitSingle
+{
+    public string Id { get; set; } = "";
+    public string Conduit { get; set; } = "";
+    public double[] Start { get; set; } = new double[3];
+    public double[] End { get; set; } = new double[3];
+    public double LengthMm { get; set; }
+    public double OuterDiameterMm { get; set; }
+    public double OuterWidthMm { get; set; }
+    public double BearingZMm { get; set; }
+}
+
 public sealed class ConduitPairResult
 {
     public List<ConduitPair> Pairs { get; } = new();
+    public List<ConduitSingle> Singles { get; } = new();
     public List<SupportIssue> Issues { get; } = new();
 }
 
@@ -49,6 +63,9 @@ public sealed class ConduitConfig
     /// <summary>parameter：值直接寫入族的橫擔長度參數；measured_length：實測橫擔長度，經校正換算為參數。</summary>
     public string CrossMemberBasis = "";
     public double AngleToleranceDeg, ElevationToleranceMm;
+    /// <summary>單管橫擔（cross_member_single）；null = 未設定 → 單管列待確認（與先前相同）。</summary>
+    public double? SingleCrossMemberValueMm;
+    public string SingleCrossMemberBasis = "";
 }
 
 public static class ConduitConfigReader
@@ -88,6 +105,18 @@ public static class ConduitConfigReader
             if (Array.IndexOf(CrossBases, Str(cm["basis"])) < 0)
                 e.Add("cross_member.basis：需為 parameter（值直接寫入族的橫擔長度參數）或 measured_length（實測橫擔長度，經校正換算）");
         }
+        if (c.ContainsKey("cross_member_single"))   // 選填；未填 = 單管不放置（列待確認），與先前相同
+        {
+            if (c["cross_member_single"] is not JsonObject cs)
+                e.Add("cross_member_single：需為 {\"value_mm\": 單管橫擔長度, \"basis\": parameter|measured_length}（不放單管吊架時整個欄位省略）");
+            else
+            {
+                var v = Num(cs["value_mm"]);
+                if (Missing(cs, "value_mm")) e.Add("cross_member_single.value_mm：缺少");
+                else if (v is null || v <= 0) e.Add("cross_member_single.value_mm：需為 > 0 的有限數");
+                if (Array.IndexOf(CrossBases, Str(cs["basis"])) < 0) e.Add("cross_member_single.basis：需為 parameter 或 measured_length");
+            }
+        }
         if (c["pairing"] is not JsonObject pr) e.Add("pairing：缺少（angle_tolerance_deg、elevation_tolerance_mm）");
         else
         {
@@ -104,8 +133,11 @@ public static class ConduitConfigReader
         var errs = Validate(root);
         if (errs.Count > 0) throw new InvalidDataException("配管吊架設定不完整：" + string.Join("; ", errs));
         var c = (JsonObject)root!;
+        var single = c["cross_member_single"] as JsonObject;
         return new ConduitConfig
         {
+            SingleCrossMemberValueMm = single is null ? null : Num(single["value_mm"]),
+            SingleCrossMemberBasis = single is null ? "" : Str(single["basis"])!,
             BaseConfig = Str(c["base_config"])!,
             ConduitsPerHanger = c["conduits_per_hanger"]!.GetValue<int>(),
             AllowedTradeSizesMm = c["allowed_trade_sizes_mm"]!.AsArray().Select(x => Num(x)!.Value).ToArray(),
@@ -138,6 +170,31 @@ public static class ConduitHangers
         public bool IsOk;
         public string Code = "", Detail = "";
         public double Lo, Hi, Dlo, Dhi, Tb0, Tb1, Dmin, Dmax, Width;
+    }
+
+    sealed class Lat
+    {
+        public double Lo, Hi, Dlo, Dhi, Tb0, Tb1, Dmin;
+    }
+
+    /// <summary>線段 s0→e0 投影到 a 的軸上：重疊區與兩端側向距離（有號）；沒有重疊 → null。Dmin：跨越軸線時為 0。</summary>
+    static Lat? Lateral(Ok a, double[] s0, double[] e0)
+    {
+        var u = a.U; var o = a.Start;
+        double nx = -u[1], ny = u[0];
+        double tb0 = (s0[0] - o[0]) * u[0] + (s0[1] - o[1]) * u[1];
+        double tb1 = (e0[0] - o[0]) * u[0] + (e0[1] - o[1]) * u[1];
+        double lo = Math.Max(0.0, Math.Min(tb0, tb1)), hi = Math.Min(a.Len, Math.Max(tb0, tb1));
+        if (hi - lo <= GeomTolMm || Math.Abs(tb1 - tb0) <= 1e-12) return null;
+        double L(double t)
+        {
+            var f = (t - tb0) / (tb1 - tb0);
+            var px = s0[0] + (e0[0] - s0[0]) * f;
+            var py = s0[1] + (e0[1] - s0[1]) * f;
+            return (px - o[0]) * nx + (py - o[1]) * ny;
+        }
+        double dlo = L(lo), dhi = L(hi);
+        return new Lat { Lo = lo, Hi = hi, Dlo = dlo, Dhi = dhi, Tb0 = tb0, Tb1 = tb1, Dmin = dlo * dhi < 0 ? 0.0 : Math.Min(Math.Abs(dlo), Math.Abs(dhi)) };
     }
 
     static double AngleDeg(double[] u, double[] v) => Math.Acos(Math.Min(1.0, Math.Abs(u[0] * v[0] + u[1] * v[1]))) * 180.0 / Math.PI;
@@ -228,25 +285,8 @@ public static class ConduitHangers
         foreach (var (i, j, _) in cands) { cnt[i]++; cnt[j]++; }
         var accepted = cands.Where(x => cnt[x.I] == 1 && cnt[x.J] == 1).ToList();
         var paired = new HashSet<int>(accepted.SelectMany(x => new[] { x.I, x.J }));
-        foreach (var (i, j, r) in fails)   // 只對兩支都沒配成對者回報（已各自配對的遠處配管不必提示）
-        {
-            if (paired.Contains(i) || paired.Contains(j)) continue;
-            var a = ok[i]; var b = ok[j];
-            var loc = new[] { (a.Mid[0] + b.Mid[0]) / 2, (a.Mid[1] + b.Mid[1]) / 2, (a.Mid[2] + b.Mid[2]) / 2 };
-            issues.Add(Issue("pending", r.Code, $"{a.Id}+{b.Id}", loc, r.Detail + "，未放置"));
-        }
-        for (int k = 0; k < ok.Count; k++)
-        {
-            if (paired.Contains(k)) continue;
-            var c = ok[k];
-            var partners = cands.Where(x => x.I == k || x.J == k).Select(x => ok[x.I == k ? x.J : x.I].Id).ToList();
-            if (partners.Count > 0)
-                issues.Add(Issue("pending", "ambiguous_pair", c.Id, c.Mid, $"可與多支配管配對或對象已有其他配對（{string.Join(", ", partners)}），不猜測，未放置"));
-            else if (ok.Count == 1)
-                issues.Add(Issue("pending", "unpaired", c.Id, c.Mid, "單支配管（需兩支並排共用吊架），未放置"));
-            else
-                issues.Add(Issue("pending", "unpaired", c.Id, c.Mid, "找不到可配對的配管（" + string.Join("; ", reasons[c.Id]) + "），未放置"));
-        }
+
+        var tails = new List<SupportIssue>();
         foreach (var (i, j, r) in accepted)
         {
             var a = ok[i]; var b = ok[j];
@@ -272,35 +312,142 @@ public static class ConduitHangers
             }
             foreach (var (c, t0, t1) in new[] { (a, 0.0, r.Lo), (a, r.Hi, a.Len), (b, bmin, r.Lo), (b, r.Hi, bmax) })
                 if (t1 - t0 > GeomTolMm)
-                    issues.Add(Issue("pending", "unsupported_tail", c.Id, At(c, (t0 + t1) / 2), $"{pid} 重疊段外的尾段 {t1 - t0:F1} mm 未放吊架（單管段，待確認）"));
+                    tails.Add(Issue("pending", "unsupported_tail", c.Id, At(c, (t0 + t1) / 2), $"{pid} 重疊段外的尾段 {t1 - t0:F1} mm 未放吊架（單管段，待確認）"));
         }
+
+        // 每支未配成對的配管：ambiguous（有候選但不唯一，不猜測）／single 候選（設定 cross_member_single 時）／unpaired
+        var status = new Dictionary<int, string>();
+        for (int k = 0; k < ok.Count; k++)
+        {
+            if (paired.Contains(k)) continue;
+            status[k] = cands.Any(x => x.I == k || x.J == k) ? "ambiguous" : cc.SingleCrossMemberValueMm is not null ? "single" : "unpaired";
+        }
+        var conflicts = new Dictionary<int, List<string>>();
+        if (cc.SingleCrossMemberValueMm is double ws)
+        {
+            var wp = cc.CrossMemberValueMm;
+            bool Near(Ok c, double[] ou, double oz, double[] s0, double[] e0, double limit)
+            {
+                if (AngleDeg(c.U, ou) > cc.AngleToleranceDeg + 1e-9) return false;
+                if (Math.Abs(c.Z - oz) > cc.ElevationToleranceMm + 1e-9) return false;
+                var lt = Lateral(c, s0, e0);
+                return lt is not null && lt.Dmin + GeomTolMm < limit;
+            }
+            foreach (var k in status.Keys.OrderBy(x => x).ToList())
+            {
+                if (status[k] != "single") continue;
+                var c = ok[k];
+                var hit = new List<string>();
+                for (int q = 0; q < accepted.Count; q++)      // 鄰近配對吊架：兩橫擔（各以中心線為中心）在平面上重疊
+                {
+                    var p = res.Pairs[q]; var m0 = ok[accepted[q].I];
+                    if (Near(c, m0.U, m0.Z, p.Start, p.End, (ws + wp) / 2)) hit.Add(p.Id);
+                }
+                for (int m = 0; m < ok.Count; m++)            // 其他未配對配管：單管橫擔彼此重疊／管體重疊
+                {
+                    if (m == k || paired.Contains(m)) continue;
+                    if (Near(c, ok[m].U, ok[m].Z, ok[m].Start, ok[m].End, ws)) hit.Add(ok[m].Id);
+                }
+                if (hit.Count > 0) { conflicts[k] = hit; status[k] = "single_conflict"; }
+            }
+        }
+        var hung = new HashSet<int>(paired.Concat(status.Where(x => x.Value == "single").Select(x => x.Key)));
+        foreach (var (i, j, r) in fails)   // 只對兩支都沒吊架者回報（已各自配對／單管吊架者不必提示）
+        {
+            if (hung.Contains(i) || hung.Contains(j)) continue;
+            var a = ok[i]; var b = ok[j];
+            var loc = new[] { (a.Mid[0] + b.Mid[0]) / 2, (a.Mid[1] + b.Mid[1]) / 2, (a.Mid[2] + b.Mid[2]) / 2 };
+            issues.Add(Issue("pending", r.Code, $"{a.Id}+{b.Id}", loc, r.Detail + "，未放置"));
+        }
+        for (int k = 0; k < ok.Count; k++)
+        {
+            if (!status.TryGetValue(k, out var st)) continue;
+            var c = ok[k];
+            switch (st)
+            {
+                case "ambiguous":
+                    var partners = cands.Where(x => x.I == k || x.J == k).Select(x => ok[x.I == k ? x.J : x.I].Id).ToList();
+                    issues.Add(Issue("pending", "ambiguous_pair", c.Id, c.Mid, $"可與多支配管配對或對象已有其他配對（{string.Join(", ", partners)}），不猜測，未放置"));
+                    break;
+                case "unpaired":
+                    if (ok.Count == 1) issues.Add(Issue("pending", "unpaired", c.Id, c.Mid, "單支配管（需兩支並排共用吊架），未放置"));
+                    else issues.Add(Issue("pending", "unpaired", c.Id, c.Mid, "找不到可配對的配管（" + string.Join("; ", reasons[c.Id]) + "），未放置"));
+                    break;
+                case "single_conflict":
+                    issues.Add(Issue("pending", "single_conflict", c.Id, c.Mid, $"單管吊架橫擔可能與鄰近吊架／配管重疊（{string.Join(", ", conflicts[k])}），未放置"));
+                    break;
+                default:
+                    res.Singles.Add(new ConduitSingle
+                    {
+                        Id = c.Id, Conduit = c.Id, Start = P3(c.Start), End = P3(c.End), LengthMm = R3(c.Len),
+                        OuterDiameterMm = R3(c.Od), OuterWidthMm = R3(c.Od), BearingZMm = R3(c.Z - c.Od / 2),
+                    });
+                    break;
+            }
+        }
+        issues.AddRange(tails);
         return res;
     }
 
-    /// <summary>配對 → Supports.Layout 用的 pieces（寬 = 外緣總寬，高 = 外徑 → 承托面 = 中心 − 外徑/2）。</summary>
-    public static List<SupportPiece> ToPieces(IEnumerable<ConduitPair> pairs) => pairs.Select(p => new SupportPiece
-    {
-        Id = p.Id, Start = (double[])p.Start.Clone(), End = (double[])p.End.Clone(), WidthMm = p.OuterWidthMm, HeightMm = p.OuterDiameterMm,
-    }).ToList();
+    /// <summary>配對（與單管）→ Supports.Layout 用的 pieces（寬 = 外緣總寬，高 = 外徑 → 承托面 = 中心 − 外徑/2）。
+    /// 配對 id 含「+」，單管 id = 配管 id，兩者不會重複。</summary>
+    public static List<SupportPiece> ToPieces(IEnumerable<ConduitPair> pairs, IEnumerable<ConduitSingle>? singles = null) =>
+        pairs.Select(p => new SupportPiece
+        {
+            Id = p.Id, Start = (double[])p.Start.Clone(), End = (double[])p.End.Clone(), WidthMm = p.OuterWidthMm, HeightMm = p.OuterDiameterMm,
+        }).Concat((singles ?? Enumerable.Empty<ConduitSingle>()).Select(p => new SupportPiece
+        {
+            Id = p.Id, Start = (double[])p.Start.Clone(), End = (double[])p.End.Clone(), WidthMm = p.OuterWidthMm, HeightMm = p.OuterDiameterMm,
+        })).ToList();
 
     /// <summary>(實測橫擔長度, 族橫擔參數值)，mm。依校正：實測 = ratio × 參數 + offset。</summary>
-    public static (double LengthMm, double ParamMm) CrossMember(HangerConfig baseCfg, ConduitConfig cc)
+    public static (double LengthMm, double ParamMm) CrossMember(HangerConfig baseCfg, ConduitConfig cc, bool single = false)
     {
-        var v = cc.CrossMemberValueMm;
-        return cc.CrossMemberBasis == "parameter"
+        if (single && cc.SingleCrossMemberValueMm is null) throw new InvalidOperationException("cross_member_single 未設定，不能放單管吊架");
+        var v = single ? cc.SingleCrossMemberValueMm!.Value : cc.CrossMemberValueMm;
+        var basis = single ? cc.SingleCrossMemberBasis : cc.CrossMemberBasis;
+        return basis == "parameter"
             ? (R3(baseCfg.CrossRatio * v + baseCfg.CrossOffsetMm), R3(v))
             : (R3(v), R3((v - baseCfg.CrossOffsetMm) / baseCfg.CrossRatio));
     }
 
     /// <summary>支撐點 → 族插入點／旋轉／尺寸：沿用橋架設定的族實測值，但不加寬，橫擔長度固定為設定值。</summary>
-    public static Placement Place(SupportPoint sp, HangerConfig baseCfg, ConduitConfig cc)
+    public static Placement Place(SupportPoint sp, HangerConfig baseCfg, ConduitConfig cc, bool single = false)
     {
         double px = sp.PointMm[0], py = sp.PointMm[1], bz = sp.BearingZMm;
         return new Placement(
             P3(new[] { px, py, bz }),
             P3(new[] { px, py, bz - baseCfg.InsertionToBearingMm }),
             Supports.Norm360(sp.DirectionDeg + baseCfg.OrientationCorrectionDeg),
-            CrossMember(baseCfg, cc).LengthMm,
+            CrossMember(baseCfg, cc, single).LengthMm,
             baseCfg.RodMode == "fixed" && baseCfg.RodLengthMm is double r ? R3(r) : null);
+    }
+
+    // ── 去重鍵（寫入 Extensible Storage 的 TrayUniqueId 欄位）──
+    public const string PairKeyPrefix = "conduit-pair:";
+    public const string SingleKeyPrefix = "conduit-single:";
+
+    public static string PairKey(string uidA, string uidB)
+    {
+        var u = new[] { uidA, uidB }.OrderBy(x => x, StringComparer.Ordinal).ToArray();
+        return $"{PairKeyPrefix}{u[0]}|{u[1]}";
+    }
+
+    public static string SingleKey(string uid) => SingleKeyPrefix + uid;
+
+    /// <summary>配管吊架鍵 → 涵蓋的配管 UniqueId；非配管鍵（橋架）→ 空。</summary>
+    public static string[] KeyConduits(string? key) =>
+        key is null ? Array.Empty<string>()
+        : key.StartsWith(PairKeyPrefix, StringComparison.Ordinal) ? key[PairKeyPrefix.Length..].Split('|')
+        : key.StartsWith(SingleKeyPrefix, StringComparison.Ordinal) ? new[] { key[SingleKeyPrefix.Length..] }
+        : Array.Empty<string>();
+
+    /// <summary>同一支配管已被「不同組合」（配對↔單管、或與另一支配對）的本工具吊架承托 → 那些吊架 id（依輸入順序）。
+    /// 呼叫端把該計畫標為待確認，不重複吊掛；不刪除、不修改既有吊架。</summary>
+    public static List<string> CoveringHangers(string plannedKey, IEnumerable<ExistingHanger> existing)
+    {
+        var mine = new HashSet<string>(KeyConduits(plannedKey), StringComparer.Ordinal);
+        if (mine.Count == 0) return new List<string>();
+        return existing.Where(e => e.Source == "tool" && e.TrayKey != plannedKey && KeyConduits(e.TrayKey).Any(mine.Contains)).Select(e => e.Id).ToList();
     }
 }

@@ -17,7 +17,6 @@ namespace MepTray.Revit;
 public static class ConduitHangerPlacer
 {
     public const string ToolVersion = "conduit-hangers-v1";
-    public const string PairKeyPrefix = "conduit-pair:";
 
     static double[] Mm(XYZ p) => new[] { Units.FeetToMm(p.X), Units.FeetToMm(p.Y), Units.FeetToMm(p.Z) };
 
@@ -55,11 +54,7 @@ public static class ConduitHangerPlacer
     }
 
     /// <summary>配對的穩定識別（寫入 Extensible Storage 的 TrayUniqueId 欄位，供重跑去重）：兩支配管 UniqueId 排序後串接。</summary>
-    public static string PairKey(Conduit a, Conduit b)
-    {
-        var u = new[] { a.UniqueId, b.UniqueId }.OrderBy(x => x, StringComparer.Ordinal).ToArray();
-        return $"{PairKeyPrefix}{u[0]}|{u[1]}";
-    }
+    public static string PairKey(Conduit a, Conduit b) => ConduitHangers.PairKey(a.UniqueId, b.UniqueId);
 
     // 計畫（不改模型）
     public static HangerRunReport Plan(Document doc, IEnumerable<ElementId> ids, HangerConfig cfg, ConduitConfig cc, out HangerPlacer.Resolved? resolved)
@@ -76,16 +71,28 @@ public static class ConduitHangerPlacer
         var pr = ConduitHangers.Pair(inputs, cc);
         rep.LayoutIssues.AddRange(pr.Issues);
         var keys = pr.Pairs.ToDictionary(p => p.Id, p => PairKey(conduits[p.A], conduits[p.B]));
+        foreach (var sg in pr.Singles) keys[sg.Id] = ConduitHangers.SingleKey(conduits[sg.Conduit].UniqueId);
+        var singleIds = new HashSet<string>(pr.Singles.Select(x => x.Id));
         foreach (var p in pr.Pairs)
             rep.Notes.Add($"配對 {p.Id}：重疊 {p.OverlapMm:F0} mm，中心距 {p.CenterDistanceMinMm:F1}–{p.CenterDistanceMaxMm:F1} mm，外緣總寬 {p.OuterWidthMm:F1} mm ≤ 橫擔 {cc.CrossMemberValueMm:F0} mm");
-        var lay = Supports.Layout(ConduitHangers.ToPieces(pr.Pairs), new List<SupportLink>(), cfg);
+        foreach (var sg in pr.Singles)
+            rep.Notes.Add($"單管 {sg.Id}：長 {sg.LengthMm:F0} mm，外徑 {sg.OuterDiameterMm:F1} mm（吊架中心在管軸）");
+        var lay = Supports.Layout(ConduitHangers.ToPieces(pr.Pairs, pr.Singles), new List<SupportLink>(), cfg);
         rep.LayoutIssues.AddRange(lay.Issues);
         var plan = lay.Supports.Select(s => new PlannedKey(keys[s.PieceId], s.StationMm, s.PointMm, s.DirectionDeg)).ToList();
-        var cls = Supports.Classify(plan, HangerPlacer.ReadExisting(doc, cfg.FamilyName), cfg.DedupeToleranceMm, cfg.DedupeAngleToleranceDeg);
+        var existing = HangerPlacer.ReadExisting(doc, cfg.FamilyName);
+        var cls = Supports.Classify(plan, existing, cfg.DedupeToleranceMm, cfg.DedupeAngleToleranceDeg);
+        // 同一支配管已被其他組合（配對↔單管、或與另一支配對）的本工具吊架承托 → 待確認，不重複吊掛
+        for (int i = 0; i < cls.Count; i++)
+        {
+            if (cls[i].Status != "new") continue;
+            var cover = ConduitHangers.CoveringHangers(plan[i].TrayKey, existing);
+            if (cover.Count > 0) cls[i] = new Classification("pending", cover, "該配管已有其他組合（配對／單管）的本工具吊架，不重複吊掛");
+        }
         for (int i = 0; i < lay.Supports.Count; i++)
         {
             var s = lay.Supports[i];
-            var pl = ConduitHangers.Place(s, cfg, cc);
+            var pl = ConduitHangers.Place(s, cfg, cc, singleIds.Contains(s.PieceId));
             rep.Items.Add(new HangerItem
             {
                 SupportId = s.Id, TrayId = s.PieceId, TrayUniqueId = keys[s.PieceId], StationMm = s.StationMm,
@@ -97,12 +104,19 @@ public static class ConduitHangerPlacer
         }
         var (len, param) = ConduitHangers.CrossMember(cfg, cc);
         rep.Notes.Add($"橫擔：族參數「{cfg.CrossMemberLength?.Name}」= {param:F1} mm、依校正實測長度 {len:F1} mm（cross_member.basis={cc.CrossMemberBasis}；不加寬，忽略橋架設定的 widen_left/right）");
+        if (cc.SingleCrossMemberValueMm is not null)
+        {
+            var (sl, sp) = ConduitHangers.CrossMember(cfg, cc, single: true);
+            rep.Notes.Add($"單管橫擔：族參數「{cfg.CrossMemberLength?.Name}」= {sp:F1} mm、依校正實測長度 {sl:F1} mm（cross_member_single.basis={cc.SingleCrossMemberBasis}；不加寬）");
+        }
+        else rep.Notes.Add("未設定 cross_member_single：單管列為待確認，不放置");
         if (rep.PreflightErrors.Count > 0) rep.Outcome = "失敗";
         return rep;
     }
 }
 
-/// <summary>「選取配管補吊架」：對目前選取的 Conduit，兩支並排者共用一支吊架；其餘列為待確認，不放置。不建立、不移動配管。</summary>
+/// <summary>「選取配管補吊架」：對目前選取的 Conduit，兩支並排者共用一支吊架；設定 cross_member_single 時，未配對且不曖昧的單管單獨吊掛；
+/// 其餘列為待確認，不放置。不建立、不移動配管。</summary>
 [Transaction(TransactionMode.Manual)]
 public class AddConduitHangersCommand : IExternalCommand
 {

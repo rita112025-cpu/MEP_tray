@@ -6,7 +6,9 @@
   同高程（中心高差 ≤ pairing.elevation_tolerance_mm）、外徑相同、沿管方向有重疊、並排不重疊（中心距 ≥ 外徑），
   且兩管外緣總寬（最大中心距 + 外徑）≤ 橫擔長度 cross_member.value_mm。
 - 吊架線 = 兩管中心線的中線，長度 = 重疊段；不重疊的尾段列為待確認，不放置。
-- 任一支配管可與多支配成對 → 不猜測，全部列為待確認（ambiguous_pair）；單管／不符條件者列為待確認（unpaired），不放置。
+- 任一支配管可與多支配成對 → 不猜測，全部列為待確認（ambiguous_pair）；不符條件者列為待確認（unpaired），不放置。
+- 單管（使用者決定 2026-10-18）：設定 cross_member_single 時，未配成對且非曖昧的有效配管單獨吊掛（吊架中心在管軸、全長）；
+  未設定時單管仍列待確認（與先前相同）。重疊段外的尾段仍列待確認，不轉成單管。
 - 間距、起終內縮、固定間距與餘數待確認、去重、族與校正全部沿用橋架吊架設定（base_config），本模組不改變其行為。
 - 本模組不含任何規範數值預設；設定缺漏即拒絕並指出欄位。
 """
@@ -67,6 +69,18 @@ def validate_conduit_config(cfg) -> list[str]:
             e.append("cross_member.value_mm：需為 > 0 的有限數")
         if cm.get("basis") not in CROSS_BASES:
             e.append("cross_member.basis：需為 parameter（值直接寫入族的橫擔長度參數）或 measured_length（實測橫擔長度，經校正換算）")
+    if "cross_member_single" in cfg:        # 選填；未填 = 單管不放置（列待確認），與先前相同
+        cs = cfg["cross_member_single"]
+        if not isinstance(cs, dict):
+            e.append("cross_member_single：需為 {\"value_mm\": 單管橫擔長度, \"basis\": parameter|measured_length}（不放單管吊架時整個欄位省略）")
+        else:
+            v = cs.get("value_mm")
+            if v is None:
+                e.append("cross_member_single.value_mm：缺少")
+            elif not _num(v) or v <= 0:
+                e.append("cross_member_single.value_mm：需為 > 0 的有限數")
+            if cs.get("basis") not in CROSS_BASES:
+                e.append("cross_member_single.basis：需為 parameter 或 measured_length")
     pr = cfg.get("pairing")
     if not isinstance(pr, dict):
         e.append("pairing：缺少（angle_tolerance_deg、elevation_tolerance_mm）")
@@ -95,6 +109,28 @@ def _angle_deg(u, v) -> float:
     return math.degrees(math.acos(c))
 
 
+def _lateral(a: dict, s0, e0):
+    """線段 s0→e0 投影到 a 的軸上：重疊區 [lo, hi]（a 的 station）與兩端的側向距離（有號）。沒有重疊 → None。
+    dmin：重疊區內最小側向距離（跨越軸線時為 0）。"""
+    u, o = a["u"], a["start"]
+    n = (-u[1], u[0])
+    tb0 = (s0[0] - o[0]) * u[0] + (s0[1] - o[1]) * u[1]
+    tb1 = (e0[0] - o[0]) * u[0] + (e0[1] - o[1]) * u[1]
+    lo, hi = max(0.0, min(tb0, tb1)), min(a["len"], max(tb0, tb1))
+    if hi - lo <= GEOM_TOL_MM or abs(tb1 - tb0) <= 1e-12:
+        return None
+
+    def lat(t):
+        f = (t - tb0) / (tb1 - tb0)
+        px = s0[0] + (e0[0] - s0[0]) * f
+        py = s0[1] + (e0[1] - s0[1]) * f
+        return (px - o[0]) * n[0] + (py - o[1]) * n[1]
+
+    dlo, dhi = lat(lo), lat(hi)
+    dmin = 0.0 if dlo * dhi < 0 else min(abs(dlo), abs(dhi))
+    return {"lo": lo, "hi": hi, "dlo": dlo, "dhi": dhi, "tb0": tb0, "tb1": tb1, "dmin": dmin}
+
+
 def _check(a: dict, b: dict, ccfg: dict) -> dict:
     """a、b 是否可配對。回傳 {ok, code, detail, ...幾何}；依序檢查，第一個不符即回傳。"""
     pr = ccfg["pairing"]
@@ -106,24 +142,10 @@ def _check(a: dict, b: dict, ccfg: dict) -> dict:
         return {"ok": False, "code": "elevation_mismatch", "detail": f"中心高差 {dz:.1f} mm"}
     if abs(a["od"] - b["od"]) > GEOM_TOL_MM:
         return {"ok": False, "code": "diameter_mismatch", "detail": f"外徑 {a['od']:.1f} / {b['od']:.1f} mm"}
-    u, o = a["u"], a["start"]
-    n = (-u[1], u[0])
-
-    def proj(p):
-        return (p[0] - o[0]) * u[0] + (p[1] - o[1]) * u[1]
-
-    tb0, tb1 = proj(b["start"]), proj(b["end"])
-    lo, hi = max(0.0, min(tb0, tb1)), min(a["len"], max(tb0, tb1))
-    if hi - lo <= GEOM_TOL_MM:
+    lt = _lateral(a, b["start"], b["end"])
+    if lt is None:
         return {"ok": False, "code": "no_overlap", "detail": "沿管方向沒有重疊段"}
-
-    def lat(t):
-        f = (t - tb0) / (tb1 - tb0)
-        px = b["start"][0] + (b["end"][0] - b["start"][0]) * f
-        py = b["start"][1] + (b["end"][1] - b["start"][1]) * f
-        return (px - o[0]) * n[0] + (py - o[1]) * n[1]
-
-    dlo, dhi = lat(lo), lat(hi)
+    lo, hi, dlo, dhi, tb0, tb1 = lt["lo"], lt["hi"], lt["dlo"], lt["dhi"], lt["tb0"], lt["tb1"]
     dmin, dmax = min(abs(dlo), abs(dhi)), max(abs(dlo), abs(dhi))
     od = a["od"]
     if dlo * dhi < 0 or dmin < od - GEOM_TOL_MM:
@@ -139,7 +161,9 @@ def _check(a: dict, b: dict, ccfg: dict) -> dict:
 
 def pair_conduits(conduits: list[dict], ccfg: dict) -> dict:
     """conduits: [{id, start, end, trade_size_mm, outer_diameter_mm}]（Revit 內部座標 mm，依輸入順序）。
-    回傳 {pairs: [...], issues: [...]}；issues 的 piece_id 為配管 id 或配對 id。"""
+    回傳 {pairs: [...], singles: [...], issues: [...]}；issues 的 piece_id 為配管 id 或配對 id。
+    singles 只在設定 cross_member_single 時產生：未配成對、且非曖昧（ambiguous）的有效配管，
+    若其單管橫擔與鄰近配對吊架／其他未配對配管在平面上可能重疊 → single_conflict 待確認，不放置。"""
     issues: list[dict] = []
     ok: list[dict] = []
     allowed = [float(v) for v in ccfg["allowed_trade_sizes_mm"]]
@@ -193,25 +217,8 @@ def pair_conduits(conduits: list[dict], ccfg: dict) -> dict:
         cnt[j] += 1
     accepted = [(i, j, r) for i, j, r in cands if cnt[i] == 1 and cnt[j] == 1]
     paired = {k for i, j, _ in accepted for k in (i, j)}
-    for i, j, r in fails:            # 只對兩支都沒配成對者回報（已各自配對的遠處配管不必提示）
-        if i in paired or j in paired:
-            continue
-        a, b = ok[i], ok[j]
-        loc = [(a["mid"][k] + b["mid"][k]) / 2 for k in range(3)]
-        issues.append(_issue("pending", r["code"], f"{a['id']}+{b['id']}", loc, r["detail"] + "，未放置"))
-    for k, c in enumerate(ok):
-        if k in paired:
-            continue
-        partners = [ok[j if i == k else i]["id"] for i, j, _ in cands if k in (i, j)]
-        if partners:
-            issues.append(_issue("pending", "ambiguous_pair", c["id"], c["mid"],
-                                 f"可與多支配管配對或對象已有其他配對（{', '.join(partners)}），不猜測，未放置"))
-        elif len(ok) == 1:
-            issues.append(_issue("pending", "unpaired", c["id"], c["mid"], "單支配管（需兩支並排共用吊架），未放置"))
-        else:
-            issues.append(_issue("pending", "unpaired", c["id"], c["mid"],
-                                 "找不到可配對的配管（" + "; ".join(reasons[c["id"]]) + "），未放置"))
-    pairs = []
+
+    pairs, tails = [], []
     for i, j, r in accepted:
         a, b = ok[i], ok[j]
         u, o, n = a["u"], a["start"], (-a["u"][1], a["u"][0])
@@ -226,7 +233,7 @@ def pair_conduits(conduits: list[dict], ccfg: dict) -> dict:
                       "outer_diameter_mm": _r3(a["od"]), "bearing_z_mm": _r3(z - a["od"] / 2)})
         bmin, bmax = min(r["tb0"], r["tb1"]), max(r["tb0"], r["tb1"])
 
-        def at(c, t):
+        def at(c, t, a=a, b=b, r=r, u=u, o=o):
             if c is a:
                 return [o[0] + u[0] * t, o[1] + u[1] * t, a["z"]]
             f = (t - r["tb0"]) / (r["tb1"] - r["tb0"])
@@ -234,31 +241,139 @@ def pair_conduits(conduits: list[dict], ccfg: dict) -> dict:
 
         for c, t0, t1 in ((a, 0.0, lo), (a, hi, a["len"]), (b, bmin, lo), (b, hi, bmax)):
             if t1 - t0 > GEOM_TOL_MM:
-                issues.append(_issue("pending", "unsupported_tail", c["id"], at(c, (t0 + t1) / 2),
-                                     f"{pid} 重疊段外的尾段 {t1 - t0:.1f} mm 未放吊架（單管段，待確認）"))
-    return {"pairs": pairs, "issues": issues}
+                tails.append(_issue("pending", "unsupported_tail", c["id"], at(c, (t0 + t1) / 2),
+                                    f"{pid} 重疊段外的尾段 {t1 - t0:.1f} mm 未放吊架（單管段，待確認）"))
+
+    # 每支未配成對的配管：ambiguous（有候選但不唯一，不猜測）／single 候選（設定 cross_member_single 時）／unpaired
+    single = ccfg.get("cross_member_single")
+    status: dict[int, str] = {}
+    for k in range(len(ok)):
+        if k in paired:
+            continue
+        partners = [x for x in cands if k in (x[0], x[1])]
+        status[k] = "ambiguous" if partners else ("single" if single is not None else "unpaired")
+    conflicts: dict[int, list[str]] = {}
+    if single is not None:
+        ws = float(single["value_mm"])
+        wp = float(ccfg["cross_member"]["value_mm"])
+        pr = ccfg["pairing"]
+
+        def near(c, other_u, other_z, s0, e0, limit):
+            if _angle_deg(c["u"], other_u) > pr["angle_tolerance_deg"] + 1e-9:
+                return False
+            if abs(c["z"] - other_z) > pr["elevation_tolerance_mm"] + 1e-9:
+                return False
+            lt = _lateral(c, s0, e0)
+            return lt is not None and lt["dmin"] + GEOM_TOL_MM < limit
+
+        for k, st_ in status.items():
+            if st_ != "single":
+                continue
+            c = ok[k]
+            hit = []
+            for (i, j, _), p in zip(accepted, pairs):      # 鄰近配對吊架：兩橫擔（各以中心線為中心）在平面上重疊
+                if near(c, ok[i]["u"], ok[i]["z"], p["start"], p["end"], (ws + wp) / 2):
+                    hit.append(p["id"])
+            for m, other in enumerate(ok):                  # 其他未配對配管：單管橫擔彼此重疊／管體重疊
+                if m == k or m in paired:
+                    continue
+                if near(c, other["u"], other["z"], other["start"], other["end"], ws):
+                    hit.append(other["id"])
+            if hit:
+                conflicts[k] = hit
+                status[k] = "single_conflict"
+    hung = paired | {k for k, v in status.items() if v == "single"}
+    for i, j, r in fails:            # 只對兩支都沒吊架者回報（已各自配對／單管吊架者不必提示）
+        if i in hung or j in hung:
+            continue
+        a, b = ok[i], ok[j]
+        loc = [(a["mid"][k] + b["mid"][k]) / 2 for k in range(3)]
+        issues.append(_issue("pending", r["code"], f"{a['id']}+{b['id']}", loc, r["detail"] + "，未放置"))
+    singles = []
+    for k, c in enumerate(ok):
+        st_ = status.get(k)
+        if st_ is None:
+            continue
+        if st_ == "ambiguous":
+            partners = [ok[j if i == k else i]["id"] for i, j, _ in cands if k in (i, j)]
+            issues.append(_issue("pending", "ambiguous_pair", c["id"], c["mid"],
+                                 f"可與多支配管配對或對象已有其他配對（{', '.join(partners)}），不猜測，未放置"))
+        elif st_ == "unpaired":
+            if len(ok) == 1:
+                issues.append(_issue("pending", "unpaired", c["id"], c["mid"], "單支配管（需兩支並排共用吊架），未放置"))
+            else:
+                issues.append(_issue("pending", "unpaired", c["id"], c["mid"],
+                                     "找不到可配對的配管（" + "; ".join(reasons[c["id"]]) + "），未放置"))
+        elif st_ == "single_conflict":
+            issues.append(_issue("pending", "single_conflict", c["id"], c["mid"],
+                                 f"單管吊架橫擔可能與鄰近吊架／配管重疊（{', '.join(conflicts[k])}），未放置"))
+        else:
+            z = c["z"]
+            singles.append({"id": c["id"], "conduit": c["id"], "start": _p3(c["start"]), "end": _p3(c["end"]),
+                            "length_mm": _r3(c["len"]), "outer_diameter_mm": _r3(c["od"]), "outer_width_mm": _r3(c["od"]),
+                            "bearing_z_mm": _r3(z - c["od"] / 2)})
+    issues.extend(tails)
+    return {"pairs": pairs, "singles": singles, "issues": issues}
 
 
-def conduit_pieces(pairs: list[dict]) -> list[dict]:
-    """配對 → supports.layout 用的 pieces（寬 = 外緣總寬，高 = 外徑 → 承托面 = 中心 − 外徑/2）。"""
+def conduit_pieces(pairs: list[dict], singles: list[dict] | None = None) -> list[dict]:
+    """配對（與單管）→ supports.layout 用的 pieces（寬 = 外緣總寬，高 = 外徑 → 承托面 = 中心 − 外徑/2）。
+    配對 id 含「+」，單管 id = 配管 id，兩者不會重複。"""
     return [{"id": p["id"], "start": list(p["start"]), "end": list(p["end"]), "width_mm": p["outer_width_mm"],
-             "height_mm": p["outer_diameter_mm"], "start_kind": "free", "end_kind": "free"} for p in pairs]
+             "height_mm": p["outer_diameter_mm"], "start_kind": "free", "end_kind": "free"} for p in list(pairs) + list(singles or [])]
 
 
-def cross_member_values(base_cfg: dict, ccfg: dict) -> tuple[float, float]:
-    """回傳 (實測橫擔長度 mm, 族橫擔參數值 mm)。依校正：實測 = ratio × 參數 + offset。"""
+def cross_member_values(base_cfg: dict, ccfg: dict, single: bool = False) -> tuple[float, float]:
+    """回傳 (實測橫擔長度 mm, 族橫擔參數值 mm)。依校正：實測 = ratio × 參數 + offset。single=True 用 cross_member_single。"""
     cm = base_cfg["calibration"]["cross_member_model"]
     ratio, off = float(cm["ratio"]), float(cm["offset_mm"])
-    v = float(ccfg["cross_member"]["value_mm"])
-    if ccfg["cross_member"]["basis"] == "parameter":
+    c = ccfg["cross_member_single"] if single else ccfg["cross_member"]
+    v = float(c["value_mm"])
+    if c["basis"] == "parameter":
         return _r3(ratio * v + off), _r3(v)
     return _r3(v), _r3((v - off) / ratio)
 
 
-def conduit_placement(support: dict, base_cfg: dict, ccfg: dict) -> dict:
-    """支撐點 → 族插入點／旋轉／尺寸。沿用橋架設定的族實測值（插入點、修正角、吊桿），但不加寬、橫擔長度固定。"""
+def conduit_placement(support: dict, base_cfg: dict, ccfg: dict, single: bool = False) -> dict:
+    """支撐點 → 族插入點／旋轉／尺寸。沿用橋架設定的族實測值（插入點、修正角、吊桿），但不加寬、橫擔長度固定
+    （配對 = cross_member；單管 = cross_member_single）。"""
     p = S.placement(support, dict(base_cfg, widen_left_mm=0.0, widen_right_mm=0.0))
-    length, param = cross_member_values(base_cfg, ccfg)
+    length, param = cross_member_values(base_cfg, ccfg, single)
     p["cross_member_length_mm"] = length
     p["cross_member_param_mm"] = param
     return p
+
+
+# ---------------------------------------------------------------- 去重鍵（寫入 Extensible Storage 的 TrayUniqueId 欄位）
+PAIR_KEY_PREFIX = "conduit-pair:"
+SINGLE_KEY_PREFIX = "conduit-single:"
+
+
+def pair_key(uid_a: str, uid_b: str) -> str:
+    a, b = sorted((uid_a, uid_b))
+    return f"{PAIR_KEY_PREFIX}{a}|{b}"
+
+
+def single_key(uid: str) -> str:
+    return f"{SINGLE_KEY_PREFIX}{uid}"
+
+
+def key_conduits(key) -> list[str]:
+    """配管吊架鍵 → 涵蓋的配管 UniqueId；非配管鍵（橋架）→ []。"""
+    if not isinstance(key, str):
+        return []
+    if key.startswith(PAIR_KEY_PREFIX):
+        return key[len(PAIR_KEY_PREFIX):].split("|")
+    if key.startswith(SINGLE_KEY_PREFIX):
+        return [key[len(SINGLE_KEY_PREFIX):]]
+    return []
+
+
+def covering_hangers(planned_key: str, existing: list[dict]) -> list[str]:
+    """同一支配管已被「不同組合」（配對↔單管、或與另一支配對）的本工具吊架承托 → 回傳那些吊架 id（依輸入順序）。
+    呼叫端把該計畫標為待確認，不重複吊掛；不刪除、不修改既有吊架。"""
+    mine = set(key_conduits(planned_key))
+    if not mine:
+        return []
+    return [e["id"] for e in existing if e.get("source") == "tool" and e.get("tray_key") != planned_key
+            and mine & set(key_conduits(e.get("tray_key")))]
