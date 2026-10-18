@@ -262,3 +262,19 @@ def test_csharp_conduit_contract(tmp_path):
         os.environ.pop("MEPTRAY_CONDUIT_CONTRACT", None)
     assert r.returncode == 0 and "ALL PASS" in r.stdout, r.stdout[-4000:] + r.stderr[-1000:]
     assert r.stdout.count("配管契約[") >= 30
+
+
+def test_level_placement_corrects_z_and_still_verifies_readback():
+    """實測 2026-10-18：Level 標高 −3600 mm 時 NewFamilyInstance(XYZ, symbol, Level) 落點低 3600 mm → 讀回驗證失敗。
+    level 模式建立後必須讀回 LocationPoint 並垂直校正（只動剛建立的實例），之後仍保留原讀回驗證。"""
+    placer = (SRC / "HangerPlacer.cs").read_text(encoding="utf-8")
+    m = re.search(r"public static FamilyInstance PlaceInstance\(.*?\n    }\n", placer, flags=re.S)
+    assert m, "PlaceInstance"
+    body = m.group(0)
+    lvl = body[body.index('if (mode == "level")'):body.index("else")]
+    i_new = lvl.index("NewFamilyInstance(ins, sym, lvl")
+    i_move = lvl.index("ElementTransformUtils.MoveElement(doc, fi.Id, new XYZ(0, 0, dz))")
+    assert i_new < lvl.index("lp0.Point.Z") < i_move
+    assert "zNotes" in body and "PlaceInstance(doc, sym, cfg.PlacementMode, ins, it.RotationDeg, planes, levels, zNotes)" in placer
+    assert "讀回插入點" in placer and "ReadbackTolMm" in placer                     # 讀回驗證仍在
+    assert ".Delete(" not in body

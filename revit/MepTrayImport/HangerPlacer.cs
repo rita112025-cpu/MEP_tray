@@ -82,6 +82,7 @@ public static class HangerPlacer
     static readonly Guid SchemaGuid = new("4b6f2a1e-8d3c-4f57-9a0b-6e2d1c7f3a95");
     const double ReadbackTolMm = 0.5;
     const double ReadbackTolDeg = 0.05;
+    const double LevelZTolFt = 1e-6;   // 約 0.0003 mm；只用來判斷是否需要校正，校正後仍以 ReadbackTolMm 讀回驗證
 
     static string F(double v) => v.ToString("R", CultureInfo.InvariantCulture);
     static double[] Mm(XYZ p) => new[] { Units.FeetToMm(p.X), Units.FeetToMm(p.Y), Units.FeetToMm(p.Z) };
@@ -283,6 +284,7 @@ public static class HangerPlacer
         if (levels.Count == 0) throw new InvalidOperationException("文件中沒有任何 Level");
         var typeCache = new Dictionary<string, FamilySymbol>();
         var planes = new Dictionary<long, SketchPlane>();
+        var zNotes = new List<string>();
         foreach (var it in rep.Items.Where(i => i.Status == "new"))
         {
             using var sub = new SubTransaction(doc);
@@ -294,7 +296,7 @@ public static class HangerPlacer
                     sym = ToolType(doc, res.Symbol, cfg, it, typeCache);
                 if (!sym.IsActive) { sym.Activate(); doc.Regenerate(); }
                 var ins = Ft(it.InsertionPointMm);
-                var fi = PlaceInstance(doc, sym, cfg.PlacementMode, ins, it.RotationDeg, planes, levels);
+                var fi = PlaceInstance(doc, sym, cfg.PlacementMode, ins, it.RotationDeg, planes, levels, zNotes);
                 if (cfg.CrossMemberLength.Scope == "instance") SetLen(fi, cfg.CrossMemberLength.Name, CrossParamMm(cfg, it.CrossMemberLengthMm), "橫擔長度");
                 if (cfg.RodMode == "fixed" && cfg.RodParam!.Scope == "instance") SetLen(fi, cfg.RodParam.Name, it.RodLengthMm!.Value, "吊桿長度");
                 doc.Regenerate();
@@ -330,6 +332,7 @@ public static class HangerPlacer
                 it.Detail = $"{ex.GetType().Name}: {ex.Message}（僅此支回滾）";
             }
         }
+        foreach (var g in zNotes.GroupBy(x => x)) rep.Notes.Add(g.Count() > 1 ? $"{g.Key}（{g.Count()} 支）" : g.Key);
         var created = rep.Count("created");
         var failed = rep.Count("failed");
         rep.Outcome = failed == 0 ? "完成" : created > 0 ? "部分完成" : "失敗";
@@ -338,9 +341,12 @@ public static class HangerPlacer
     /// <summary>目標橫擔總長 → 參數值（依校正量測的線性關係：範圍 = ratio × 參數 + offset）。</summary>
     public static double CrossParamMm(HangerConfig cfg, double lengthMm) => (lengthMm - cfg.CrossOffsetMm) / cfg.CrossRatio;
 
-    /// <summary>放置單一實例並旋轉（Execute 與「校正目標吊架」共用）。</summary>
+    /// <summary>放置單一實例並旋轉（Execute 與「校正目標吊架」共用）。
+    /// level 模式：NewFamilyInstance(XYZ, symbol, Level, …) 建立後的實際高程可能與目標 Z 相差所選 Level 的標高
+    /// （實測 2026-10-18：Level 標高 −3600 mm 時落點恰低 3600 mm；標高 0 的 Level 不會出現）。因此建立後讀回 LocationPoint，
+    /// 若 Z 與目標不同即垂直平移校正（只移動本工具剛建立的實例）；校正量記入 zNotes。標高 0 時不移動，行為與先前相同。</summary>
     public static FamilyInstance PlaceInstance(Document doc, FamilySymbol sym, string mode, XYZ ins, double rotationDeg,
-                                               Dictionary<long, SketchPlane> planes, List<Level>? levels = null)
+                                               Dictionary<long, SketchPlane> planes, List<Level>? levels = null, List<string>? zNotes = null)
     {
         levels ??= new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>().OrderBy(l => l.Elevation).ToList();
         if (levels.Count == 0) throw new InvalidOperationException("文件中沒有任何 Level");
@@ -350,6 +356,16 @@ public static class HangerPlacer
         {
             var lvl = levels.LastOrDefault(l => l.Elevation <= ins.Z + 1e-9) ?? levels[0];
             fi = doc.Create.NewFamilyInstance(ins, sym, lvl, StructuralType.NonStructural);
+            doc.Regenerate();
+            if (fi.Location is LocationPoint lp0)
+            {
+                var dz = ins.Z - lp0.Point.Z;
+                if (Math.Abs(dz) > LevelZTolFt)
+                {
+                    ElementTransformUtils.MoveElement(doc, fi.Id, new XYZ(0, 0, dz));
+                    zNotes?.Add($"level 放置落點 Z 與目標差 {Units.FeetToMm(-dz):F1} mm（Level「{lvl.Name}」標高 {Units.FeetToMm(lvl.Elevation):F1} mm），已垂直平移校正");
+                }
+            }
         }
         else
         {
