@@ -80,6 +80,7 @@ static class SupportTests
         bool threw = false;
         try { HangerConfigReader.Read(new JsonObject(), false); } catch (InvalidDataException) { threw = true; }
         Check(threw, "設定不完整時拒絕執行");
+        TestFailNth(Check);
         // 去重／重跑
         var plan = fw.Supports.Select(s => new PlannedKey("T1", s.StationMm, s.PointMm, s.DirectionDeg)).ToList();
         var ex = fw.Supports.Select(s => new ExistingHanger("e" + s.Id, "tool", "T1", s.StationMm, s.PointMm, s.DirectionDeg)).ToList();
@@ -92,6 +93,64 @@ static class SupportTests
         Check(Supports.AngleCompatible(0, 180, 1) && !Supports.AngleCompatible(0, 90, 1), "方向相容以 180° 對稱判定");
 
         if (contractPath != null) RunContract(Check, contractPath);
+    }
+
+    // 合格的放置設定（以字串解析，與讀檔相同的 JsonElement 路徑）
+    const string PlaceJson = """
+        {"units": "mm", "max_spacing_mm": 1350.0, "start_offset_mm": 300.0, "end_offset_mm": 300.0, "short_run_policy": "midpoint",
+         "near_fitting": {"enabled": false}, "supported_object": "cable_tray", "family": {"family_name": "F", "type_name": "T"},
+         "placement_mode": "level", "widen_left_mm": 50.0, "widen_right_mm": 50.0, "insertion_to_bearing_mm": 40.0,
+         "orientation_correction_deg": 90.0, "parameter_map": {"cross_member_length": {"name": "P", "scope": "type"}},
+         "rod_length": {"mode": "none"}, "dedupe": {"tolerance_mm": 5.0, "angle_tolerance_deg": 2.0},
+         "calibration": {"family_file": {"path": "X:/f.rfa", "size": 1, "sha256": "ab"}, "family_name": "F", "type_name": "T",
+                         "project_signature": "cd", "cross_member_model": {"ratio": 1.0, "offset_mm": 0.0}}}
+        """;
+
+    static JsonObject PlaceCfg(string? testFailNthLiteral = null)
+    {
+        var o = JsonNode.Parse(PlaceJson)!.AsObject();
+        if (testFailNthLiteral != null) o["test_fail_nth"] = JsonNode.Parse(testFailNthLiteral);
+        return o;
+    }
+
+    /// <summary>驗收用測試開關 test_fail_nth：未填 = 關閉；只接受 ≥ 1 的整數字面；不影響佈置與族座標換算。</summary>
+    static void TestFailNth(Action<bool, string> Check)
+    {
+        Check(HangerConfigReader.ValidatePlacement(PlaceCfg()).Count == 0 && HangerConfigReader.Read(PlaceCfg(), true).TestFailNth is null,
+              "test_fail_nth 未填：設定合格且開關關閉");
+        foreach (var (lit, n) in new[] { ("1", 1L), ("2", 2L), ("9223372036854775807", long.MaxValue) })
+            Check(HangerConfigReader.ValidatePlacement(PlaceCfg(lit)).Count == 0 && HangerConfigReader.Read(PlaceCfg(lit), true).TestFailNth == n,
+                  $"test_fail_nth={lit} 被接受");
+        foreach (var lit in new[] { "0", "-1", "2.0", "1.5", "1e3", "\"2\"", "true", "null", "[2]", "{}", "9223372036854775808" })
+        {
+            var errs = HangerConfigReader.ErrorFields(HangerConfigReader.ValidatePlacement(PlaceCfg(lit)));
+            Check(errs.SequenceEqual(new[] { "test_fail_nth" }), $"test_fail_nth={lit} 被拒絕且只點名該欄位: {string.Join(",", errs)}");
+        }
+        bool threw = false;
+        try { HangerConfigReader.Read(PlaceCfg("0"), true); } catch (InvalidDataException ex) { threw = ex.Message.Contains("test_fail_nth"); }
+        Check(threw, "test_fail_nth 無效時拒絕執行並點名欄位");
+        Check(HangerConfigReader.ValidateLayout(PlaceCfg("0")).Count == 0, "test_fail_nth 不屬於佈置欄位（layout-only 驗證不受影響）");
+        // 開關不影響佈置與族座標換算
+        var pieces = new[] { P("A", new[] { 0.0, 0, 3000 }, new[] { 6000.0, 0, 3000 }) };
+        var off = HangerConfigReader.Read(PlaceCfg(), true);
+        var on = HangerConfigReader.Read(PlaceCfg("2"), true);
+        var lo = Supports.Layout(pieces, new List<SupportLink>(), off);
+        var ln = Supports.Layout(pieces, new List<SupportLink>(), on);
+        bool same = lo.Supports.Count == ln.Supports.Count && lo.Issues.Count == ln.Issues.Count && lo.Supports.Count == 5;
+        for (int i = 0; same && i < lo.Supports.Count; i++)
+        {
+            var a = Supports.Place(lo.Supports[i], off); var b = Supports.Place(ln.Supports[i], on);
+            same = lo.Supports[i].StationMm == ln.Supports[i].StationMm && a.InsertionPointMm.SequenceEqual(b.InsertionPointMm)
+                   && a.RotationDeg == b.RotationDeg && a.CrossMemberLengthMm == b.CrossMemberLengthMm;
+        }
+        Check(same, "test_fail_nth 不改變支撐點與族插入點/旋轉/尺寸");
+        // 判定與訊息
+        Check(!TestSwitch.ShouldFail(null, 1) && TestSwitch.ShouldFail(2, 2) && !TestSwitch.ShouldFail(2, 1) && !TestSwitch.ShouldFail(2, 3),
+              "TestSwitch.ShouldFail 只在第 N 支為 true；未設定永不觸發");
+        Check(TestSwitch.FailMessage(2) == "測試開關 test_fail_nth=2：故意讓第 2 支失敗", "測試開關失敗訊息");
+        Check(TestSwitch.PreviewNote(2).StartsWith("⚠ 測試開關 test_fail_nth=2 已啟用") && TestSwitch.PreviewNote(2).Contains("僅供驗收，正式設定勿使用"),
+              "測試開關預覽警告");
+        Check(TestSwitch.NotTriggeredNote(5, 3).Contains("不會觸發"), "測試開關 N 大於新增數的附註");
     }
 
     static double[] Arr(JsonNode? n) => n!.AsArray().Select(x => x!.GetValue<double>()).ToArray();

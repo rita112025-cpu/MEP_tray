@@ -22,10 +22,17 @@ PLACEMENT_MODES = ("level", "workplane")      # face/host-based 族 v1 不支援
 SCOPES = ("type", "instance")
 ROD_MODES = ("none", "fixed")
 SUPPORTED_OBJECTS = ("cable_tray",)            # conduit 之後擴充；核心與物件種類無關
+TEST_FAIL_NTH_KEY = "test_fail_nth"            # 驗收用測試開關（選填）；只影響 Revit 放置迴圈，Python 端只驗證
+INT64_MAX = 2 ** 63 - 1                        # 與 C# long 上限一致
 
 
 def _num(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _pos_int(v) -> bool:
+    """JSON 整數字面且 ≥ 1（2.0、"2"、True 不算；與 C# HangerConfigReader.PositiveInt 一致）。"""
+    return isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= INT64_MAX
 
 
 def _str(v) -> bool:
@@ -150,6 +157,8 @@ def validate_placement_config(cfg) -> list[str]:
         v = dd.get("angle_tolerance_deg")
         if not _num(v) or v < 0 or v >= 90:
             e.append("dedupe.angle_tolerance_deg：需為 0 ≤ 值 < 90")
+    if TEST_FAIL_NTH_KEY in cfg and not _pos_int(cfg[TEST_FAIL_NTH_KEY]):
+        e.append("test_fail_nth：驗收用測試開關，需為 ≥ 1 的整數（未填 = 關閉；正式設定勿使用）")
     e += _calibration_errors(cfg)
     return e
 

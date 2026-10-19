@@ -47,6 +47,10 @@
         "angle_tolerance_deg": { "type": "number", "minimum": 0, "exclusiveMaximum": 90 }
       }
     },
+    "test_fail_nth": {
+      "type": "integer", "minimum": 1,
+      "description": "驗收用測試開關（選填；未填 = 關閉，行為完全不變）。設為 N 時，Revit 放置迴圈中本次第 N 支「新增」吊架在建立實例、設定參數、讀回驗證、寫入追蹤資料之後故意拋出例外，驗證「單支失敗只回滾該支」（部分完成）；預覽與結果最上方顯示 ⚠ 警告。需寫成整數字面（2，不可寫 2.0、\"2\"、true），否則工具拒絕執行。不影響佈置、去重、校正簽章。只加在設定檔的複本上，正式設定勿使用。"
+    },
     "calibration": {
       "type": "object",
       "required": ["family_file", "family_name", "type_name", "project_signature", "cross_member_model"],

@@ -304,6 +304,90 @@ def test_pieces_from_model_marks_fitting_ends():
     assert links == [{"a": "S002", "b": "S003", "kind": "union"}]
 
 
+# ---------- 驗收用測試開關 test_fail_nth ----------
+TEST_FAIL_NTH_BAD = (("zero", 0), ("neg", -1), ("float_int", 2.0), ("float", 1.5), ("str", "2"), ("bool", True),
+                     ("null", None), ("list", [2]), ("obj", {}), ("huge", 2 ** 63))
+TFN_MSG = "test_fail_nth：驗收用測試開關，需為 ≥ 1 的整數（未填 = 關閉；正式設定勿使用）"
+HP = ROOT / "revit" / "MepTrayImport"
+
+
+def test_fail_nth_absent_is_off_and_valid_values_pass():
+    assert "test_fail_nth" not in pcfg() and S.validate_placement_config(pcfg()) == []
+    for v in (1, 2, 50, 2 ** 63 - 1):
+        assert S.validate_placement_config(pcfg(test_fail_nth=v)) == [], v
+
+
+@pytest.mark.parametrize("name,value", TEST_FAIL_NTH_BAD)
+def test_fail_nth_invalid_rejected_and_only_that_field(name, value):
+    errs = S.validate_placement_config(pcfg(test_fail_nth=value))
+    assert errs == [TFN_MSG], name
+
+
+def test_fail_nth_json_literals_match_csharp_rules():
+    # 由 JSON 文字解析（與 Revit 讀檔相同）：2.0 / 1e3 是 float → 拒絕；2 是 int → 接受
+    for lit, ok in (("2", True), ("1", True), ("2.0", False), ("1e3", False), ("-3", False), ('"2"', False), ("true", False), ("null", False)):
+        c = pcfg()
+        c["test_fail_nth"] = json.loads(lit)
+        assert (S.validate_placement_config(c) == []) is ok, lit
+
+
+def test_fail_nth_is_not_a_layout_field_and_changes_nothing():
+    assert S.validate_layout_config(pcfg(test_fail_nth=0)) == []
+    pieces = [P("A", (0, 0, 3000), (6000, 0, 3000))]
+    off, on = pcfg(max_spacing_mm=1350.0), pcfg(max_spacing_mm=1350.0, test_fail_nth=2)
+    lo, ln = S.layout(pieces, [], off), S.layout(pieces, [], on)
+    assert lo == ln and len(lo["supports"]) == 5
+    assert [S.placement(s, off) for s in lo["supports"]] == [S.placement(s, on) for s in ln["supports"]]
+
+
+def test_fail_nth_schema_documented_optional_and_template_clean():
+    s = json.loads((ROOT / "docs" / "schemas" / "tray_hanger_config.schema.json").read_text(encoding="utf-8"))
+    p = s["properties"]["test_fail_nth"]
+    assert p["type"] == "integer" and p["minimum"] == 1 and "test_fail_nth" not in s["required"]
+    assert "2.0" in p["description"] and "正式設定勿使用" in p["description"]
+    cs = (ROOT / "docs" / "schemas" / "conduit_hanger_config.schema.json").read_text(encoding="utf-8")
+    assert "test_fail_nth" in json.loads(cs)["description"] and "test_fail_nth" not in json.loads(cs)["properties"]
+    t = (ROOT / "docs" / "examples" / "tray_hanger_config.template.json").read_text(encoding="utf-8")
+    assert "test_fail_nth" not in t                                         # 正式範本不含測試開關
+    m = (ROOT / "docs" / "MANUAL.md").read_text(encoding="utf-8")
+    assert '"test_fail_nth": 2' in m and "正式設定勿使用" in m
+
+
+def test_fail_nth_csharp_reader_mirrors_python():
+    core = (ROOT / "revit" / "MepTray.Core" / "Supports.cs").read_text(encoding="utf-8")
+    assert 'TestFailNthKey = "test_fail_nth"' in core and "public long? TestFailNth;" in core
+    assert f'e.Add("{TFN_MSG}")' in core                                    # 錯誤訊息與 Python 相同
+    vp = core[core.index("public static List<string> ValidatePlacement"):core.index("static List<string> CalibrationErrors")]
+    assert vp.index("dedupe.angle_tolerance_deg") < vp.index("TestFailNthKey") < vp.index("CalibrationErrors(c)")   # 錯誤順序與 Python 相同
+    assert "System.Globalization.NumberStyles.None" in core and "x >= 1" in core
+    assert "TestFailNth" not in core[core.index("public static List<string> ValidateLayout"):core.index("static List<string> ParamRefErrors")]
+
+
+def test_fail_nth_revit_execute_fails_only_nth_after_real_element():
+    """Revit 端只能做原始碼檢查（實機另驗）：第 N 支 new 在實例建立、參數設定、讀回驗證、追蹤資料寫入之後、SubTransaction Commit 之前拋例外，
+    由既有 catch 只回滾該支；未設定時不觸發。"""
+    pl = (HP / "HangerPlacer.cs").read_text(encoding="utf-8")
+    ex = pl[pl.index("public static void Execute("):pl.index("public static double CrossParamMm")]
+    loop = ex[ex.index('foreach (var it in rep.Items.Where(i => i.Status == "new"))'):]
+    assert ex.index("int ordinal = 0;") < ex.index("foreach (var it in rep.Items")
+    assert loop.index("ordinal++;") < loop.index("new SubTransaction(doc)")
+    i_throw = loop.index("if (TestSwitch.ShouldFail(cfg.TestFailNth, ordinal)) throw new InvalidOperationException(TestSwitch.FailMessage(")
+    for before in ("PlaceInstance(doc, sym", "SetLen(fi, cfg.CrossMemberLength.Name", "doc.Regenerate();", "讀回旋轉", "fi.SetEntity(e);"):
+        assert loop.index(before) < i_throw, before
+    assert i_throw < loop.index("var st = sub.Commit();") < loop.index("catch (Exception ex) when (ex is not OperationCanceledException)")
+    assert "sub.RollBack();" in loop and "（僅此支回滾）" in loop
+    assert 'rep.Outcome = failed == 0 ? "完成" : created > 0 ? "部分完成" : "失敗";' in ex
+    # 預覽：兩個 Plan 都記錄開關；摘要與預覽標題最上方顯示警告
+    assert pl.count("ApplyTestSwitch(rep, cfg);") == 1 and "HangerPlacer.ApplyTestSwitch(rep, cfg);" in (HP / "ConduitHangerRun.cs").read_text(encoding="utf-8")
+    assert 'var s = (TestFailNth is long tf ? TestSwitch.PreviewNote(tf) + "\\n" : "") + $"批次' in pl
+    run_cs = (HP / "HangerRun.cs").read_text(encoding="utf-8")
+    assert "rep.TestFailNth is long tf" in run_cs and "MainInstruction" in run_cs
+    # 不計入校正簽章
+    for f in ("HangerCalibration.cs", "CalibrateHangerCommand.cs"):
+        t = (HP / f).read_text(encoding="utf-8")
+        assert "TestFailNth" not in t and "test_fail_nth" not in t, f
+
+
 # ---------- C# 契約 ----------
 def contract_cases() -> dict:
     lc = []
@@ -342,6 +426,9 @@ def contract_cases() -> dict:
     add("cfg_rod", [P("A", (0, 0, 0), (1000, 0, 0))], [], pcfg(rod_length={"mode": "fixed"}))
     add("cfg_nocal", [P("A", (0, 0, 0), (1000, 0, 0))], [], pcfg(calibration=None))
     add("cfg_badcal", [], [], pcfg(calibration={"family_file": {"path": "p"}, "family_name": "F", "type_name": "X"}))
+    add("fail_nth_on", [P("A", (0, 0, 3000), (6000, 0, 3000))], [], pcfg(max_spacing_mm=1350.0, test_fail_nth=2))
+    for nm, v in TEST_FAIL_NTH_BAD:
+        add(f"cfg_fail_nth_{nm}", [], [], pcfg(test_fail_nth=v))
     base = S.layout([P("A", (0, 0, 0), (5000, 0, 0))], [], cfg())
     plan = _plan(base)
     cc = [

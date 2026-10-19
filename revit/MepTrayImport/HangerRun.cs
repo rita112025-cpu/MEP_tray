@@ -19,7 +19,8 @@ public static class HangerRun
     {
         var td = new TaskDialog("MEP Tray — 吊架預覽（尚未修改模型）")
         {
-            MainInstruction = rep.PreflightErrors.Count > 0 ? "預檢失敗，無法放置" : $"將新增 {rep.Count("new")} 支吊架",
+            MainInstruction = (rep.TestFailNth is long tf ? $"⚠ 測試開關 test_fail_nth={tf} 已啟用｜" : "")
+                              + (rep.PreflightErrors.Count > 0 ? "預檢失敗，無法放置" : $"將新增 {rep.Count("new")} 支吊架"),
             MainContent = rep.Summary() + (extra == null ? "" : "\n\n" + extra),
             CommonButtons = TaskDialogCommonButtons.Cancel,
         };
