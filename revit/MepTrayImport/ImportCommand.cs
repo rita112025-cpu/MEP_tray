@@ -98,8 +98,18 @@ public class ImportCommand : IExternalCommand
                 }
                 else
                 {
+                    var planned = hrep.Count("new");
                     HangerRun.Place(doc, hrep, hcfg, res);
-                    tg.Assimilate();   // 橋架＋吊架一次 Undo
+                    if (HangerBatch.RollBackAllFailed(planned, hrep.Count("created")))
+                    {
+                        // 與選取補吊架一致：沒有任何吊架建立成功 → 整批回滾；本入口的整批含橋架（與取消、吊架階段例外相同）
+                        tg.RollBack();
+                        hrep.Outcome = "失敗";
+                        hrep.Notes.Add("沒有任何吊架建立成功，整批（含橋架）已回滾");
+                        rep.Abort = "沒有任何吊架建立成功：整批（含橋架）已回滾，模型未修改";
+                        rep.Committed = false;
+                    }
+                    else tg.Assimilate();   // 橋架＋吊架一次 Undo
                 }
             }
         }

@@ -254,6 +254,14 @@ public static class TestSwitch
     public static bool ShouldFail(long? nth, int ordinal) => nth is long n && ordinal == n;
 }
 
+/// <summary>放置後的整批決策（選取補吊架、選取配管補吊架、匯入橋架＋吊架同一語意；SelfTest 驗證）。</summary>
+public static class HangerBatch
+{
+    /// <summary>plannedNew = 放置前 Status=new 的支數；created = 放置後建立成功的支數。
+    /// 計畫有新增、但一支都沒有建立成功 → 整批回滾（匯入入口的整批含橋架）。計畫沒有新增時不因此回滾。</summary>
+    public static bool RollBackAllFailed(int plannedNew, int created) => plannedNew > 0 && created == 0;
+}
+
 public static class Supports
 {
     public const double GeomTolMm = 0.5;   // 幾何判定容差；非規範值
