@@ -6,7 +6,7 @@
   "type": "object",
   "required": ["units", "supported_object", "family", "placement_mode", "max_spacing_mm", "start_offset_mm", "end_offset_mm",
                "short_run_policy", "near_fitting", "widen_left_mm", "widen_right_mm", "insertion_to_bearing_mm",
-               "orientation_correction_deg", "parameter_map", "rod_length", "dedupe"],
+               "orientation_correction_deg", "parameter_map", "rod_length", "dedupe", "calibration"],
   "properties": {
     "units": { "const": "mm" },
     "supported_object": { "enum": ["cable_tray"], "description": "v1 只支援 Cable Tray；核心演算與物件種類無關，導管之後擴充。" },
@@ -45,6 +45,37 @@
       "properties": {
         "tolerance_mm": { "type": "number", "exclusiveMinimum": 0 },
         "angle_tolerance_deg": { "type": "number", "minimum": 0, "exclusiveMaximum": 90 }
+      }
+    },
+    "calibration": {
+      "type": "object",
+      "required": ["family_file", "family_name", "type_name", "project_signature", "cross_member_model"],
+      "description": "由 Revit「讀取目標吊架族」→「校正目標吊架」寫入，不要手填；兩個放置命令缺少此區段即拒絕執行。family_name/type_name 必須與 family 相同。放置前 Revit 端另核對族檔 size/sha256 與 project_signature；任一不同 → 要求重新校正。",
+      "properties": {
+        "family_file": {
+          "type": "object", "required": ["path", "size", "sha256"],
+          "properties": {
+            "path": { "type": "string", "minLength": 1 },
+            "size": { "type": "number" },
+            "sha256": { "type": "string", "minLength": 1 },
+            "mtime_utc": { "type": "string" }
+          }
+        },
+        "family_name": { "type": "string", "minLength": 1 },
+        "type_name": { "type": "string", "minLength": 1 },
+        "project_signature": {
+          "type": "string", "minLength": 1,
+          "description": "專案中已載入族的完整內容簽章（v2:<sha256>：族參數定義、全部類型的參數值含實例預設值、目標類型下的族幾何、專案端類型參數；不含工具自建 (MEPTRAY …) 類型）。舊格式（無 v2: 前綴）會被放置命令判定過期，需重新校正。"
+        },
+        "cross_member_model": {
+          "type": "object", "required": ["ratio", "offset_mm"],
+          "properties": {
+            "ratio": { "type": "number", "not": { "minimum": -0.000001, "maximum": 0.000001 }, "description": "實測橫擔長度 = ratio × 族參數 + offset_mm；|ratio| > 1e-6。" },
+            "offset_mm": { "type": "number" },
+            "param": { "type": "string" },
+            "axis": { "enum": ["local_x", "local_y"] }
+          }
+        }
       }
     }
   },

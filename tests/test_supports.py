@@ -401,3 +401,49 @@ def test_calibration_block_required_and_checked():
     c = pcfg()
     del c["calibration"]["family_file"]["sha256"]
     assert "calibration.family_file" in S.error_fields(S.validate_placement_config(c))
+
+
+# ---------- PR #21 review：schema 要求 calibration，與執行期驗證一致 ----------
+def test_schema_requires_calibration_matching_runtime():
+    s = json.loads((ROOT / "docs" / "schemas" / "tray_hanger_config.schema.json").read_text(encoding="utf-8"))
+    assert "calibration" in s["required"]
+    cal = s["properties"]["calibration"]
+    assert set(cal["required"]) == {"family_file", "family_name", "type_name", "project_signature", "cross_member_model"}
+    assert set(cal["properties"]["family_file"]["required"]) == {"path", "size", "sha256"}
+    assert set(cal["properties"]["cross_member_model"]["required"]) == {"ratio", "offset_mm"}
+    # schema 每個必填欄位缺漏時，執行期驗證也拒絕（不會出現 schema 通過、工具拒絕或相反）
+    assert S.validate_placement_config(pcfg()) == []
+    for k in cal["required"]:
+        c = pcfg()
+        c["calibration"] = {kk: v for kk, v in c["calibration"].items() if kk != k}
+        assert any(f.startswith("calibration") for f in S.error_fields(S.validate_placement_config(c))), k
+    for sub, keys in (("family_file", ("path", "size", "sha256")), ("cross_member_model", ("ratio", "offset_mm"))):
+        for k in keys:
+            c = pcfg()
+            c["calibration"] = dict(c["calibration"], **{sub: {kk: v for kk, v in c["calibration"][sub].items() if kk != k}})
+            assert f"calibration.{sub}" in S.error_fields(S.validate_placement_config(c)), (sub, k)
+    c = pcfg()
+    del c["calibration"]
+    assert S.error_fields(S.validate_placement_config(c)) == ["calibration"]
+
+
+# ---------- PR #21 review：校正簽章涵蓋整個族內容（Revit 端，只能做原始碼檢查；實機另驗） ----------
+def test_calibration_signature_covers_whole_family():
+    src = (ROOT / "revit" / "MepTrayImport" / "HangerCalibration.cs").read_text(encoding="utf-8")
+    body = src[src.index("public static string? ProjectSignature"):src.index("public static bool IsCurrentSignatureFormat")]
+    assert 'SignaturePrefix = "v2:"' in src and "return SignaturePrefix + Hex(" in body
+    for api in ("doc.EditFamily(fam)", "fd.Close(false)", "fm.Parameters", "fm.Types", "fp.IsInstance", "fp.Formula", "fp.StorageType",
+                "DefKey(p.Definition)", "DefKey(fp.Definition)", "ft.HasValue(fp)", "fam.GetFamilySymbolIds()", "s.Volume", "s.SurfaceArea",
+                "fm.CurrentType = target", "tx.RollBack()", "doc.IsModifiable || doc.IsReadOnly"):
+        assert api in body, api
+    assert "d.GetGroupTypeId()?.TypeId" in src and "d.GetDataType()?.TypeId" in src   # 參數定義含群組與資料型別
+    assert "IsToolType(s.Name)" in body and "IsToolType(ft.Name)" in body          # 工具自建類型不計入 → 放置後不自我失效
+    for forbidden in ("LoadFamily", ".Save(", "SaveAs", "Commit()"):
+        assert forbidden not in body, forbidden                                   # 族複本只讀、回滾、不載回、不儲存
+    chk = src[src.index("public static List<string> CheckCalibration"):]
+    assert "IsCurrentSignatureFormat(cfg.CalibProjectSignature)" in chk and "舊格式" in chk
+    imp = (ROOT / "revit" / "MepTrayImport" / "ImportCommand.cs").read_text(encoding="utf-8")
+    assert "checkCalibration: false" in imp
+    assert imp.index("HangerPlacer.Preflight(doc, hcfg, pre)") < imp.index("tg.Start()")    # 交易群組開始前已完整核對
+    pl = (ROOT / "revit" / "MepTrayImport" / "HangerPlacer.cs").read_text(encoding="utf-8")
+    assert "if (checkCalibration) errors.AddRange(HangerCalibration.CheckCalibration(doc, cfg));" in pl

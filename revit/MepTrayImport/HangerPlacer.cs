@@ -200,7 +200,8 @@ public static class HangerPlacer
         public FamilyPlacementType PlacementType;
     }
 
-    public static Resolved? Preflight(Document doc, HangerConfig cfg, List<string> errors)
+    /// <param name="checkCalibration">false 只限呼叫端在同一次命令、交易開始前已核對過校正（族文件簽章需 EditFamily，不能在交易／交易群組中途做）。</param>
+    public static Resolved? Preflight(Document doc, HangerConfig cfg, List<string> errors, bool checkCalibration = true)
     {
         var syms = new FilteredElementCollector(doc).OfClass(typeof(FamilySymbol)).Cast<FamilySymbol>()
             .Where(s => s.FamilyName == cfg.FamilyName).ToList();
@@ -211,7 +212,7 @@ public static class HangerPlacer
         var need = pt switch { FamilyPlacementType.OneLevelBased => "level", FamilyPlacementType.WorkPlaneBased => "workplane", _ => null };
         if (need == null) errors.Add($"族放置方式 {pt} 需要主體/面（v1 不支援；設定固定吊桿長度也不能繞過主體需求）");
         else if (need != cfg.PlacementMode) errors.Add($"placement_mode={cfg.PlacementMode} 與族放置方式 {pt}（需 {need}）不符");
-        errors.AddRange(HangerCalibration.CheckCalibration(doc, cfg));   // 族檔或專案中的族變更 → 必須重新校正
+        if (checkCalibration) errors.AddRange(HangerCalibration.CheckCalibration(doc, cfg));   // 族檔或專案中的族變更 → 必須重新校正
         CheckParam(sym, cfg.CrossMemberLength!, "parameter_map.cross_member_length", errors);
         if (cfg.RodMode == "fixed") CheckParam(sym, cfg.RodParam!, "rod_length.param（固定吊桿長度）", errors, unsupportedIfMissing: true);
         return errors.Count == 0 ? new Resolved { Symbol = sym, PlacementType = pt } : null;
@@ -232,14 +233,15 @@ public static class HangerPlacer
     }
 
     // ── 4. 計畫（不改模型）──
-    public static HangerRunReport Plan(Document doc, IEnumerable<ElementId> trayIds, HangerConfig cfg, string entry, out Dictionary<string, CableTray> trays, out Resolved? resolved)
+    public static HangerRunReport Plan(Document doc, IEnumerable<ElementId> trayIds, HangerConfig cfg, string entry, out Dictionary<string, CableTray> trays, out Resolved? resolved, bool checkCalibration = true)
     {
         var rep = new HangerRunReport { BatchId = $"{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}"[..24], Entry = entry };
         var (pieces, links, tr, problems) = ReadTrays(doc, trayIds);
         trays = tr;
         var trayMap = tr;
         rep.Notes.AddRange(problems);
-        resolved = Preflight(doc, cfg, rep.PreflightErrors);
+        resolved = Preflight(doc, cfg, rep.PreflightErrors, checkCalibration);
+        if (!checkCalibration) rep.Notes.Add("校正簽章已於本次命令開始、交易前核對（族文件內容簽章不能在交易群組中途讀取）");
         if (pieces.Count == 0) rep.PreflightErrors.Add("沒有可處理的 Cable Tray");
         var lay = Supports.Layout(pieces, links, cfg);
         rep.LayoutIssues.AddRange(lay.Issues);
