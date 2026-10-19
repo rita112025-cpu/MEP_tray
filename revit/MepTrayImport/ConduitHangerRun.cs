@@ -110,6 +110,7 @@ public static class ConduitHangerPlacer
             rep.Notes.Add($"單管橫擔：族參數「{cfg.CrossMemberLength?.Name}」= {sp:F1} mm、依校正實測長度 {sl:F1} mm（cross_member_single.basis={cc.SingleCrossMemberBasis}；不加寬）");
         }
         else rep.Notes.Add("未設定 cross_member_single：單管列為待確認，不放置");
+        HangerPlacer.ApplyTestSwitch(rep, cfg);   // 測試開關寫在 base_config（橋架設定）
         if (rep.PreflightErrors.Count > 0) rep.Outcome = "失敗";
         return rep;
     }

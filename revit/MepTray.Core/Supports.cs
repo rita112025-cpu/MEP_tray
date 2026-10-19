@@ -69,6 +69,9 @@ public sealed class HangerConfig
     public string CalibFilePath = "", CalibSha256 = "", CalibProjectSignature = "";
     public double CalibFileSize;
     public double CrossRatio = 1, CrossOffsetMm;
+    // 驗收用測試開關（選填 test_fail_nth；null = 關閉）：只讓 Revit 放置迴圈的第 N 支 new 吊架故意失敗。
+    // 不影響佈置、去重、族座標換算，也不計入校正簽章（簽章只看族內容）。
+    public long? TestFailNth;
 }
 
 public static class HangerConfigReader
@@ -79,6 +82,7 @@ public static class HangerConfigReader
     public static readonly string[] Scopes = { "type", "instance" };
     public static readonly string[] RodModes = { "none", "fixed" };
     public static readonly string[] SupportedObjects = { "cable_tray" };
+    public const string TestFailNthKey = "test_fail_nth";
 
     static double? Num(JsonNode? n)
     {
@@ -88,6 +92,12 @@ public static class HangerConfigReader
     }
     static string? Str(JsonNode? n) => n is JsonValue v && v.TryGetValue<string>(out var s) && !string.IsNullOrWhiteSpace(s) ? s : null;
     static bool Missing(JsonObject o, string k) => !o.TryGetPropertyValue(k, out var n) || n is null;
+    /// <summary>JSON 整數字面且 ≥ 1（不接受 2.0、1e3、"2"、true、null；與 Python _pos_int 一致）。</summary>
+    static long? PositiveInt(JsonNode? n)
+    {
+        if (n is not JsonValue v || v.GetValueKind() != System.Text.Json.JsonValueKind.Number) return null;
+        return long.TryParse(v.ToJsonString(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var x) && x >= 1 ? x : null;
+    }
 
     public static List<string> ValidateLayout(JsonNode? root)
     {
@@ -164,6 +174,7 @@ public static class HangerConfigReader
             var a = Num(dd["angle_tolerance_deg"]);
             if (a is null || a < 0 || a >= 90) e.Add("dedupe.angle_tolerance_deg：需為 0 ≤ 值 < 90");
         }
+        if (c.ContainsKey(TestFailNthKey) && PositiveInt(c[TestFailNthKey]) is null) e.Add("test_fail_nth：驗收用測試開關，需為 ≥ 1 的整數（未填 = 關閉；正式設定勿使用）");
         e.AddRange(CalibrationErrors(c));
         return e;
     }
@@ -228,8 +239,19 @@ public static class HangerConfigReader
         cfg.CalibProjectSignature = Str(cal["project_signature"])!;
         cfg.CrossRatio = Num(cal["cross_member_model"]!["ratio"])!.Value;
         cfg.CrossOffsetMm = Num(cal["cross_member_model"]!["offset_mm"])!.Value;
+        cfg.TestFailNth = c.ContainsKey(TestFailNthKey) ? PositiveInt(c[TestFailNthKey]) : null;
         return cfg;
     }
+}
+
+/// <summary>驗收用測試開關 test_fail_nth 的訊息與判定（Revit 放置迴圈與預覽共用；SelfTest 驗證）。</summary>
+public static class TestSwitch
+{
+    public static string PreviewNote(long n) => $"⚠ 測試開關 test_fail_nth={n} 已啟用：本次第 {n} 支新增吊架會故意失敗並只回滾該支（僅供驗收，正式設定勿使用）";
+    public static string FailMessage(long n) => $"測試開關 test_fail_nth={n}：故意讓第 {n} 支失敗";
+    public static string NotTriggeredNote(long n, int newCount) => $"⚠ 測試開關 test_fail_nth={n} 大於本次新增數 {newCount}，不會觸發失敗";
+    /// <summary>ordinal = 本次 Execute 中第幾支 Status=new 的吊架（1 起算）。</summary>
+    public static bool ShouldFail(long? nth, int ordinal) => nth is long n && ordinal == n;
 }
 
 public static class Supports

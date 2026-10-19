@@ -45,12 +45,14 @@ public sealed class HangerRunReport
     public List<HangerItem> Items { get; } = new();
     public List<string> RevitWarnings { get; } = new();
     public List<string> Notes { get; } = new();
+    /// <summary>驗收用測試開關 test_fail_nth（null = 關閉）；啟用時預覽與結果最上方顯示警告。</summary>
+    public long? TestFailNth { get; set; }
 
     public int Count(string status) => Items.Count(i => i.Status == status);
 
     public string Summary()
     {
-        var s = $"批次 {BatchId}（{Outcome}）\n計畫吊架 {Items.Count}：新增 {Count("new") + Count("created")}、已存在 {Count("exists")}、待確認 {Count("pending") + LayoutIssues.Count(i => i.Level == "pending")}、失敗 {Count("failed")}";
+        var s = (TestFailNth is long tf ? TestSwitch.PreviewNote(tf) + "\n" : "") + $"批次 {BatchId}（{Outcome}）\n計畫吊架 {Items.Count}：新增 {Count("new") + Count("created")}、已存在 {Count("exists")}、待確認 {Count("pending") + LayoutIssues.Count(i => i.Level == "pending")}、失敗 {Count("failed")}";
         if (Count("created") > 0) s += $"\n已建立 {Count("created")}";
         if (PreflightErrors.Count > 0) s += "\n預檢失敗（未建立任何吊架）：\n  " + string.Join("\n  ", PreflightErrors);
         var bad = LayoutIssues.Where(i => i.Level is "failed" or "unsupported" or "warning" or "pending").ToList();
@@ -273,8 +275,18 @@ public static class HangerPlacer
             if (Math.Abs(bottomAbs - calc) > ReadbackTolMm)
                 rep.Notes.Add($"橋架 {id}：Revit 底部高程 {bottomAbs:F1} mm 與 中心線−高度/2 = {calc:F1} mm 不一致（差 {bottomAbs - calc:F1}），請確認承托面基準");
         }
+        ApplyTestSwitch(rep, cfg);
         if (rep.PreflightErrors.Count > 0) rep.Outcome = "失敗";
         return rep;
+    }
+
+    /// <summary>驗收用測試開關：記到報告（預覽最上方顯示）；N 大於本次新增數時另加附註。未設定時不做任何事。</summary>
+    public static void ApplyTestSwitch(HangerRunReport rep, HangerConfig cfg)
+    {
+        if (cfg.TestFailNth is not long n) return;
+        rep.TestFailNth = n;
+        var nNew = rep.Count("new");
+        if (n > nNew) rep.Notes.Add(TestSwitch.NotTriggeredNote(n, nNew));
     }
 
     // ── 5. 放置（呼叫端已開 Transaction，並在 TransactionGroup 內）──
@@ -287,8 +299,10 @@ public static class HangerPlacer
         var typeCache = new Dictionary<string, FamilySymbol>();
         var planes = new Dictionary<long, SketchPlane>();
         var zNotes = new List<string>();
+        int ordinal = 0;   // 本次第幾支 new（只供測試開關 test_fail_nth；未設定時不影響任何行為）
         foreach (var it in rep.Items.Where(i => i.Status == "new"))
         {
+            ordinal++;
             using var sub = new SubTransaction(doc);
             sub.Start();
             try
@@ -320,6 +334,8 @@ public static class HangerPlacer
                 e.Set("SupportId", it.SupportId);
                 e.Set("ToolVersion", toolVersion);
                 fi.SetEntity(e);
+                // 驗收用測試開關：實例已建立、參數已設、讀回已驗、追蹤資料已寫入 → 故意拋例外，驗證「只回滾此支」
+                if (TestSwitch.ShouldFail(cfg.TestFailNth, ordinal)) throw new InvalidOperationException(TestSwitch.FailMessage(cfg.TestFailNth!.Value));
                 var st = sub.Commit();
                 if (st != TransactionStatus.Committed) throw new InvalidOperationException($"SubTransaction 狀態 {st}");
                 it.Status = "created";
