@@ -41,20 +41,145 @@ public static class HangerCalibration
         new FilteredElementCollector(doc).OfClass(typeof(FamilySymbol)).Cast<FamilySymbol>()
             .FirstOrDefault(s => s.FamilyName == family && s.Name == type);
 
-    /// <summary>專案中已載入的目標族／類型內容簽章（放置方式＋目標類型全部數值參數）。族重新載入或類型被改即不同。</summary>
+    /// <summary>簽章格式版本前綴。v1（無前綴）只含目標類型的數值參數，2026-10-18 起改為 v2：整個族的內容。</summary>
+    public const string SignaturePrefix = "v2:";
+    /// <summary>工具自建類型（名稱含此字串，例如「矩形 (MEPTRAY L400)」「矩形 (MEPTRAY CAL)」）不計入簽章，避免放置後自我失效。</summary>
+    public const string ToolTypeMarker = "(MEPTRAY";
+
+    static string D(double v) => Math.Round(v, 9).ToString("R", CultureInfo.InvariantCulture);
+    static bool IsToolType(string name) => name.Contains(ToolTypeMarker, StringComparison.Ordinal);
+
+    static string ParamValue(Document doc, Parameter p) => p.StorageType switch
+    {
+        StorageType.Double => D(p.AsDouble()),
+        StorageType.Integer => p.AsInteger().ToString(CultureInfo.InvariantCulture),
+        StorageType.String => p.AsString() ?? "",
+        StorageType.ElementId => IdName(doc, p.AsElementId()),
+        _ => "",
+    };
+
+    static string IdName(Document doc, ElementId? id) =>
+        id == null || id == ElementId.InvalidElementId ? "-" : doc.GetElement(id) is Element e ? $"{e.GetType().Name}:{e.Name}" : $"id:{id.Value}";
+
+    static string DefKey(Definition d) => $"{d.Name}|{d.GetGroupTypeId()?.TypeId}|{d.GetDataType()?.TypeId}";
+
+    /// <summary>
+    /// 專案中已載入的目標族內容簽章（v2）。任何族變更都會讓簽章不同 → 放置前要求重新校正：
+    /// 專案端：族放置方式／品類／可否編輯；族內每個（非工具自建）類型的全部參數（名稱、儲存型別、群組、資料型別、值）。
+    /// 族文件端（Document.EditFamily 取得獨立複本，只讀不改、不載回，最後 Close(false)）：
+    /// 全部族參數定義（名稱、實例/類型、儲存型別、群組、資料型別、公式、報告/共用 GUID）、每個類型的全部參數值（含實例參數預設值），
+    /// 以及族內所有元素在「目標類型」下的實體幾何摘要（體積、表面積、面/邊數、外包範圍；只在複本的交易內切換類型並回滾）。
+    /// 專案文件有未完成的交易或唯讀時不能呼叫（EditFamily 限制）→ 拋 InvalidOperationException。
+    /// </summary>
     public static string? ProjectSignature(Document doc, string family, string type)
     {
         var sym = FindSymbol(doc, family, type);
         if (sym == null) return null;
-        var lines = new List<string> { $"placement={sym.Family.FamilyPlacementType}" };
-        foreach (Parameter p in sym.Parameters)
+        var fam = sym.Family;
+        var lines = new List<string>
         {
-            if (p?.Definition == null) continue;
-            if (p.StorageType == StorageType.Double) lines.Add($"{p.Definition.Name}={Math.Round(p.AsDouble(), 9).ToString("R", CultureInfo.InvariantCulture)}");
-            else if (p.StorageType == StorageType.Integer) lines.Add($"{p.Definition.Name}={p.AsInteger()}");
+            $"family={fam.Name}", $"placement={fam.FamilyPlacementType}", $"category={fam.FamilyCategory?.Id.Value}",
+            $"editable={fam.IsEditable}", $"inplace={fam.IsInPlace}", $"target_type={type}",
+        };
+        foreach (var id in fam.GetFamilySymbolIds())
+        {
+            if (doc.GetElement(id) is not FamilySymbol s || IsToolType(s.Name)) continue;
+            foreach (Parameter p in s.Parameters)
+                if (p?.Definition != null) lines.Add($"ptype:{s.Name}|{DefKey(p.Definition)}|{p.StorageType}={ParamValue(doc, p)}");
         }
-        return Hex(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", lines.OrderBy(s => s, StringComparer.Ordinal)))));
+        if (fam.IsEditable && !fam.IsInPlace) lines.AddRange(FamilyDocumentLines(doc, fam, type));
+        else lines.Add("familydoc=unavailable");
+        return SignaturePrefix + Hex(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", lines.OrderBy(x => x, StringComparer.Ordinal)))));
     }
+
+    static List<string> FamilyDocumentLines(Document doc, Family fam, string type)
+    {
+        if (doc.IsModifiable || doc.IsReadOnly)
+            throw new InvalidOperationException("專案文件有未完成的交易或為唯讀，無法讀取族內容以建立／核對校正簽章");
+        var lines = new List<string>();
+        var fd = doc.EditFamily(fam);
+        try
+        {
+            var fm = fd.FamilyManager;
+            var pars = new List<FamilyParameter>();
+            foreach (FamilyParameter fp in fm.Parameters)
+            {
+                if (fp?.Definition == null) continue;
+                pars.Add(fp);
+                lines.Add($"fparam:{DefKey(fp.Definition)}|{fp.StorageType}|inst={fp.IsInstance}|rep={fp.IsReporting}|shared={(fp.IsShared ? fp.GUID.ToString() : "-")}|f={fp.Formula}");
+            }
+            foreach (FamilyType ft in fm.Types)
+            {
+                if (ft == null || IsToolType(ft.Name)) continue;
+                foreach (var fp in pars)
+                {
+                    if (!ft.HasValue(fp)) { lines.Add($"fvalue:{ft.Name}|{fp.Definition.Name}|{fp.IsInstance}=<none>"); continue; }
+                    var v = fp.StorageType switch
+                    {
+                        StorageType.Double => ft.AsDouble(fp) is double d ? D(d) : "",
+                        StorageType.Integer => ft.AsInteger(fp)?.ToString(CultureInfo.InvariantCulture) ?? "",
+                        StorageType.String => ft.AsString(fp) ?? "",
+                        StorageType.ElementId => IdName(fd, ft.AsElementId(fp)),
+                        _ => "",
+                    };
+                    lines.Add($"fvalue:{ft.Name}|{fp.Definition.Name}|{fp.IsInstance}={v}");
+                }
+            }
+            // 幾何以「目標類型」為目前類型量測（只在這份複本的交易內切換，最後 RollBack；複本不儲存、不載回專案）
+            var target = fm.Types.Cast<FamilyType>().FirstOrDefault(t => t?.Name == type);
+            lines.Add($"fcurrent={(target == null ? "missing" : type)}");
+            using var tx = new Transaction(fd, "MEP Tray 族簽章（將回滾）");
+            tx.Start();
+            try
+            {
+                if (target != null) { fm.CurrentType = target; fd.Regenerate(); }
+                var opt = new Options { DetailLevel = ViewDetailLevel.Fine, ComputeReferences = false, IncludeNonVisibleObjects = true };
+                foreach (var e in new FilteredElementCollector(fd).WhereElementIsNotElementType())
+                {
+                    GeometryElement? ge;
+                    try { ge = e.get_Geometry(opt); } catch (Autodesk.Revit.Exceptions.ApplicationException) { continue; }
+                    if (ge == null) continue;
+                    var sums = new List<string>();
+                    GeometryLines(ge, sums);
+                    foreach (var g in sums) lines.Add($"geom:{e.Category?.Name}|{e.GetType().Name}|{g}");
+                }
+            }
+            finally { if (tx.GetStatus() == TransactionStatus.Started) tx.RollBack(); }
+        }
+        finally { fd.Close(false); }
+        return lines;
+    }
+
+    static void GeometryLines(GeometryElement ge, List<string> sink)
+    {
+        foreach (var o in ge)
+        {
+            switch (o)
+            {
+                case GeometryInstance gi: GeometryLines(gi.GetInstanceGeometry(), sink); break;
+                case Solid s when s.Faces.Size > 0:
+                {
+                    double[] lo = { double.MaxValue, double.MaxValue, double.MaxValue }, hi = { double.MinValue, double.MinValue, double.MinValue };
+                    foreach (Edge ed in s.Edges)
+                        foreach (var p in ed.Tessellate())
+                        {
+                            var c = new[] { p.X, p.Y, p.Z };
+                            for (int i = 0; i < 3; i++) { lo[i] = Math.Min(lo[i], c[i]); hi[i] = Math.Max(hi[i], c[i]); }
+                        }
+                    sink.Add($"solid|v={R6(s.Volume)}|a={R6(s.SurfaceArea)}|f={s.Faces.Size}|e={s.Edges.Size}|lo={string.Join(",", lo.Select(R6))}|hi={string.Join(",", hi.Select(R6))}");
+                    break;
+                }
+                case Mesh m: sink.Add($"mesh|n={m.Vertices.Count}|t={m.NumTriangles}"); break;
+                case Curve cv when cv.IsBound: sink.Add($"curve|{cv.GetType().Name}|l={R6(cv.Length)}|p0={P6(cv.GetEndPoint(0))}|p1={P6(cv.GetEndPoint(1))}"); break;
+            }
+        }
+    }
+
+    // 幾何摘要以 1e-6（內部單位 ft / ft² / ft³）四捨五入，避免浮點雜訊；-0 正規化為 0
+    static string R6(double v) { var r = Math.Round(v, 6); return (r == 0 ? 0 : r).ToString("R", CultureInfo.InvariantCulture); }
+    static string P6(XYZ p) => $"{R6(p.X)},{R6(p.Y)},{R6(p.Z)}";
+
+    public static bool IsCurrentSignatureFormat(string? sig) => sig != null && sig.StartsWith(SignaturePrefix, StringComparison.Ordinal);
 
     /// <summary>放置前強制檢查：族檔與專案中的族必須與校正時相同，否則要求重新校正。</summary>
     public static List<string> CheckCalibration(Document doc, HangerConfig cfg)
@@ -69,9 +194,17 @@ public static class HangerCalibration
                 e.Add($"族檔內容已變更（size/sha256 與校正時不同）；{redo}");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { e.Add($"無法讀取族檔以核對校正：{ex.Message}"); }
-        var sig = ProjectSignature(doc, cfg.FamilyName, cfg.TypeName);
+        if (!IsCurrentSignatureFormat(cfg.CalibProjectSignature))
+        {
+            e.Add($"校正簽章為舊格式（只含目標類型的數值參數，無法偵測族幾何或參數定義變更）；本版改用完整族內容簽章 {SignaturePrefix}，{redo}");
+            return e;
+        }
+        string? sig;
+        try { sig = ProjectSignature(doc, cfg.FamilyName, cfg.TypeName); }
+        catch (Exception ex) when (ex is InvalidOperationException or Autodesk.Revit.Exceptions.InvalidOperationException or Autodesk.Revit.Exceptions.ArgumentException)
+        { e.Add($"無法讀取專案中的族內容以核對校正：{ex.Message}"); return e; }
         if (sig == null) e.Add($"專案中沒有 {cfg.FamilyName} / {cfg.TypeName}（請載入族）");
-        else if (sig != cfg.CalibProjectSignature) e.Add($"專案中的族或類型「{cfg.TypeName}」內容與校正時不同（族被重新載入或類型參數被改）；{redo}");
+        else if (sig != cfg.CalibProjectSignature) e.Add($"專案中的族「{cfg.FamilyName}」內容與校正時不同（族被重新載入／編輯、幾何或參數定義／預設值改變、或類型參數被改）；{redo}");
         return e;
     }
 

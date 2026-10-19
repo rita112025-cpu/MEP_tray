@@ -86,7 +86,7 @@ public class ImportCommand : IExternalCommand
             }
             else
             {
-                hrep = HangerPlacer.Plan(doc, rep.TrayElementIds, hcfg, "import", out var trays, out var res);
+                hrep = HangerPlacer.Plan(doc, rep.TrayElementIds, hcfg, "import", out var trays, out var res, checkCalibration: false);   // 已在 tg 開始前的 Preflight 核對
                 var extra = CompareWithJson(model, hrep);
                 hrep.Notes.Add(extra);
                 if (!HangerRun.ConfirmPreview(hrep) || res == null || hrep.PreflightErrors.Count > 0)
