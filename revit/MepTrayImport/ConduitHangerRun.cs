@@ -67,6 +67,7 @@ public static class ConduitHangerPlacer
         var (inputs, conduits, problems) = ReadConduits(doc, ids);
         rep.Notes.AddRange(problems);
         resolved = HangerPlacer.Preflight(doc, cfg, rep.PreflightErrors);
+        if (cfg.RodMode == "to_structure") rep.PreflightErrors.Add("rod_length.mode=to_structure：目前只支援橋架吊架，配管吊架請用 none 或 fixed");
         if (inputs.Count == 0) rep.PreflightErrors.Add("沒有可處理的 Conduit");
         var pr = ConduitHangers.Pair(inputs, cc);
         rep.LayoutIssues.AddRange(pr.Issues);

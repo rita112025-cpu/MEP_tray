@@ -66,6 +66,9 @@ public sealed class HangerConfig
     public string RodMode = "";
     public double? RodLengthMm;
     public ParamRef? RodParam;
+    // rod_length.mode = to_structure 專用（皆由設定檔提供，無預設值）
+    public double RodOffsetMm, RodMinMm, RodMaxMm;
+    public double? RodRoundToMm;
     public double DedupeToleranceMm, DedupeAngleToleranceDeg;
     // 校正（「校正目標吊架」寫入；放置前由 Revit 端核對族檔與專案中的族）
     public string CalibFilePath = "", CalibSha256 = "", CalibProjectSignature = "";
@@ -84,7 +87,7 @@ public static class HangerConfigReader
     public static readonly string[] SpacingModes = { "even", "fixed" };
     public static readonly string[] PlacementModes = { "level", "workplane" };
     public static readonly string[] Scopes = { "type", "instance" };
-    public static readonly string[] RodModes = { "none", "fixed" };
+    public static readonly string[] RodModes = { "none", "fixed", "to_structure" };
     public static readonly string[] SupportedObjects = { "cable_tray" };
     public const string TestFailNthKey = "test_fail_nth";
     public const string InstanceParamsKey = "instance_params";
@@ -143,6 +146,26 @@ public static class HangerConfigReader
         return e;
     }
 
+    /// <summary>rod_length.mode=to_structure 的欄位：吊桿長度參數（限 instance）、offset／min／max 必填、round_to 選填；與 Python _rod_to_structure_errors 一致。</summary>
+    static List<string> RodToStructureErrors(JsonObject rod)
+    {
+        var e = ParamRefErrors(rod["param"], "rod_length.param");
+        if (rod["param"] is JsonObject pr && Str(pr["scope"]) == "type")
+            e.Add("rod_length.param.scope：to_structure 的吊桿長度每支不同，必須為 instance（type 會產生大量工具類型）");
+        var off = Num(rod["offset_mm"]);
+        if (Missing(rod, "offset_mm")) e.Add("rod_length.offset_mm：to_structure 時必填（長度 = 結構面 Z − 吊架承托面 Z + offset；可為負或 0，需明確填寫）");
+        else if (off is null) e.Add("rod_length.offset_mm：需為有限數");
+        var min = Num(rod["min_mm"]);
+        if (Missing(rod, "min_mm")) e.Add("rod_length.min_mm：to_structure 時必填（工具不提供預設）");
+        else if (min is null || min < 0) e.Add("rod_length.min_mm：需為 ≥ 0 的有限數");
+        var max = Num(rod["max_mm"]);
+        if (Missing(rod, "max_mm")) e.Add("rod_length.max_mm：to_structure 時必填（工具不提供預設）");
+        else if (max is null || max <= 0) e.Add("rod_length.max_mm：需為 > 0 的有限數");
+        else if (min is not null && min >= 0 && max < min) e.Add("rod_length.max_mm：不得小於 min_mm");
+        if (rod.ContainsKey("round_to_mm") && !(Num(rod["round_to_mm"]) is double rt && rt > 0)) e.Add("rod_length.round_to_mm：選填，需為 > 0 的有限數（未填 = 只取到 0.001 mm）");
+        return e;
+    }
+
     public static List<string> ValidatePlacement(JsonNode? root)
     {
         var e = ValidateLayout(root);
@@ -163,7 +186,7 @@ public static class HangerConfigReader
         if (Array.IndexOf(PlacementModes, Str(c["placement_mode"])) < 0) e.Add("placement_mode：需為 level 或 workplane（需與族的放置方式一致）");
         if (c["parameter_map"] is not JsonObject pm) e.Add("parameter_map：缺少");
         else e.AddRange(ParamRefErrors(pm["cross_member_length"], "parameter_map.cross_member_length"));
-        if (c["rod_length"] is not JsonObject rod || Array.IndexOf(RodModes, Str(rod["mode"])) < 0) e.Add("rod_length.mode：需為 none 或 fixed");
+        if (c["rod_length"] is not JsonObject rod || Array.IndexOf(RodModes, Str(rod["mode"])) < 0) e.Add("rod_length.mode：需為 none、fixed 或 to_structure");
         else if (Str(rod["mode"]) == "fixed")
         {
             var v = Num(rod["value_mm"]);
@@ -171,6 +194,7 @@ public static class HangerConfigReader
             else if (v is null || v <= 0) e.Add("rod_length.value_mm：需為 > 0 的有限數");
             e.AddRange(ParamRefErrors(rod["param"], "rod_length.param"));
         }
+        else if (Str(rod["mode"]) == "to_structure") e.AddRange(RodToStructureErrors(rod));
         if (c["dedupe"] is not JsonObject dd) e.Add("dedupe：缺少（tolerance_mm、angle_tolerance_deg）");
         else
         {
@@ -262,6 +286,14 @@ public static class HangerConfigReader
         {
             cfg.RodLengthMm = Num(rod["value_mm"]);
             cfg.RodParam = new ParamRef(Str(rod["param"]!["name"])!, Str(rod["param"]!["scope"])!);
+        }
+        else if (cfg.RodMode == "to_structure")
+        {
+            cfg.RodParam = new ParamRef(Str(rod["param"]!["name"])!, Str(rod["param"]!["scope"])!);
+            cfg.RodOffsetMm = Num(rod["offset_mm"])!.Value;
+            cfg.RodMinMm = Num(rod["min_mm"])!.Value;
+            cfg.RodMaxMm = Num(rod["max_mm"])!.Value;
+            cfg.RodRoundToMm = Num(rod["round_to_mm"]);
         }
         cfg.DedupeToleranceMm = Num(c["dedupe"]!["tolerance_mm"])!.Value;
         cfg.DedupeAngleToleranceDeg = Num(c["dedupe"]!["angle_tolerance_deg"])!.Value;

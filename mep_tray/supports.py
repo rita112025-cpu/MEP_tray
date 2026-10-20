@@ -20,7 +20,7 @@ SHORT_POLICIES = ("midpoint", "skip")
 SPACING_MODES = ("even", "fixed")             # 未填 = even
 PLACEMENT_MODES = ("level", "workplane")      # face/host-based 族 v1 不支援（預檢列為 failed）
 SCOPES = ("type", "instance")
-ROD_MODES = ("none", "fixed")
+ROD_MODES = ("none", "fixed", "to_structure")
 SUPPORTED_OBJECTS = ("cable_tray",)            # conduit 之後擴充；核心與物件種類無關
 TEST_FAIL_NTH_KEY = "test_fail_nth"            # 驗收用測試開關（選填）；只影響 Revit 放置迴圈，Python 端只驗證
 INT64_MAX = 2 ** 63 - 1                        # 與 C# long 上限一致
@@ -101,6 +101,31 @@ def _param_ref_errors(v, field: str) -> list[str]:
     return e
 
 
+def _rod_to_structure_errors(rod: dict) -> list[str]:
+    """rod_length.mode=to_structure：吊桿長度參數（限 instance）、offset／min／max 必填、round_to 選填（與 C# 一致）。"""
+    e = _param_ref_errors(rod.get("param"), "rod_length.param")
+    if isinstance(rod.get("param"), dict) and rod["param"].get("scope") == "type":
+        e.append("rod_length.param.scope：to_structure 的吊桿長度每支不同，必須為 instance（type 會產生大量工具類型）")
+    off, mn, mx = rod.get("offset_mm"), rod.get("min_mm"), rod.get("max_mm")
+    if off is None:
+        e.append("rod_length.offset_mm：to_structure 時必填（長度 = 結構面 Z − 吊架承托面 Z + offset；可為負或 0，需明確填寫）")
+    elif not _num(off):
+        e.append("rod_length.offset_mm：需為有限數")
+    if mn is None:
+        e.append("rod_length.min_mm：to_structure 時必填（工具不提供預設）")
+    elif not _num(mn) or mn < 0:
+        e.append("rod_length.min_mm：需為 ≥ 0 的有限數")
+    if mx is None:
+        e.append("rod_length.max_mm：to_structure 時必填（工具不提供預設）")
+    elif not _num(mx) or mx <= 0:
+        e.append("rod_length.max_mm：需為 > 0 的有限數")
+    elif _num(mn) and mn >= 0 and mx < mn:
+        e.append("rod_length.max_mm：不得小於 min_mm")
+    if "round_to_mm" in rod and not (_num(rod["round_to_mm"]) and rod["round_to_mm"] > 0):
+        e.append("rod_length.round_to_mm：選填，需為 > 0 的有限數（未填 = 只取到 0.001 mm）")
+    return e
+
+
 def validate_placement_config(cfg) -> list[str]:
     """實際放置所需的全部欄位（含佈置欄位）。"""
     e = validate_layout_config(cfg)
@@ -140,7 +165,7 @@ def validate_placement_config(cfg) -> list[str]:
         e += _param_ref_errors(pm.get("cross_member_length"), "parameter_map.cross_member_length")
     rod = cfg.get("rod_length")
     if not isinstance(rod, dict) or rod.get("mode") not in ROD_MODES:
-        e.append("rod_length.mode：需為 none 或 fixed")
+        e.append("rod_length.mode：需為 none、fixed 或 to_structure")
     elif rod["mode"] == "fixed":
         v = rod.get("value_mm")
         if v is None:
@@ -148,6 +173,8 @@ def validate_placement_config(cfg) -> list[str]:
         elif not _num(v) or v <= 0:
             e.append("rod_length.value_mm：需為 > 0 的有限數")
         e += _param_ref_errors(rod.get("param"), "rod_length.param")
+    elif rod["mode"] == "to_structure":
+        e += _rod_to_structure_errors(rod)
     dd = cfg.get("dedupe")
     if not isinstance(dd, dict):
         e.append("dedupe：缺少（tolerance_mm、angle_tolerance_deg）")
@@ -465,6 +492,25 @@ def placement(support: dict, cfg: dict) -> dict:
         "cross_member_length_mm": _r3(support["tray_width_mm"] + left + right),
         "rod_length_mm": _r3(rod["value_mm"]) if rod["mode"] == "fixed" else None,
     }
+
+
+def rod_length_to_structure(bearing_z_mm: float, hit_z_mm: float, tray_top_z_mm: float, rod: dict) -> dict:
+    """rod_length.mode=to_structure 的長度計算（與 C# RodLength.Compute 一致；rod 必須已通過驗證）。
+    長度 = 結構面 Z − 吊架承托面 Z + offset_mm；有 round_to_mm 時取最接近的倍數（恰在中間遠離 0 進位），最後取到 0.001 mm。
+    結構面須高於橋架頂面；結果須在 [min_mm, max_mm]。回傳 {"length_mm": float|None, "code": None|not_above_tray|below_min|above_max}。"""
+    if hit_z_mm <= tray_top_z_mm:
+        return {"length_mm": None, "code": "not_above_tray"}
+    raw = hit_z_mm - bearing_z_mm + float(rod["offset_mm"])
+    step = rod.get("round_to_mm")
+    if step is not None:
+        q = raw / float(step)
+        raw = math.copysign(math.floor(abs(q) + 0.5), q) * float(step)
+    length = _r3(raw)
+    if length < float(rod["min_mm"]):
+        return {"length_mm": None, "code": "below_min"}
+    if length > float(rod["max_mm"]):
+        return {"length_mm": None, "code": "above_max"}
+    return {"length_mm": length, "code": None}
 
 
 # ---------------------------------------------------------------- 去重／重跑

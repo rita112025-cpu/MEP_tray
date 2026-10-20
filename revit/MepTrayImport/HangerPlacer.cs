@@ -25,6 +25,11 @@ public sealed class HangerItem
     public double TrayDirectionDeg { get; set; }
     public double CrossMemberLengthMm { get; set; }
     public double? RodLengthMm { get; set; }
+    /// <summary>rod_length.mode=to_structure：命中的結構元件（連結模型時為連結內元素 Id，HitLinkInstanceId 為連結實例 Id）、類別、結構面 Z（mm）。</summary>
+    public string? HitElementId { get; set; }
+    public string? HitLinkInstanceId { get; set; }
+    public string? HitCategory { get; set; }
+    public double? HitZMm { get; set; }
     public string Reason { get; set; } = "";
     /// <summary>new | exists | pending(待確認) | created | failed</summary>
     public string Status { get; set; } = "";
@@ -37,6 +42,7 @@ public sealed class HangerRunReport
 {
     public string BatchId { get; set; } = "";
     public string Entry { get; set; } = "";        // import | selection
+    public string RodMode { get; set; } = "";      // none | fixed | to_structure
     public string Coordinates { get; set; } = "Revit 內部座標（mm）；TrayPoint=橋架中心線，Bearing=承托面，Insertion=族插入點";
     /// <summary>完成 | 部分完成 | 失敗 | 已取消 | 預覽</summary>
     public string Outcome { get; set; } = "預覽";
@@ -61,6 +67,14 @@ public sealed class HangerRunReport
         if (bad.Count > 0)
             s += "\n佈置問題：\n  " + string.Join("\n  ", bad.Take(30).Select(i => $"[{i.Level}] {i.Code} {i.PieceId} @({i.LocationMm[0]:F0},{i.LocationMm[1]:F0},{i.LocationMm[2]:F0}) {i.Detail}"))
                  + (bad.Count > 30 ? $"\n  …其餘 {bad.Count - 30} 筆見報告檔" : "");
+        if (RodMode == "to_structure")
+        {
+            var rods = Items.Where(i => (i.Status is "new" or "created") && i.RodLengthMm is not null).ToList();
+            if (rods.Count > 0)
+                s += "\n吊桿長度（至結構）：\n  " + string.Join("\n  ", rods.Take(30).Select(i =>
+                         $"{i.SupportId} 橋架 {i.TrayId} station {i.StationMm:F0}：{i.RodLengthMm:F1} mm，結構面 Z={i.HitZMm:F1}，{i.HitCategory} {i.HitElementId}" + (i.HitLinkInstanceId is null ? "" : $"（連結實例 {i.HitLinkInstanceId}）")))
+                     + (rods.Count > 30 ? $"\n  …其餘 {rods.Count - 30} 筆見報告檔" : "");
+        }
         var fp = Items.Where(i => i.Status is "pending" or "failed").ToList();
         if (fp.Count > 0)
             s += "\n待確認／失敗：\n  " + string.Join("\n  ", fp.Take(30).Select(i => $"{i.Status} 橋架 {i.TrayId} station {i.StationMm:F0}：{i.Detail}"))
@@ -218,6 +232,11 @@ public static class HangerPlacer
         else if (need != cfg.PlacementMode) errors.Add($"placement_mode={cfg.PlacementMode} 與族放置方式 {pt}（需 {need}）不符");
         if (checkCalibration) errors.AddRange(HangerCalibration.CheckCalibration(doc, cfg));   // 族檔或專案中的族變更 → 必須重新校正
         CheckParam(sym, cfg.CrossMemberLength!, "parameter_map.cross_member_length", errors);
+        if (cfg.RodMode == "to_structure")
+        {
+            if (RodToStructure.PickView(doc) == null) errors.Add("rod_length.mode=to_structure：找不到可用的 3D 視圖（非範本、非透視）；請先建立 3D 視圖（工具不自動建立）");
+            if (sym.LookupParameter(cfg.RodParam!.Name) != null) errors.Add($"rod_length.param：設定為 instance，但「{cfg.RodParam.Name}」是類型參數");
+        }
         if (cfg.RodMode == "fixed") CheckParam(sym, cfg.RodParam!, "rod_length.param（固定吊桿長度）", errors, unsupportedIfMissing: true);
         // instance_params：族類型上同名者是類型參數 → 預檢失敗。實例參數（含綁定到類別的共用參數）要建立實例後才能確認；
         // 屆時不存在／唯讀／非文字 → 該支 failed 並回滾（與 instance 長度參數相同）
@@ -243,7 +262,7 @@ public static class HangerPlacer
     // ── 4. 計畫（不改模型）──
     public static HangerRunReport Plan(Document doc, IEnumerable<ElementId> trayIds, HangerConfig cfg, string entry, out Dictionary<string, CableTray> trays, out Resolved? resolved, bool checkCalibration = true)
     {
-        var rep = new HangerRunReport { BatchId = $"{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}"[..24], Entry = entry };
+        var rep = new HangerRunReport { BatchId = $"{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}"[..24], Entry = entry, RodMode = cfg.RodMode };
         var (pieces, links, tr, problems) = ReadTrays(doc, trayIds);
         trays = tr;
         var trayMap = tr;
@@ -268,6 +287,7 @@ public static class HangerPlacer
                 Detail = cls[i].Status == "new" ? "" : cls[i].Reason + (cls[i].Match.Count > 0 ? "（元素 " + string.Join(",", cls[i].Match) + "）" : ""),
             });
         }
+        if (cfg.RodMode == "to_structure" && rep.PreflightErrors.Count == 0) RodToStructure.Apply(doc, rep, cfg, trays);
         // 承托面交叉檢查：以 Revit 自己的底部高程參數比對 中心線−高度/2
         foreach (var (id, t) in trays)
         {
@@ -329,7 +349,8 @@ public static class HangerPlacer
                 var ins = Ft(it.InsertionPointMm);
                 var fi = PlaceInstance(doc, sym, cfg.PlacementMode, ins, it.RotationDeg, planes, levels, zNotes);
                 if (cfg.CrossMemberLength.Scope == "instance") SetLen(fi, cfg.CrossMemberLength.Name, CrossParamMm(cfg, it.CrossMemberLengthMm), "橫擔長度");
-                if (cfg.RodMode == "fixed" && cfg.RodParam!.Scope == "instance") SetLen(fi, cfg.RodParam.Name, it.RodLengthMm!.Value, "吊桿長度");
+                if (cfg.RodMode == "to_structure" && it.RodLengthMm is null) throw new InvalidOperationException("to_structure 吊桿長度尚未算出，不建立此支");
+                if (cfg.RodMode != "none" && cfg.RodParam!.Scope == "instance") SetLen(fi, cfg.RodParam.Name, it.RodLengthMm!.Value, "吊桿長度");
                 foreach (var ip in cfg.InstanceParams) SetText(fi, ip);   // instance_params（只寫本支新建實例）
                 doc.Regenerate();
                 // 讀回驗證：插入點與旋轉
@@ -341,6 +362,13 @@ public static class HangerPlacer
                 var rotBack = Supports.Norm360(lp.Rotation * 180.0 / Math.PI);
                 var dr = Math.Abs(rotBack - it.RotationDeg); dr = Math.Min(dr, 360 - dr);
                 if (dr > ReadbackTolDeg) throw new InvalidOperationException($"讀回旋轉 {rotBack:F2}° 與目標 {it.RotationDeg:F2}° 不符");
+                if (cfg.RodMode == "to_structure")
+                {
+                    var rp = fi.LookupParameter(cfg.RodParam!.Name) ?? throw new InvalidOperationException($"讀回時找不到吊桿長度參數「{cfg.RodParam.Name}」");
+                    var rodBack = Units.FeetToMm(rp.AsDouble());
+                    if (Math.Abs(rodBack - it.RodLengthMm!.Value) > ReadbackTolMm)
+                        throw new InvalidOperationException($"讀回吊桿長度 {rodBack:F1} mm 與目標 {it.RodLengthMm.Value:F1} mm 不符（族參數可能被公式或約束覆蓋）");
+                }
                 foreach (var ip in cfg.InstanceParams)   // 讀回驗證：instance_params 逐字相同
                     if (InstanceParamText.ReadbackError(ip.Name, ip.Value, fi.LookupParameter(ip.Name)?.AsString()) is string ipErr) throw new InvalidOperationException(ipErr);
                 var e = new Entity(schema);
