@@ -422,6 +422,123 @@ def test_import_all_hangers_failed_rolls_back_whole_batch():
     assert "若沒有任何吊架建立成功（全部失敗），與選取補吊架相同整批回滾，本入口的整批含橋架" in m
 
 
+# ---------- instance_params（吊架實例文字參數） ----------
+IP_ARRAY_MSG = "instance_params：需為陣列（每項 {\"name\": 參數確切名稱, \"value\": 文字}；未填或 [] = 不寫入）"
+IP_OK = [{"name": "<參數A>", "value": "<值A>"}, {"name": "<參數B>", "value": "<值B>"}]   # 測試用佔位字，非實際名稱／編碼
+IP_BAD = (
+    ("not_list", {"name": "a", "value": "b"}, ["instance_params"]),
+    ("str", "a", ["instance_params"]),
+    ("null", None, ["instance_params"]),
+    ("item_str", ["a"], ["instance_params[0]"]),
+    ("item_null", [None], ["instance_params[0]"]),
+    ("no_name", [{"value": "v"}], ["instance_params[0].name"]),
+    ("blank_name", [{"name": "  ", "value": "v"}], ["instance_params[0].name"]),
+    ("num_name", [{"name": 1, "value": "v"}], ["instance_params[0].name"]),
+    ("padded_name", [{"name": " a", "value": "v"}], ["instance_params[0].name"]),
+    ("no_value", [{"name": "a"}], ["instance_params[0].value"]),
+    ("empty_value", [{"name": "a", "value": ""}], ["instance_params[0].value"]),
+    ("blank_value", [{"name": "a", "value": " "}], ["instance_params[0].value"]),
+    ("num_value", [{"name": "a", "value": 12}], ["instance_params[0].value"]),
+    ("bool_value", [{"name": "a", "value": True}], ["instance_params[0].value"]),
+    ("extra_key", [{"name": "a", "value": "v", "scope": "instance"}], ["instance_params[0]"]),
+    ("dup", [{"name": "a", "value": "1"}, {"name": "b", "value": "2"}, {"name": "a", "value": "3"}], ["instance_params[2].name"]),
+    ("cross_member", [{"name": "P", "value": "v"}], ["instance_params[0].name"]),
+    ("multi", [{"name": "", "value": ""}, 3], ["instance_params[0].name", "instance_params[0].value", "instance_params[1]"]),
+)
+
+
+def test_instance_params_absent_or_empty_is_valid_and_changes_nothing():
+    assert S.validate_placement_config(pcfg()) == []
+    assert S.validate_placement_config(pcfg(instance_params=[])) == []
+    assert S.validate_placement_config(pcfg(instance_params=IP_OK)) == []
+    pieces = [P("A", (0, 0, 3000), (6000, 0, 3000))]
+    off, on = pcfg(max_spacing_mm=1350.0), pcfg(max_spacing_mm=1350.0, instance_params=IP_OK)
+    lo, ln = S.layout(pieces, [], off), S.layout(pieces, [], on)
+    assert lo == ln and [S.placement(s, off) for s in lo["supports"]] == [S.placement(s, on) for s in ln["supports"]]
+    assert S.validate_layout_config(pcfg(instance_params="bad")) == []          # 不屬於佈置欄位
+
+
+@pytest.mark.parametrize("name,value,fields", IP_BAD)
+def test_instance_params_invalid_rejected_and_only_those_fields(name, value, fields):
+    assert S.error_fields(S.validate_placement_config(pcfg(instance_params=value))) == fields, name
+
+
+def test_instance_params_messages():
+    assert S.validate_placement_config(pcfg(instance_params=5)) == [IP_ARRAY_MSG]
+    errs = S.validate_placement_config(pcfg(instance_params=[{"name": "a", "value": "1"}, {"name": "a", "value": "2"}]))
+    assert errs == ["instance_params[1].name：「a」與 instance_params[0] 重複"]
+    errs = S.validate_placement_config(pcfg(instance_params=[{"name": "a", "value": ""}]))
+    assert errs == ["instance_params[0].value：需為非空白文字（取自物件編碼規則；工具不寫入空值）"]
+    rod = {"mode": "fixed", "value_mm": 650.0, "param": {"name": "R", "scope": "instance"}}
+    errs = S.validate_placement_config(pcfg(rod_length=rod, instance_params=[{"name": "R", "value": "x"}]))
+    assert errs == ["instance_params[0].name：「R」是橫擔／吊桿長度參數，不可由 instance_params 覆寫"]
+    # rod_length=none 時吊桿參數不寫，同名不算衝突
+    assert S.validate_placement_config(pcfg(instance_params=[{"name": "R", "value": "x"}])) == []
+    # 錯誤順序：test_fail_nth 之後、calibration 之前（與 C# 相同）
+    errs = S.error_fields(S.validate_placement_config(pcfg(test_fail_nth=0, instance_params=1, calibration=None)))
+    assert errs == ["test_fail_nth", "instance_params", "calibration"]
+
+
+def test_instance_params_schema_docs_and_no_invented_values():
+    s = json.loads((ROOT / "docs" / "schemas" / "tray_hanger_config.schema.json").read_text(encoding="utf-8"))
+    p = s["properties"]["instance_params"]
+    assert p["type"] == "array" and "instance_params" not in s["required"]
+    it = p["items"]
+    assert it["required"] == ["name", "value"] and it["additionalProperties"] is False
+    assert it["properties"]["name"]["type"] == it["properties"]["value"]["type"] == "string"
+    assert it["properties"]["value"]["minLength"] == 1
+    assert "共用參數檔" in p["description"] and "物件編碼規則" in p["description"]
+    cs = json.loads((ROOT / "docs" / "schemas" / "conduit_hanger_config.schema.json").read_text(encoding="utf-8"))
+    assert "instance_params" in cs["description"] and "instance_params" not in cs["properties"]
+    t = (ROOT / "docs" / "examples" / "tray_hanger_config.template.json").read_text(encoding="utf-8")
+    assert "instance_params" not in t
+    m = (ROOT / "docs" / "MANUAL.md").read_text(encoding="utf-8")
+    sec = m[m.index("`instance_params`"):]
+    assert '"<共用參數名稱>"' in sec and "格式範例" in sec and "BEP 表 7" in sec and "物件編碼規則" in sec
+    # 原始碼不得寫死任何參數名稱或編碼：BEP 表 7 的欄位名只可出現在說明文字
+    for f in (ROOT / "revit" / "MepTray.Core" / "Supports.cs", HP / "HangerPlacer.cs", ROOT / "mep_tray" / "supports.py"):
+        txt = f.read_text(encoding="utf-8")
+        for w in ("設計用系統分類編碼", "施工用系統分類編碼", "工項對應編碼", "維運用編碼"):
+            assert w not in txt, (f.name, w)
+
+
+def test_instance_params_csharp_reader_mirrors_python():
+    core = (ROOT / "revit" / "MepTray.Core" / "Supports.cs").read_text(encoding="utf-8")
+    assert 'InstanceParamsKey = "instance_params"' in core and "public List<InstanceParamValue> InstanceParams = new();" in core
+    assert "public sealed record InstanceParamValue(string Name, string Value);" in core
+    vp = core[core.index("public static List<string> ValidatePlacement"):core.index("static List<string> CalibrationErrors")]
+    assert vp.index("TestFailNthKey") < vp.index("InstanceParamErrors(c)") < vp.index("CalibrationErrors(c)")
+    assert "InstanceParamValue" not in core[core.index("public static List<string> ValidateLayout"):core.index("static List<string> ParamRefErrors")]
+    for msg in ("需為非空白文字（取自物件編碼規則；工具不寫入空值）", "前後不可有空白（需與 Revit 參數名稱完全相同）",
+                "是橫擔／吊桿長度參數，不可由 instance_params 覆寫", "只接受 name、value（多出 "):
+        assert msg in core and msg in (ROOT / "mep_tray" / "supports.py").read_text(encoding="utf-8"), msg
+
+
+def test_instance_params_revit_execute_sets_then_reads_back_new_only():
+    """Revit 端只能做原始碼檢查（實機另驗）：只對 Status=new 的本支新建實例 LookupParameter → 檢查（存在/可寫/String）→ Set → 讀回比對，
+    都在 SubTransaction 內、Commit 之前；失敗由既有 catch 只回滾該支。"""
+    pl = (HP / "HangerPlacer.cs").read_text(encoding="utf-8")
+    ex = pl[pl.index("public static void Execute("):pl.index("public static double CrossParamMm")]
+    loop = ex[ex.index('foreach (var it in rep.Items.Where(i => i.Status == "new"))'):]
+    i_set = loop.index("foreach (var ip in cfg.InstanceParams) SetText(fi, ip);")
+    i_back = loop.index("InstanceParamText.ReadbackError(ip.Name, ip.Value, fi.LookupParameter(ip.Name)?.AsString())")
+    assert loop.index("new SubTransaction(doc)") < loop.index("PlaceInstance(doc, sym") < i_set < loop.index("讀回旋轉") < i_back
+    assert i_back < loop.index("fi.SetEntity(e);") < loop.index("var st = sub.Commit();") < loop.index("（僅此支回滾）")
+    st = pl[pl.index("static void SetText(Element e, InstanceParamValue ip)"):]
+    st = st[:st.index("\n    }") + 6]
+    assert "e.LookupParameter(ip.Name)" in st and "p?.IsReadOnly == true" in st and "p?.StorageType == StorageType.String" in st
+    assert "p!.Set(ip.Value)" in st and "throw new InvalidOperationException" in st
+    assert pl.count("SetText(") == 2                                        # 只在新建實例迴圈使用
+    # 預檢（族類型同名 → 類型參數）與預覽／報告
+    pf = pl[pl.index("public static Resolved? Preflight("):pl.index("static void CheckParam(")]
+    assert "sym.LookupParameter(cfg.InstanceParams[i].Name) != null" in pf and "InstanceParamText.TypeParamError(i" in pf
+    assert pl.count("ApplyInstanceParams(rep, cfg);") == 1 and "HangerPlacer.ApplyInstanceParams(rep, cfg);" in (HP / "ConduitHangerRun.cs").read_text(encoding="utf-8")
+    assert "public List<InstanceParamValue> InstanceParams { get; } = new();" in pl
+    for f in ("HangerCalibration.cs", "CalibrateHangerCommand.cs"):
+        t = (HP / f).read_text(encoding="utf-8")
+        assert "InstanceParamValue" not in t and "instance_params" not in t, f
+
+
 # ---------- C# 契約 ----------
 def contract_cases() -> dict:
     lc = []
@@ -463,6 +580,10 @@ def contract_cases() -> dict:
     add("fail_nth_on", [P("A", (0, 0, 3000), (6000, 0, 3000))], [], pcfg(max_spacing_mm=1350.0, test_fail_nth=2))
     for nm, v in TEST_FAIL_NTH_BAD:
         add(f"cfg_fail_nth_{nm}", [], [], pcfg(test_fail_nth=v))
+    add("ip_on", [P("A", (0, 0, 3000), (6000, 0, 3000))], [], pcfg(max_spacing_mm=1350.0, instance_params=IP_OK))
+    add("ip_empty", [], [], pcfg(instance_params=[]))
+    for nm, v, _ in IP_BAD:
+        add(f"cfg_ip_{nm}", [], [], pcfg(instance_params=v))
     base = S.layout([P("A", (0, 0, 0), (5000, 0, 0))], [], cfg())
     plan = _plan(base)
     cc = [

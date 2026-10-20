@@ -47,6 +47,8 @@ public sealed class HangerRunReport
     public List<string> Notes { get; } = new();
     /// <summary>驗收用測試開關 test_fail_nth（null = 關閉）；啟用時預覽與結果最上方顯示警告。</summary>
     public long? TestFailNth { get; set; }
+    /// <summary>instance_params：本批新建吊架寫入的實例文字參數（名稱、值；空 = 未設定）。</summary>
+    public List<InstanceParamValue> InstanceParams { get; } = new();
 
     public int Count(string status) => Items.Count(i => i.Status == status);
 
@@ -217,6 +219,10 @@ public static class HangerPlacer
         if (checkCalibration) errors.AddRange(HangerCalibration.CheckCalibration(doc, cfg));   // 族檔或專案中的族變更 → 必須重新校正
         CheckParam(sym, cfg.CrossMemberLength!, "parameter_map.cross_member_length", errors);
         if (cfg.RodMode == "fixed") CheckParam(sym, cfg.RodParam!, "rod_length.param（固定吊桿長度）", errors, unsupportedIfMissing: true);
+        // instance_params：族類型上同名者是類型參數 → 預檢失敗。實例參數（含綁定到類別的共用參數）要建立實例後才能確認；
+        // 屆時不存在／唯讀／非文字 → 該支 failed 並回滾（與 instance 長度參數相同）
+        for (int i = 0; i < cfg.InstanceParams.Count; i++)
+            if (sym.LookupParameter(cfg.InstanceParams[i].Name) != null) errors.Add(InstanceParamText.TypeParamError(i, cfg.InstanceParams[i].Name));
         return errors.Count == 0 ? new Resolved { Symbol = sym, PlacementType = pt } : null;
     }
 
@@ -275,6 +281,7 @@ public static class HangerPlacer
             if (Math.Abs(bottomAbs - calc) > ReadbackTolMm)
                 rep.Notes.Add($"橋架 {id}：Revit 底部高程 {bottomAbs:F1} mm 與 中心線−高度/2 = {calc:F1} mm 不一致（差 {bottomAbs - calc:F1}），請確認承托面基準");
         }
+        ApplyInstanceParams(rep, cfg);
         ApplyTestSwitch(rep, cfg);
         if (rep.PreflightErrors.Count > 0) rep.Outcome = "失敗";
         return rep;
@@ -287,6 +294,14 @@ public static class HangerPlacer
         rep.TestFailNth = n;
         var nNew = rep.Count("new");
         if (n > nNew) rep.Notes.Add(TestSwitch.NotTriggeredNote(n, nNew));
+    }
+
+    /// <summary>instance_params：記到報告（批次層級）並在預覽附註列出名稱與值。未設定時不做任何事。</summary>
+    public static void ApplyInstanceParams(HangerRunReport rep, HangerConfig cfg)
+    {
+        if (cfg.InstanceParams.Count == 0) return;
+        rep.InstanceParams.AddRange(cfg.InstanceParams);
+        rep.Notes.Add(InstanceParamText.PreviewNote(cfg.InstanceParams));
     }
 
     // ── 5. 放置（呼叫端已開 Transaction，並在 TransactionGroup 內）──
@@ -315,6 +330,7 @@ public static class HangerPlacer
                 var fi = PlaceInstance(doc, sym, cfg.PlacementMode, ins, it.RotationDeg, planes, levels, zNotes);
                 if (cfg.CrossMemberLength.Scope == "instance") SetLen(fi, cfg.CrossMemberLength.Name, CrossParamMm(cfg, it.CrossMemberLengthMm), "橫擔長度");
                 if (cfg.RodMode == "fixed" && cfg.RodParam!.Scope == "instance") SetLen(fi, cfg.RodParam.Name, it.RodLengthMm!.Value, "吊桿長度");
+                foreach (var ip in cfg.InstanceParams) SetText(fi, ip);   // instance_params（只寫本支新建實例）
                 doc.Regenerate();
                 // 讀回驗證：插入點與旋轉
                 if (fi.Location is not LocationPoint lp) throw new InvalidOperationException("放置後沒有 LocationPoint，無法驗證");
@@ -325,6 +341,8 @@ public static class HangerPlacer
                 var rotBack = Supports.Norm360(lp.Rotation * 180.0 / Math.PI);
                 var dr = Math.Abs(rotBack - it.RotationDeg); dr = Math.Min(dr, 360 - dr);
                 if (dr > ReadbackTolDeg) throw new InvalidOperationException($"讀回旋轉 {rotBack:F2}° 與目標 {it.RotationDeg:F2}° 不符");
+                foreach (var ip in cfg.InstanceParams)   // 讀回驗證：instance_params 逐字相同
+                    if (InstanceParamText.ReadbackError(ip.Name, ip.Value, fi.LookupParameter(ip.Name)?.AsString()) is string ipErr) throw new InvalidOperationException(ipErr);
                 var e = new Entity(schema);
                 e.Set("Source", ToolSource);
                 e.Set("TrayUniqueId", it.TrayUniqueId);
@@ -405,6 +423,15 @@ public static class HangerPlacer
         if (p.IsReadOnly) throw new InvalidOperationException($"{what}參數「{name}」唯讀");
         if (p.StorageType != StorageType.Double) throw new InvalidOperationException($"{what}參數「{name}」不是數值");
         if (!p.Set(Units.MmToFeet(mm))) throw new InvalidOperationException($"{what}參數「{name}」設定失敗");
+    }
+
+    /// <summary>instance_params：只接受存在、可寫、StorageType.String 的實例參數；否則拋例外（該支回滾）。</summary>
+    static void SetText(Element e, InstanceParamValue ip)
+    {
+        var p = e.LookupParameter(ip.Name);
+        if (InstanceParamText.Problem(ip.Name, p != null, p?.IsReadOnly == true, p?.StorageType == StorageType.String, p?.StorageType.ToString() ?? "") is string err)
+            throw new InvalidOperationException(err);
+        if (!p!.Set(ip.Value)) throw new InvalidOperationException(InstanceParamText.SetFailed(ip.Name));
     }
 
     /// <summary>類型參數需依橋架寬度變化時：建立或重用工具專用類型（名稱含 (MEPTRAY …)），絕不修改原類型。</summary>

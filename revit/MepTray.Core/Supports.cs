@@ -48,6 +48,8 @@ public sealed record PlannedKey(string TrayKey, double StationMm, double[] Point
 public sealed record Classification(string Status, List<string> Match, string Reason);
 
 public sealed record ParamRef(string Name, string Scope);
+/// <summary>instance_params 的一項：Revit 參數確切名稱與要寫入的文字值（皆取自設定）。</summary>
+public sealed record InstanceParamValue(string Name, string Value);
 
 /// <summary>已驗證的設定（由 HangerConfigReader.Read 產生）。</summary>
 public sealed class HangerConfig
@@ -72,6 +74,8 @@ public sealed class HangerConfig
     // 驗收用測試開關（選填 test_fail_nth；null = 關閉）：只讓 Revit 放置迴圈的第 N 支 new 吊架故意失敗。
     // 不影響佈置、去重、族座標換算，也不計入校正簽章（簽章只看族內容）。
     public long? TestFailNth;
+    // 選填 instance_params：新建吊架實例要寫入的文字參數（空 = 不寫入，行為不變）。名稱／值取自業主共用參數檔與物件編碼規則。
+    public List<InstanceParamValue> InstanceParams = new();
 }
 
 public static class HangerConfigReader
@@ -83,6 +87,7 @@ public static class HangerConfigReader
     public static readonly string[] RodModes = { "none", "fixed" };
     public static readonly string[] SupportedObjects = { "cable_tray" };
     public const string TestFailNthKey = "test_fail_nth";
+    public const string InstanceParamsKey = "instance_params";
 
     static double? Num(JsonNode? n)
     {
@@ -175,7 +180,35 @@ public static class HangerConfigReader
             if (a is null || a < 0 || a >= 90) e.Add("dedupe.angle_tolerance_deg：需為 0 ≤ 值 < 90");
         }
         if (c.ContainsKey(TestFailNthKey) && PositiveInt(c[TestFailNthKey]) is null) e.Add("test_fail_nth：驗收用測試開關，需為 ≥ 1 的整數（未填 = 關閉；正式設定勿使用）");
+        e.AddRange(InstanceParamErrors(c));
         e.AddRange(CalibrationErrors(c));
+        return e;
+    }
+
+    /// <summary>instance_params（選填）：新建吊架實例要寫入的文字參數。規則與 Python _instance_params_errors 一致（欄位、順序、訊息相同）。</summary>
+    static List<string> InstanceParamErrors(JsonObject c)
+    {
+        var e = new List<string>();
+        if (!c.ContainsKey(InstanceParamsKey)) return e;
+        if (c[InstanceParamsKey] is not JsonArray arr) { e.Add("instance_params：需為陣列（每項 {\"name\": 參數確切名稱, \"value\": 文字}；未填或 [] = 不寫入）"); return e; }
+        var reserved = new HashSet<string>(StringComparer.Ordinal);
+        if (c["parameter_map"] is JsonObject pm && pm["cross_member_length"] is JsonObject cm && Str(cm["name"]) is string cn) reserved.Add(cn);
+        if (c["rod_length"] is JsonObject rod && Str(rod["mode"]) == "fixed" && rod["param"] is JsonObject rp && Str(rp["name"]) is string rn) reserved.Add(rn);
+        var seen = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (int i = 0; i < arr.Count; i++)
+        {
+            var f = $"instance_params[{i}]";
+            if (arr[i] is not JsonObject it) { e.Add($"{f}：需為物件 {{\"name\": 參數確切名稱, \"value\": 文字}}"); continue; }
+            var extra = it.Select(kv => kv.Key).Where(k => k != "name" && k != "value").ToList();
+            if (extra.Count > 0) e.Add($"{f}：只接受 name、value（多出 {string.Join(", ", extra)}）");
+            var n = Str(it["name"]);
+            if (n is null) e.Add($"{f}.name：缺少（需為吊架實例上 Revit 文字參數的確切名稱，取自業主共用參數檔）");
+            else if (n.Trim() != n) e.Add($"{f}.name：前後不可有空白（需與 Revit 參數名稱完全相同）");
+            else if (seen.TryGetValue(n, out var j)) e.Add($"{f}.name：「{n}」與 instance_params[{j}] 重複");
+            else if (reserved.Contains(n)) e.Add($"{f}.name：「{n}」是橫擔／吊桿長度參數，不可由 instance_params 覆寫");
+            else seen[n] = i;
+            if (Str(it["value"]) is null) e.Add($"{f}.value：需為非空白文字（取自物件編碼規則；工具不寫入空值）");
+        }
         return e;
     }
 
@@ -240,6 +273,9 @@ public static class HangerConfigReader
         cfg.CrossRatio = Num(cal["cross_member_model"]!["ratio"])!.Value;
         cfg.CrossOffsetMm = Num(cal["cross_member_model"]!["offset_mm"])!.Value;
         cfg.TestFailNth = c.ContainsKey(TestFailNthKey) ? PositiveInt(c[TestFailNthKey]) : null;
+        cfg.InstanceParams = c[InstanceParamsKey] is JsonArray ipa
+            ? ipa.Select(x => new InstanceParamValue(Str(x!["name"])!, Str(x["value"])!)).ToList()
+            : new List<InstanceParamValue>();
         return cfg;
     }
 }
@@ -252,6 +288,25 @@ public static class TestSwitch
     public static string NotTriggeredNote(long n, int newCount) => $"⚠ 測試開關 test_fail_nth={n} 大於本次新增數 {newCount}，不會觸發失敗";
     /// <summary>ordinal = 本次 Execute 中第幾支 Status=new 的吊架（1 起算）。</summary>
     public static bool ShouldFail(long? nth, int ordinal) => nth is long n && ordinal == n;
+}
+
+/// <summary>instance_params 的預覽與逐支檢查訊息（Revit 放置迴圈與預檢共用；SelfTest 驗證）。名稱與值全部來自設定，本類別不含任何參數名稱或編碼。</summary>
+public static class InstanceParamText
+{
+    public static string PreviewNote(IReadOnlyList<InstanceParamValue> ps) =>
+        $"新建吊架將寫入實例參數 instance_params（{ps.Count} 項；既有／手動吊架不修改）：" + string.Join("；", ps.Select(p => $"「{p.Name}」=「{p.Value}」"));
+    /// <summary>單支吊架上的參數狀態 → 失敗訊息；null = 可寫入。</summary>
+    public static string? Problem(string name, bool found, bool readOnly, bool isText, string storageType) =>
+        !found ? $"找不到實例參數「{name}」（instance_params；需為吊架族實例上的文字參數，例如已綁定到該類別的共用參數）"
+        : readOnly ? $"實例參數「{name}」唯讀（instance_params）"
+        : !isText ? $"實例參數「{name}」不是文字參數（StorageType={storageType}；instance_params 只支援文字）"
+        : null;
+    public static string SetFailed(string name) => $"實例參數「{name}」設定失敗（instance_params）";
+    /// <summary>讀回值與設定值逐字比對（ordinal）；null = 一致。</summary>
+    public static string? ReadbackError(string name, string expected, string? got) =>
+        string.Equals(expected, got, StringComparison.Ordinal) ? null : $"實例參數「{name}」讀回「{got ?? "(無值)"}」與設定值「{expected}」不符（instance_params）";
+    /// <summary>預檢：名稱在族類型上找到 → 是類型參數，不在 instance_params 範圍。</summary>
+    public static string TypeParamError(int index, string name) => $"instance_params[{index}].name：「{name}」是族類型參數；instance_params 只寫實例參數（類型參數不在範圍）";
 }
 
 /// <summary>放置後的整批決策（選取補吊架、選取配管補吊架、匯入橋架＋吊架同一語意；SelfTest 驗證）。</summary>

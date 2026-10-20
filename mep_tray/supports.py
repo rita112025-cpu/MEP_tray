@@ -24,6 +24,7 @@ ROD_MODES = ("none", "fixed")
 SUPPORTED_OBJECTS = ("cable_tray",)            # conduit 之後擴充；核心與物件種類無關
 TEST_FAIL_NTH_KEY = "test_fail_nth"            # 驗收用測試開關（選填）；只影響 Revit 放置迴圈，Python 端只驗證
 INT64_MAX = 2 ** 63 - 1                        # 與 C# long 上限一致
+INSTANCE_PARAMS_KEY = "instance_params"        # 新建吊架實例要寫入的文字參數（選填）；名稱與值取自業主共用參數檔／物件編碼規則
 
 
 def _num(v) -> bool:
@@ -159,7 +160,52 @@ def validate_placement_config(cfg) -> list[str]:
             e.append("dedupe.angle_tolerance_deg：需為 0 ≤ 值 < 90")
     if TEST_FAIL_NTH_KEY in cfg and not _pos_int(cfg[TEST_FAIL_NTH_KEY]):
         e.append("test_fail_nth：驗收用測試開關，需為 ≥ 1 的整數（未填 = 關閉；正式設定勿使用）")
+    e += _instance_params_errors(cfg)
     e += _calibration_errors(cfg)
+    return e
+
+
+IP_ARRAY_MSG = "instance_params：需為陣列（每項 {\"name\": 參數確切名稱, \"value\": 文字}；未填或 [] = 不寫入）"
+
+
+def _instance_params_errors(cfg: dict) -> list[str]:
+    """instance_params（選填）：新建吊架實例要寫入的文字參數 [{"name", "value"}]。名稱與值必須取自業主共用參數檔與物件編碼規則，
+    工具不提供任何預設。規則與 C# HangerConfigReader.InstanceParamErrors 一致（錯誤欄位、順序、訊息相同）。"""
+    if INSTANCE_PARAMS_KEY not in cfg:
+        return []
+    ip = cfg[INSTANCE_PARAMS_KEY]
+    if not isinstance(ip, list):
+        return [IP_ARRAY_MSG]
+    reserved = set()
+    pm = cfg.get("parameter_map")
+    if isinstance(pm, dict) and isinstance(pm.get("cross_member_length"), dict) and _str(pm["cross_member_length"].get("name")):
+        reserved.add(pm["cross_member_length"]["name"])
+    rod = cfg.get("rod_length")
+    if isinstance(rod, dict) and rod.get("mode") == "fixed" and isinstance(rod.get("param"), dict) and _str(rod["param"].get("name")):
+        reserved.add(rod["param"]["name"])
+    e: list[str] = []
+    seen: dict[str, int] = {}
+    for i, it in enumerate(ip):
+        f = f"instance_params[{i}]"
+        if not isinstance(it, dict):
+            e.append(f"{f}：需為物件 {{\"name\": 參數確切名稱, \"value\": 文字}}")
+            continue
+        extra = [k for k in it if k not in ("name", "value")]
+        if extra:
+            e.append(f"{f}：只接受 name、value（多出 {', '.join(extra)}）")
+        n = it.get("name")
+        if not _str(n):
+            e.append(f"{f}.name：缺少（需為吊架實例上 Revit 文字參數的確切名稱，取自業主共用參數檔）")
+        elif n != n.strip():
+            e.append(f"{f}.name：前後不可有空白（需與 Revit 參數名稱完全相同）")
+        elif n in seen:
+            e.append(f"{f}.name：「{n}」與 instance_params[{seen[n]}] 重複")
+        elif n in reserved:
+            e.append(f"{f}.name：「{n}」是橫擔／吊桿長度參數，不可由 instance_params 覆寫")
+        else:
+            seen[n] = i
+        if not _str(it.get("value")):
+            e.append(f"{f}.value：需為非空白文字（取自物件編碼規則；工具不寫入空值）")
     return e
 
 
