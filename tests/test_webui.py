@@ -686,6 +686,21 @@ def test_run_id_collision_is_retried_with_a_new_id(srv, monkeypatch):
     assert j["state"] == "done" and j["run_id"] == "20990101-000000-aaaaaaaa"
 
 
+def test_job_runs_with_the_same_rules_object_the_form_was_validated_against(srv, monkeypatch):
+    seen = []
+    real = W.P.run
+    monkeypatch.setattr(W.P, "run", lambda *a, **k: (seen.append(k.get("rules")), real(*a, **k))[1])
+    assert run_job(srv)["state"] == "done"
+    assert seen and all(r is srv.rules for r in seen)
+
+
+def test_rules_file_changed_after_start_does_not_leak_into_the_run(srv, monkeypatch):
+    def unreadable(*a, **k):
+        raise AssertionError("pipeline must not reload rules.json when the server passes its own")
+    monkeypatch.setattr(P, "load_rules", unreadable)
+    assert run_job(srv)["state"] == "done"
+
+
 def test_human_error_mapping_covers_all_known_codes_and_cleanup_hint():
     for (stage, code), (title, hint) in W.HUMAN.items():
         h = W.human_error(P.PipelineError(stage, code, "m"))
