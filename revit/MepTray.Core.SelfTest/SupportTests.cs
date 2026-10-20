@@ -82,6 +82,7 @@ static class SupportTests
         Check(threw, "設定不完整時拒絕執行");
         TestFailNth(Check);
         InstanceParams(Check);
+        RodToStructureCases(Check);
         // 去重／重跑
         var plan = fw.Supports.Select(s => new PlannedKey("T1", s.StationMm, s.PointMm, s.DirectionDeg)).ToList();
         var ex = fw.Supports.Select(s => new ExistingHanger("e" + s.Id, "tool", "T1", s.StationMm, s.PointMm, s.DirectionDeg)).ToList();
@@ -112,6 +113,57 @@ static class SupportTests
         var o = JsonNode.Parse(PlaceJson)!.AsObject();
         if (testFailNthLiteral != null) o["test_fail_nth"] = JsonNode.Parse(testFailNthLiteral);
         return o;
+    }
+
+    static JsonObject RodCfg(Action<JsonObject>? f = null)
+    {
+        var o = PlaceCfg();
+        var rod = new JsonObject { ["mode"] = "to_structure", ["param"] = new JsonObject { ["name"] = "R", ["scope"] = "instance" },
+                                   ["offset_mm"] = -20.0, ["min_mm"] = 100.0, ["max_mm"] = 5000.0 };
+        f?.Invoke(rod);
+        o["rod_length"] = rod;
+        return o;
+    }
+
+    static void RodToStructureCases(Action<bool, string> Check)
+    {
+        // 設定驗證：to_structure 的 offset／min／max 必填且無預設；param 限 instance
+        Check(HangerConfigReader.ValidatePlacement(RodCfg()).Count == 0, "to_structure：完整設定合格");
+        foreach (var k in new[] { "offset_mm", "min_mm", "max_mm", "param" })
+        {
+            var errs = HangerConfigReader.ErrorFields(HangerConfigReader.ValidatePlacement(RodCfg(r => r.Remove(k))));
+            Check(errs.SequenceEqual(new[] { "rod_length." + k }), $"to_structure：缺 {k} 被點名且只點名該欄位: {string.Join(",", errs)}");
+        }
+        Check(HangerConfigReader.ErrorFields(HangerConfigReader.ValidatePlacement(RodCfg(r => r["param"]!["scope"] = "type"))).SequenceEqual(new[] { "rod_length.param.scope" }),
+              "to_structure：param.scope=type 被拒絕");
+        Check(HangerConfigReader.ErrorFields(HangerConfigReader.ValidatePlacement(RodCfg(r => { r["min_mm"] = 800.0; r["max_mm"] = 700.0; }))).SequenceEqual(new[] { "rod_length.max_mm" }),
+              "to_structure：max < min 被拒絕");
+        Check(HangerConfigReader.ErrorFields(HangerConfigReader.ValidatePlacement(RodCfg(r => r["min_mm"] = -1.0))).SequenceEqual(new[] { "rod_length.min_mm" }), "to_structure：min < 0 被拒絕");
+        Check(HangerConfigReader.ErrorFields(HangerConfigReader.ValidatePlacement(RodCfg(r => r["max_mm"] = 0.0))).Contains("rod_length.max_mm"), "to_structure：max = 0 被拒絕");
+        Check(HangerConfigReader.ErrorFields(HangerConfigReader.ValidatePlacement(RodCfg(r => r["offset_mm"] = "10"))).SequenceEqual(new[] { "rod_length.offset_mm" }), "to_structure：offset 非數值被拒絕");
+        foreach (var bad in new[] { 0.0, -5.0 })
+            Check(HangerConfigReader.ErrorFields(HangerConfigReader.ValidatePlacement(RodCfg(r => r["round_to_mm"] = bad))).SequenceEqual(new[] { "rod_length.round_to_mm" }), $"to_structure：round_to_mm={bad} 被拒絕");
+        Check(HangerConfigReader.ValidatePlacement(RodCfg(r => { r["round_to_mm"] = 5.0; r["offset_mm"] = 0.0; })).Count == 0, "to_structure：offset=0 與 round_to_mm=5 合格（0 需明確填寫，不是缺漏）");
+        Check(HangerConfigReader.ErrorFields(HangerConfigReader.ValidatePlacement(RodCfg(r => r["mode"] = "structure"))).Contains("rod_length.mode"), "rod_length.mode 未知值被拒絕");
+        Check(HangerConfigReader.ValidatePlacement(PlaceCfg()).Count == 0, "rod_length.mode=none 行為不變");
+        // 佈置層不計算結構長度：Place 不給 RodLengthMm
+        var tcfg = HangerConfigReader.Read(RodCfg(), true);
+        var sp = Supports.Layout(new[] { P("A", new[] { 0.0, 0, 3000 }, new[] { 3000.0, 0, 3000 }) }, new List<SupportLink>(), tcfg).Supports[0];
+        Check(Supports.Place(sp, tcfg).RodLengthMm is null && tcfg.RodMode == "to_structure" && tcfg.RodOffsetMm == -20 && tcfg.RodMinMm == 100 && tcfg.RodMaxMm == 5000 && tcfg.RodRoundToMm is null,
+              "to_structure：Place 不計算長度，設定值原樣讀入（無預設）");
+        // 長度計算：結構面 Z − 承托面 Z + offset；須高於橋架頂面且在 [min, max]
+        var c = HangerConfigReader.Read(RodCfg(), true);
+        var r0 = RodLength.Compute(2950, 5000, 3050, c);
+        Check(r0.LengthMm == 2030 && r0.Code is null, $"長度 = 5000 − 2950 + (−20) = 2030: {r0.LengthMm}");
+        Check(RodLength.Compute(2950, 3050, 3050, c).Code == RodLength.NotAboveTray && RodLength.Compute(2950, 3000, 3050, c).Code == RodLength.NotAboveTray, "結構面不高於橋架頂面 → 失敗");
+        Check(RodLength.Compute(0, 120, 100, c).LengthMm == 100 && RodLength.Compute(0, 119.999, 100, c).Code == RodLength.BelowMin, "剛好 = min 通過、略小於 min 失敗");
+        Check(RodLength.Compute(0, 5020, 100, c).LengthMm == 5000 && RodLength.Compute(0, 5020.001, 100, c).Code == RodLength.AboveMax, "剛好 = max 通過、略大於 max 失敗");
+        Check(RodLength.Compute(0, 5020, 100, c).Message is null && RodLength.Compute(0, 6000, 100, c).Message!.Contains("max_mm"), "失敗訊息為中文並點名設定欄位");
+        // 取整：最接近的倍數，恰在中間遠離 0 進位；未設定 = 只取到 0.001 mm
+        var rc = HangerConfigReader.Read(RodCfg(r => { r["round_to_mm"] = 5.0; r["offset_mm"] = 0.0; }), true);
+        Check(RodLength.Compute(0, 2987.5, 100, rc).LengthMm == 2990 && RodLength.Compute(0, 2987.4, 100, rc).LengthMm == 2985 && RodLength.Compute(0, 2982.4, 100, rc).LengthMm == 2980,
+              "round_to_mm=5：最接近的倍數、恰在中間進位");
+        Check(RodLength.Compute(0, 1234.56789, 100, HangerConfigReader.Read(RodCfg(r => r["offset_mm"] = 0.0), true)).LengthMm == 1234.568, "未設定 round_to_mm：取到 0.001 mm");
     }
 
     /// <summary>驗收用測試開關 test_fail_nth：未填 = 關閉；只接受 ≥ 1 的整數字面；不影響佈置與族座標換算。</summary>
@@ -292,6 +344,17 @@ static class SupportTests
             var exp = c["expect"]!.AsArray().Select(x => x!["status"]!.GetValue<string>() + ":" + string.Join(",", x["match"]!.AsArray().Select(m => m!.GetValue<string>()))).ToList();
             var g2 = got.Select(x => x.Status + ":" + string.Join(",", x.Match)).ToList();
             Check(exp.SequenceEqual(g2), $"契約[{name}] 去重分類與 Python 一致");
+        }
+        foreach (var rc in root["rod_cases"]!.AsArray())
+        {
+            n++;
+            var name = rc!["name"]!.GetValue<string>();
+            var cfg = HangerConfigReader.Read(rc["cfg"]!.DeepClone(), true);
+            var got = RodLength.Compute(rc["bearing_z_mm"]!.GetValue<double>(), rc["hit_z_mm"]!.GetValue<double>(), rc["tray_top_z_mm"]!.GetValue<double>(), cfg);
+            var expLen = rc["expect"]!["length_mm"];
+            var expCode = rc["expect"]!["code"]?.GetValue<string>();
+            Check(got.Code == expCode && (expLen is null ? got.LengthMm is null : got.LengthMm is double gl && Near(expLen.GetValue<double>(), gl)),
+                  $"契約[{name}] 吊桿長度至結構與 Python 一致（py={expLen?.ToJsonString() ?? "null"}/{expCode ?? "-"} cs={got.LengthMm?.ToString() ?? "null"}/{got.Code ?? "-"}）");
         }
         Check(n > 0, $"契約案例非空（{n}）");
     }

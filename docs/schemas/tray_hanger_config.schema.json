@@ -34,11 +34,19 @@
     "rod_length": {
       "type": "object", "required": ["mode"],
       "properties": {
-        "mode": { "enum": ["none", "fixed"] },
+        "mode": { "enum": ["none", "fixed", "to_structure"] },
         "value_mm": { "type": "number", "exclusiveMinimum": 0 },
-        "param": { "$ref": "#/$defs/param_ref" }
+        "param": { "$ref": "#/$defs/param_ref" },
+        "offset_mm": { "type": "number", "description": "to_structure：長度 = 結構面 Z − 吊架承托面 Z + offset_mm。可為負或 0，但必須明確填寫（工具不提供預設）；用來吸收族吊桿長度的量測基準差。" },
+        "min_mm": { "type": "number", "minimum": 0, "description": "to_structure：套用 offset 與取整後的長度下限；低於即該支失敗。必填，無預設。" },
+        "max_mm": { "type": "number", "exclusiveMinimum": 0, "description": "to_structure：長度上限，不得小於 min_mm；超過即該支失敗。必填，無預設。" },
+        "round_to_mm": { "type": "number", "exclusiveMinimum": 0, "description": "to_structure 選填：長度取最接近的此值倍數（恰在中間時遠離 0 進位）；未填 = 只取到 0.001 mm。" }
       },
-      "description": "fixed 需族有對應長度參數；沒有時預檢列為 unsupported。固定吊桿長度不能繞過族的主體需求。"
+      "allOf": [{
+        "if": { "properties": { "mode": { "const": "to_structure" } }, "required": ["mode"] },
+        "then": { "required": ["param", "offset_mm", "min_mm", "max_mm"], "properties": { "param": { "properties": { "scope": { "const": "instance" } } } } }
+      }],
+      "description": "fixed 需族有對應長度參數；沒有時預檢列為 unsupported。固定吊桿長度不能繞過族的主體需求。to_structure：每支新吊架從承托面沿 +Z 打射線，只接受樓板（Floors）與結構構架（Structural Framing，含連結模型），不接天花板；沒打到、結構面不高於橋架頂面、或長度超出 [min_mm, max_mm] → 該支失敗。param.scope 必須為 instance。"
     },
     "dedupe": {
       "type": "object", "required": ["tolerance_mm", "angle_tolerance_deg"],

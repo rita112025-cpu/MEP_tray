@@ -540,6 +540,12 @@ def test_instance_params_revit_execute_sets_then_reads_back_new_only():
 
 
 # ---------- C# 契約 ----------
+def _rod(**kw):
+    r = {"mode": "to_structure", "param": {"name": "R", "scope": "instance"}, "offset_mm": -20.0, "min_mm": 100.0, "max_mm": 5000.0}
+    r.update(kw)
+    return r
+
+
 def contract_cases() -> dict:
     lc = []
 
@@ -576,6 +582,9 @@ def contract_cases() -> dict:
     add("cfg_bad", [], [], pcfg(max_spacing_mm=-1, placement_mode="face", dedupe={"tolerance_mm": 0}))
     add("cfg_rod", [P("A", (0, 0, 0), (1000, 0, 0))], [], pcfg(rod_length={"mode": "fixed"}))
     add("cfg_nocal", [P("A", (0, 0, 0), (1000, 0, 0))], [], pcfg(calibration=None))
+    add("rod_to_structure_ok", [P("A", (0, 0, 3000), (3000, 0, 3000))], [], pcfg(rod_length=_rod()))
+    add("rod_to_structure_missing", [], [], pcfg(rod_length={"mode": "to_structure", "param": {"name": "R", "scope": "type"}, "min_mm": -1, "max_mm": 0}))
+    add("rod_to_structure_minmax", [], [], pcfg(rod_length=_rod(min_mm=800.0, max_mm=700.0, round_to_mm=0)))
     add("cfg_badcal", [], [], pcfg(calibration={"family_file": {"path": "p"}, "family_name": "F", "type_name": "X"}))
     add("fail_nth_on", [P("A", (0, 0, 3000), (6000, 0, 3000))], [], pcfg(max_spacing_mm=1350.0, test_fail_nth=2))
     for nm, v in TEST_FAIL_NTH_BAD:
@@ -598,7 +607,23 @@ def contract_cases() -> dict:
     for c in cc:
         c["tol_mm"], c["tol_deg"] = 5.0, 2.0
         c["expect"] = S.classify(c["planned"], c["existing"], 5.0, 2.0)
-    return {"layout_cases": lc, "classify_cases": cc}
+    rc = []
+    for nm, bz, hz, tz, kw in [
+        ("ok", 2950.0, 5000.0, 3050.0, {}),
+        ("round_half_up", 0.0, 2987.5, 100.0, {"offset_mm": 0.0, "round_to_mm": 5.0}),
+        ("round_down", 0.0, 2982.4, 100.0, {"offset_mm": 0.0, "round_to_mm": 5.0}),
+        ("fraction", 0.0, 1234.56789, 100.0, {"offset_mm": 0.0}),
+        ("hit_equals_tray_top", 2950.0, 3050.0, 3050.0, {}),
+        ("hit_below_tray_top", 2950.0, 3000.0, 3050.0, {}),
+        ("at_min", 0.0, 120.0, 100.0, {}),
+        ("below_min", 0.0, 119.999, 100.0, {}),
+        ("at_max", 0.0, 5020.0, 100.0, {}),
+        ("above_max", 0.0, 5020.001, 100.0, {}),
+    ]:
+        c = pcfg(rod_length=_rod(**kw))
+        rc.append({"name": nm, "cfg": c, "bearing_z_mm": bz, "hit_z_mm": hz, "tray_top_z_mm": tz,
+                   "expect": S.rod_length_to_structure(bz, hz, tz, c["rod_length"])})
+    return {"layout_cases": lc, "classify_cases": cc, "rod_cases": rc}
 
 
 @pytest.mark.revit
@@ -689,3 +714,85 @@ def test_calibration_signature_covers_whole_family():
     assert imp.index("HangerPlacer.Preflight(doc, hcfg, pre)") < imp.index("tg.Start()")    # 交易群組開始前已完整核對
     pl = (ROOT / "revit" / "MepTrayImport" / "HangerPlacer.cs").read_text(encoding="utf-8")
     assert "if (checkCalibration) errors.AddRange(HangerCalibration.CheckCalibration(doc, cfg));" in pl
+
+
+# ---------- rod_length.mode = to_structure ----------
+def test_rod_to_structure_valid_and_no_defaults():
+    assert S.validate_placement_config(pcfg(rod_length=_rod())) == []
+    assert S.validate_placement_config(pcfg(rod_length=_rod(offset_mm=0.0, round_to_mm=5.0))) == []   # 0 必須明確填寫，但合法
+    for k in ("offset_mm", "min_mm", "max_mm", "param"):
+        r = _rod()
+        del r[k]
+        assert S.error_fields(S.validate_placement_config(pcfg(rod_length=r))) == [f"rod_length.{k}"]
+
+
+@pytest.mark.parametrize("patch,field", [
+    ({"param": {"name": "R", "scope": "type"}}, "rod_length.param.scope"),
+    ({"min_mm": -1.0}, "rod_length.min_mm"), ({"max_mm": 0.0}, "rod_length.max_mm"),
+    ({"min_mm": 800.0, "max_mm": 700.0}, "rod_length.max_mm"),
+    ({"offset_mm": "10"}, "rod_length.offset_mm"), ({"offset_mm": float("nan")}, "rod_length.offset_mm"),
+    ({"round_to_mm": 0}, "rod_length.round_to_mm"), ({"round_to_mm": -5.0}, "rod_length.round_to_mm"),
+])
+def test_rod_to_structure_invalid_values_rejected(patch, field):
+    assert S.error_fields(S.validate_placement_config(pcfg(rod_length=_rod(**patch)))) == [field]
+
+
+def test_rod_unknown_mode_rejected_and_old_modes_unchanged():
+    assert "rod_length.mode" in S.error_fields(S.validate_placement_config(pcfg(rod_length={"mode": "structure"})))
+    assert S.validate_placement_config(pcfg(rod_length={"mode": "none"})) == []
+    assert S.validate_placement_config(pcfg(rod_length={"mode": "fixed", "value_mm": 500.0, "param": {"name": "R", "scope": "type"}})) == []
+
+
+def test_rod_to_structure_placement_has_no_python_length():
+    sp = S.layout([P("A", (0, 0, 3000), (3000, 0, 3000))], [], cfg())["supports"][0]
+    assert S.placement(sp, pcfg(rod_length=_rod()))["rod_length_mm"] is None
+
+
+def test_rod_length_to_structure_rules():
+    r = _rod()
+    assert S.rod_length_to_structure(2950, 5000, 3050, r) == {"length_mm": 2030.0, "code": None}      # 5000 − 2950 − 20
+    assert S.rod_length_to_structure(2950, 3050, 3050, r)["code"] == "not_above_tray"                 # 不高於橋架頂面
+    assert S.rod_length_to_structure(2950, 3000, 3050, r)["code"] == "not_above_tray"
+    assert S.rod_length_to_structure(0, 120, 100, r)["length_mm"] == 100.0                            # 邊界含 min／max
+    assert S.rod_length_to_structure(0, 119.999, 100, r)["code"] == "below_min"
+    assert S.rod_length_to_structure(0, 5020, 100, r)["length_mm"] == 5000.0
+    assert S.rod_length_to_structure(0, 5020.001, 100, r)["code"] == "above_max"
+
+
+def test_rod_length_rounding_rule():
+    r = _rod(offset_mm=0.0, round_to_mm=5.0)
+    assert S.rod_length_to_structure(0, 2987.5, 100, r)["length_mm"] == 2990.0     # 恰在中間：遠離 0 進位
+    assert S.rod_length_to_structure(0, 2987.4, 100, r)["length_mm"] == 2985.0
+    assert S.rod_length_to_structure(0, 2982.4, 100, r)["length_mm"] == 2980.0
+    assert S.rod_length_to_structure(0, 1234.56789, 100, _rod(offset_mm=0.0))["length_mm"] == 1234.568   # 未設定：只取到 0.001
+
+
+def test_rod_to_structure_schema_documented():
+    s = json.loads((ROOT / "docs" / "schemas" / "tray_hanger_config.schema.json").read_text(encoding="utf-8"))
+    rod = s["properties"]["rod_length"]
+    assert rod["properties"]["mode"]["enum"] == list(S.ROD_MODES)
+    for k in ("offset_mm", "min_mm", "max_mm", "round_to_mm"):
+        assert k in rod["properties"]
+    then = rod["allOf"][0]["then"]
+    assert set(then["required"]) == {"param", "offset_mm", "min_mm", "max_mm"}                     # 與執行期必填一致
+    assert then["properties"]["param"]["properties"]["scope"] == {"const": "instance"}
+    assert "round_to_mm" not in then["required"]
+    t = (ROOT / "docs" / "examples" / "tray_hanger_config.template.json").read_text(encoding="utf-8")
+    assert "to_structure" not in t                                                                   # 範本預設行為不變
+
+
+def test_rod_to_structure_csharp_mirrors_python_and_targets_exclude_ceilings():
+    core = (ROOT / "revit" / "MepTray.Core" / "Supports.cs").read_text(encoding="utf-8")
+    assert '{ "none", "fixed", "to_structure" }' in core
+    for k in ("offset_mm", "min_mm", "max_mm", "round_to_mm"):
+        assert f"rod_length.{k}：" in core
+    py = (ROOT / "mep_tray" / "supports.py").read_text(encoding="utf-8")
+    for k in ("offset_mm", "min_mm", "max_mm", "round_to_mm"):                                         # 訊息逐字相同
+        line = next(x for x in core.splitlines() if f'"rod_length.{k}：' in x and "Add(" in x)
+        msg = line.split('Add("', 1)[1].rsplit('")', 1)[0]
+        assert msg in py, msg
+    probe = (ROOT / "revit" / "MepTrayImport" / "RodToStructure.cs").read_text(encoding="utf-8")
+    assert "OST_Floors" in probe and "OST_StructuralFraming" in probe and "FindReferencesInRevitLinks = true" in probe
+    assert "BuiltInCategory.OST_Ceilings" not in probe                                                                 # 天花板不是射線目標
+    placer = (ROOT / "revit" / "MepTrayImport" / "HangerPlacer.cs").read_text(encoding="utf-8")
+    assert "HitElementId" in placer and "讀回吊桿長度" in placer
