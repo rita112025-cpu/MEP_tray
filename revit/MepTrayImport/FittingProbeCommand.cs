@@ -62,6 +62,12 @@ public class FittingProbeCommand : IExternalCommand
         var arr = new JsonArray();
         foreach (var fi in fittings.OrderBy(f => f.Id.Value)) arr.Add(Probe(fi));
         root["fittings"] = arr;
+        // PartType 列舉名稱與整數值（只列電纜架相關），供對照 family_part_type.integer；不寫死在放置邏輯裡
+        var table = new JsonObject();
+        foreach (PartType pt in Enum.GetValues(typeof(PartType)))
+            if (pt.ToString().Contains("CableTray", StringComparison.Ordinal) || pt is PartType.Elbow or PartType.Tee or PartType.Cross or PartType.Union or PartType.Transition)
+                table[pt.ToString()] = (int)pt;
+        root["part_type_enum_table"] = table;
 
         var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "MEP_tray");
         var path = Path.Combine(dir, $"fitting_probe_{DateTime.Now:yyyyMMdd-HHmmss}.json");
@@ -137,7 +143,12 @@ public class FittingProbeCommand : IExternalCommand
         var p = fam.get_Parameter(BuiltInParameter.FAMILY_CONTENT_PART_TYPE);
         if (p is null) return new JsonObject { ["found"] = false, ["reason"] = "族沒有 FAMILY_CONTENT_PART_TYPE 參數" };
         var o = new JsonObject { ["found"] = true, ["storage"] = p.StorageType.ToString(), ["has_value"] = p.HasValue, ["value_string"] = Safe(() => p.AsValueString()) };
-        if (p.StorageType == StorageType.Integer) o["integer"] = p.AsInteger();
+        if (p.StorageType == StorageType.Integer)
+        {
+            var v = p.AsInteger();
+            o["integer"] = v;
+            o["part_type_enum_name"] = Enum.IsDefined(typeof(PartType), v) ? ((PartType)v).ToString() : null;
+        }
         else if (p.StorageType == StorageType.String) o["string"] = p.AsString();
         else if (p.StorageType == StorageType.ElementId) o["element_id"] = p.AsElementId().Value;
         else if (p.StorageType == StorageType.Double) o["double_internal"] = p.AsDouble();
