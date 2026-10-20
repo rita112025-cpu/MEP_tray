@@ -87,6 +87,9 @@ public class FittingProbeCommand : IExternalCommand
             ["category"] = fi.Category?.Name, ["family"] = fi.Symbol?.Family?.Name, ["type"] = fi.Symbol?.Name,
             ["part_type"] = Safe(() => (fi.MEPModel as MechanicalFitting)?.PartType.ToString()),
             ["mep_model_class"] = fi.MEPModel?.GetType().Name,
+            ["mep_model_class_full"] = fi.MEPModel?.GetType().FullName,
+            ["is_mechanical_fitting"] = fi.MEPModel is MechanicalFitting,
+            ["family_part_type"] = Safe(() => FamilyPartType(fi)),
             ["location"] = Safe(() => fi.Location switch
             {
                 LocationPoint lp => new JsonObject { ["kind"] = "point", ["point"] = Pt(lp.Point), ["rotation_deg"] = Math.Round(lp.Rotation * 180.0 / Math.PI, 6) },
@@ -123,6 +126,21 @@ public class FittingProbeCommand : IExternalCommand
         o["instance_parameters"] = Params(fi);
         o["type_parameters"] = fi.Symbol is null ? null : Params(fi.Symbol);
         o["summary"] = $"#{fi.Id.Value} {fi.Symbol?.Family?.Name}/{fi.Symbol?.Name} PartType={o["part_type"]?.ToJsonString()} connectors={conns.Count} curves={geo["curve_count"]}";
+        return o;
+    }
+
+    /// <summary>族上的 BuiltInParameter.FAMILY_CONTENT_PART_TYPE（RevitAPI.xml：「Part Type」）。族沒有此參數時回報 found=false。</summary>
+    static JsonObject FamilyPartType(FamilyInstance fi)
+    {
+        var fam = fi.Symbol?.Family;
+        if (fam is null) return new JsonObject { ["found"] = false, ["reason"] = "沒有 Family" };
+        var p = fam.get_Parameter(BuiltInParameter.FAMILY_CONTENT_PART_TYPE);
+        if (p is null) return new JsonObject { ["found"] = false, ["reason"] = "族沒有 FAMILY_CONTENT_PART_TYPE 參數" };
+        var o = new JsonObject { ["found"] = true, ["storage"] = p.StorageType.ToString(), ["has_value"] = p.HasValue, ["value_string"] = Safe(() => p.AsValueString()) };
+        if (p.StorageType == StorageType.Integer) o["integer"] = p.AsInteger();
+        else if (p.StorageType == StorageType.String) o["string"] = p.AsString();
+        else if (p.StorageType == StorageType.ElementId) o["element_id"] = p.AsElementId().Value;
+        else if (p.StorageType == StorageType.Double) o["double_internal"] = p.AsDouble();
         return o;
     }
 
@@ -231,6 +249,7 @@ public class FittingProbeCommand : IExternalCommand
             Walk(ge);
             o["object_counts"] = Counts(counts);
             o["curve_count"] = total;
+            o["curves_listed"] = curves.Count;
             o["curves_truncated"] = total > curves.Count;
             o["curves"] = curves;
             o["solids"] = solids;
@@ -245,25 +264,28 @@ public class FittingProbeCommand : IExternalCommand
         foreach (Face f in s.Faces) faceKinds[f.GetType().Name] = faceKinds.GetValueOrDefault(f.GetType().Name) + 1;
         var arcEdges = new JsonArray();
         var edgeKinds = new SortedDictionary<string, int>(StringComparer.Ordinal);
+        int arcSeen = 0;
         foreach (Edge e in s.Edges)
         {
             Curve c;
             try { c = e.AsCurve(); } catch (Exception) { continue; }
             edgeKinds[c.GetType().Name] = edgeKinds.GetValueOrDefault(c.GetType().Name) + 1;
-            if (c is Arc && arcEdges.Count < MaxEdgesPerSolid)
-            {
-                var ci = CurveInfo(c);
-                ci["source"] = "solid_edge";
-                arcEdges.Add(ci);
-            }
+            if (c is not Arc) continue;
+            arcSeen++;
+            total++;
+            var ci = CurveInfo(c);
+            ci["source"] = "solid_edge";
+            ci["graphics_style"] = StyleName(doc, s);
+            if (arcEdges.Count < MaxEdgesPerSolid) arcEdges.Add(ci.DeepClone());
+            if (curves.Count < MaxCurvesPerFitting) curves.Add(ci);
         }
-        total += arcEdges.Count;
         return new JsonObject
         {
             ["graphics_style"] = StyleName(doc, s),
             ["volume"] = Safe(() => s.Volume), ["face_count"] = s.Faces.Size, ["edge_count"] = s.Edges.Size,
             ["face_kinds"] = Counts(faceKinds),
             ["edge_curve_kinds"] = Counts(edgeKinds),
+            ["arc_edge_count"] = arcSeen,
             ["arc_edges"] = arcEdges,
         };
     }

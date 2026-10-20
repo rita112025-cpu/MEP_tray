@@ -50,9 +50,14 @@ def test_fitting_probe_is_read_only_by_construction():
     assert re.search(r"\[Transaction\(TransactionMode\.ReadOnly\)\]\s*public class FittingProbeCommand", code)
     for forbidden in ("new Transaction", "SubTransaction", "TransactionGroup", "NewFamilyInstance", ".Delete(", "LoadFamily",
                       "ElementTransformUtils", ".Save(", ".SaveAs(", ".Set(", "CableTray.Create", "NewElbowFitting", "NewTeeFitting",
+                      "SetValueString", "SetEntity", "Regenerate", "Activate(", "OpenDocumentFile", "Commit(", "RollBack(",
                       "HttpClient", "WebClient", "EditFamily"):
         assert forbidden not in code, forbidden
     assert not re.search(r"\b(1000|255)\b", code)                  # 不把支撐間距/接頭距離寫死
+    # 診斷欄位：族 Part Type、MEPModel 實際類別、Solid 圓弧邊收進頂層 curves 並如實回報是否截斷
+    for needle in ("BuiltInParameter.FAMILY_CONTENT_PART_TYPE", "mep_model_class_full", "is_mechanical_fitting",
+                   "curves_listed", "curves_truncated", "arc_edge_count", "curves.Add(ci)"):
+        assert needle in code, needle
 
 
 def test_inventory_default_folder_and_no_hardcoded_rules():
