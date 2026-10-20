@@ -151,6 +151,18 @@ static class SupportTests
         Check(TestSwitch.PreviewNote(2).StartsWith("⚠ 測試開關 test_fail_nth=2 已啟用") && TestSwitch.PreviewNote(2).Contains("僅供驗收，正式設定勿使用"),
               "測試開關預覽警告");
         Check(TestSwitch.NotTriggeredNote(5, 3).Contains("不會觸發"), "測試開關 N 大於新增數的附註");
+        // 放置後整批決策：全部失敗 → 整批回滾；至少一支成功 → 保留（部分完成）；計畫無新增 → 不因此回滾
+        Check(HangerBatch.RollBackAllFailed(1, 0) && HangerBatch.RollBackAllFailed(3, 0), "HangerBatch：計畫有新增但全部失敗 → 整批回滾");
+        Check(!HangerBatch.RollBackAllFailed(1, 1) && !HangerBatch.RollBackAllFailed(3, 1) && !HangerBatch.RollBackAllFailed(3, 3),
+              "HangerBatch：至少一支建立成功 → 不回滾");
+        Check(!HangerBatch.RollBackAllFailed(0, 0), "HangerBatch：計畫沒有新增吊架 → 不因此回滾");
+        // 與測試開關合用（模擬 Execute 逐支迴圈：只有第 N 支失敗）
+        foreach (var (planned, nth, expectRollBack) in new[] { (1, 1L, true), (3, 2L, false), (3, 1L, false), (1, 2L, false), (2, 5L, false) })
+        {
+            int created = Enumerable.Range(1, planned).Count(o => !TestSwitch.ShouldFail(nth, o));
+            Check(HangerBatch.RollBackAllFailed(planned, created) == expectRollBack,
+                  $"HangerBatch＋test_fail_nth={nth}、新增 {planned} 支 → {(expectRollBack ? "整批回滾" : "保留")}");
+        }
     }
 
     static double[] Arr(JsonNode? n) => n!.AsArray().Select(x => x!.GetValue<double>()).ToArray();

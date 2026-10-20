@@ -344,6 +344,7 @@ def test_fail_nth_schema_documented_optional_and_template_clean():
     s = json.loads((ROOT / "docs" / "schemas" / "tray_hanger_config.schema.json").read_text(encoding="utf-8"))
     p = s["properties"]["test_fail_nth"]
     assert p["type"] == "integer" and p["minimum"] == 1 and "test_fail_nth" not in s["required"]
+    assert p["maximum"] == S.INT64_MAX == 2 ** 63 - 1                       # 與執行期上限（C# long）一致
     assert "2.0" in p["description"] and "正式設定勿使用" in p["description"]
     cs = (ROOT / "docs" / "schemas" / "conduit_hanger_config.schema.json").read_text(encoding="utf-8")
     assert "test_fail_nth" in json.loads(cs)["description"] and "test_fail_nth" not in json.loads(cs)["properties"]
@@ -386,6 +387,39 @@ def test_fail_nth_revit_execute_fails_only_nth_after_real_element():
     for f in ("HangerCalibration.cs", "CalibrateHangerCommand.cs"):
         t = (HP / f).read_text(encoding="utf-8")
         assert "TestFailNth" not in t and "test_fail_nth" not in t, f
+
+
+def test_fail_nth_schema_bounds_match_runtime():
+    """schema 的 minimum/maximum 與 Python／C# 執行期驗證一致：邊界內接受、邊界外拒絕。"""
+    p = json.loads((ROOT / "docs" / "schemas" / "tray_hanger_config.schema.json").read_text(encoding="utf-8"))["properties"]["test_fail_nth"]
+    for v in (p["minimum"], p["maximum"]):
+        assert S.validate_placement_config(pcfg(test_fail_nth=v)) == [], v
+    for v in (p["minimum"] - 1, p["maximum"] + 1):
+        assert S.validate_placement_config(pcfg(test_fail_nth=v)) == [TFN_MSG], v
+    core = (ROOT / "revit" / "MepTray.Core" / "Supports.cs").read_text(encoding="utf-8")
+    assert "long.TryParse(v.ToJsonString()" in core and "x >= 1" in core    # C# 上限 = long.MaxValue（SelfTest 另驗 9223372036854775808 被拒）
+
+
+def test_import_all_hangers_failed_rolls_back_whole_batch():
+    """PR #23 review：匯入橋架＋吊架與選取補吊架一致——計畫有新增但一支都沒建立成功 → 整批（含橋架）回滾並回報失敗。"""
+    core = (ROOT / "revit" / "MepTray.Core" / "Supports.cs").read_text(encoding="utf-8")
+    assert "public static bool RollBackAllFailed(int plannedNew, int created) => plannedNew > 0 && created == 0;" in core
+    imp = (HP / "ImportCommand.cs").read_text(encoding="utf-8")
+    i0 = imp.index('var planned = hrep.Count("new");')
+    blk = imp[i0:imp.index("catch (Exception ex)", i0)]
+    i_place = blk.index("HangerRun.Place(doc, hrep, hcfg, res);")
+    i_dec = blk.index('if (HangerBatch.RollBackAllFailed(planned, hrep.Count("created")))')
+    i_rb, i_as = blk.index("tg.RollBack();"), blk.index("else tg.Assimilate();")
+    assert i_place < i_dec < i_rb < i_as                                     # 放置前記計畫數；放置後先判定再 Assimilate
+    dec = blk[i_dec:i_as]
+    assert 'hrep.Outcome = "失敗";' in dec and "rep.Committed = false;" in dec and "rep.Abort = " in dec   # Finish → Result.Failed
+    assert imp.count("tg.Assimilate()") == 1
+    assert "if (report.Abort != null) { message = report.Abort; return Result.Failed; }" in imp
+    # 選取入口的既有語意（全部失敗 → 整批回滾）不變
+    for f in ("HangerRun.cs", "ConduitHangerRun.cs"):
+        assert 'if (rep.Count("created") == 0) { tg.RollBack(); rep.Notes.Add("沒有任何吊架建立成功，整批已回滾"); }' in (HP / f).read_text(encoding="utf-8"), f
+    m = (ROOT / "docs" / "MANUAL.md").read_text(encoding="utf-8")
+    assert "若沒有任何吊架建立成功（全部失敗），與選取補吊架相同整批回滾，本入口的整批含橋架" in m
 
 
 # ---------- C# 契約 ----------
