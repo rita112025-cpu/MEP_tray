@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/rita112025-cpu/MEP_tray/docs/schemas/conduit_hanger_config.schema.json",
   "title": "MEP_tray 配管吊架設定 v1（Revit「選取配管補吊架」用）",
-  "description": "兩支並排 Conduit 共用一支吊架。全部長度 mm。本檔只含配管專用欄位；族、校正、插入點、修正角、橫擔參數、吊桿、間距、起終內縮、固定間距、去重全部沿用 base_config 指向的橋架吊架設定（tray_hanger_config.schema.json，驗證與行為不變）。所有欄位皆無預設，缺漏時工具拒絕執行並指出欄位；不依類型名稱推測用途。驗收用測試開關 test_fail_nth 不在本檔，寫在 base_config 指向的橋架設定複本（見 tray_hanger_config.schema.json）。",
+  "description": "兩支並排 Conduit 共用一支吊架。全部長度 mm。本檔只含配管專用欄位；族、校正、插入點、修正角、橫擔參數、吊桿、間距、起終內縮、固定間距、去重全部沿用 base_config 指向的橋架吊架設定（tray_hanger_config.schema.json，驗證與行為不變）。所有欄位皆無預設，缺漏時工具拒絕執行並指出欄位；不依類型名稱推測用途。驗收用測試開關 test_fail_nth 不在本檔，寫在 base_config 指向的橋架設定複本（見 tray_hanger_config.schema.json）。實例文字參數 instance_params 同樣不在本檔，寫在 base_config 指向的橋架設定（配管吊架沿用）。",
   "type": "object",
   "required": ["units", "supported_object", "base_config", "conduits_per_hanger", "allowed_trade_sizes_mm", "cross_member", "pairing"],
   "properties": {

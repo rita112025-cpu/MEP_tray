@@ -111,6 +111,7 @@ public static class ConduitHangerPlacer
         }
         else rep.Notes.Add("未設定 cross_member_single：單管列為待確認，不放置");
         HangerPlacer.ApplyTestSwitch(rep, cfg);   // 測試開關寫在 base_config（橋架設定）
+        HangerPlacer.ApplyInstanceParams(rep, cfg);   // instance_params 同樣寫在 base_config（橋架設定）
         if (rep.PreflightErrors.Count > 0) rep.Outcome = "失敗";
         return rep;
     }

@@ -81,6 +81,7 @@ static class SupportTests
         try { HangerConfigReader.Read(new JsonObject(), false); } catch (InvalidDataException) { threw = true; }
         Check(threw, "設定不完整時拒絕執行");
         TestFailNth(Check);
+        InstanceParams(Check);
         // 去重／重跑
         var plan = fw.Supports.Select(s => new PlannedKey("T1", s.StationMm, s.PointMm, s.DirectionDeg)).ToList();
         var ex = fw.Supports.Select(s => new ExistingHanger("e" + s.Id, "tool", "T1", s.StationMm, s.PointMm, s.DirectionDeg)).ToList();
@@ -163,6 +164,59 @@ static class SupportTests
             Check(HangerBatch.RollBackAllFailed(planned, created) == expectRollBack,
                   $"HangerBatch＋test_fail_nth={nth}、新增 {planned} 支 → {(expectRollBack ? "整批回滾" : "保留")}");
         }
+    }
+
+    /// <summary>instance_params：未填或 [] = 不寫入；只接受非空白文字值、不重複且不與長度參數同名；不影響佈置與族座標換算。</summary>
+    static void InstanceParams(Action<bool, string> Check)
+    {
+        JsonObject Ip(string lit) { var o = PlaceCfg(); o["instance_params"] = JsonNode.Parse(lit); return o; }
+        const string ok = """[{"name": "<參數A>", "value": "<值A>"}, {"name": "<參數B>", "value": "<值B>"}]""";
+        Check(HangerConfigReader.Read(PlaceCfg(), true).InstanceParams.Count == 0, "instance_params 未填：不寫入");
+        Check(HangerConfigReader.ValidatePlacement(Ip("[]")).Count == 0 && HangerConfigReader.Read(Ip("[]"), true).InstanceParams.Count == 0, "instance_params=[]：合格且不寫入");
+        var r = HangerConfigReader.Read(Ip(ok), true).InstanceParams;
+        Check(r.SequenceEqual(new[] { new InstanceParamValue("<參數A>", "<值A>"), new InstanceParamValue("<參數B>", "<值B>") }), "instance_params 依序讀入名稱與值（原樣，不修剪）");
+        foreach (var (lit, fields) in new (string, string[])[] {
+            ("{}", new[] { "instance_params" }), ("\"a\"", new[] { "instance_params" }), ("null", new[] { "instance_params" }),
+            ("[\"a\"]", new[] { "instance_params[0]" }), ("[null]", new[] { "instance_params[0]" }),
+            ("""[{"value": "v"}]""", new[] { "instance_params[0].name" }), ("""[{"name": " a", "value": "v"}]""", new[] { "instance_params[0].name" }),
+            ("""[{"name": 1, "value": "v"}]""", new[] { "instance_params[0].name" }),
+            ("""[{"name": "a"}]""", new[] { "instance_params[0].value" }), ("""[{"name": "a", "value": ""}]""", new[] { "instance_params[0].value" }),
+            ("""[{"name": "a", "value": "  "}]""", new[] { "instance_params[0].value" }), ("""[{"name": "a", "value": 12}]""", new[] { "instance_params[0].value" }),
+            ("""[{"name": "a", "value": true}]""", new[] { "instance_params[0].value" }),
+            ("""[{"name": "a", "value": "v", "scope": "instance"}]""", new[] { "instance_params[0]" }),
+            ("""[{"name": "a", "value": "1"}, {"name": "b", "value": "2"}, {"name": "a", "value": "3"}]""", new[] { "instance_params[2].name" }),
+            ("""[{"name": "P", "value": "v"}]""", new[] { "instance_params[0].name" }),
+        })
+        {
+            var errs = HangerConfigReader.ErrorFields(HangerConfigReader.ValidatePlacement(Ip(lit)));
+            Check(errs.SequenceEqual(fields), $"instance_params={lit} 被拒絕且只點名 {string.Join(",", fields)}: {string.Join(",", errs)}");
+        }
+        Check(HangerConfigReader.ValidatePlacement(Ip("""[{"name": "a", "value": "1"}, {"name": "a", "value": "2"}]"""))
+                  .SequenceEqual(new[] { "instance_params[1].name：「a」與 instance_params[0] 重複" }), "instance_params 重複名稱訊息");
+        bool threw = false;
+        try { HangerConfigReader.Read(Ip("""[{"name": "a", "value": ""}]"""), true); } catch (InvalidDataException ex) { threw = ex.Message.Contains("instance_params[0].value"); }
+        Check(threw, "instance_params 空值時拒絕執行並點名欄位");
+        Check(HangerConfigReader.ValidateLayout(Ip("5")).Count == 0, "instance_params 不屬於佈置欄位");
+        var pieces = new[] { P("A", new[] { 0.0, 0, 3000 }, new[] { 6000.0, 0, 3000 }) };
+        var off = HangerConfigReader.Read(PlaceCfg(), true); var on = HangerConfigReader.Read(Ip(ok), true);
+        var lo = Supports.Layout(pieces, new List<SupportLink>(), off); var ln = Supports.Layout(pieces, new List<SupportLink>(), on);
+        bool same = lo.Supports.Count == ln.Supports.Count && lo.Supports.Count == 5;
+        for (int i = 0; same && i < lo.Supports.Count; i++)
+        {
+            var a = Supports.Place(lo.Supports[i], off); var b = Supports.Place(ln.Supports[i], on);
+            same = a.InsertionPointMm.SequenceEqual(b.InsertionPointMm) && a.RotationDeg == b.RotationDeg && a.CrossMemberLengthMm == b.CrossMemberLengthMm;
+        }
+        Check(same, "instance_params 不改變支撐點與族插入點/旋轉/尺寸");
+        // 逐支檢查與訊息（純邏輯；Revit 端以 LookupParameter/IsReadOnly/StorageType 取得狀態）
+        Check(InstanceParamText.Problem("X", true, false, true, "String") is null, "可寫的文字參數 → 可寫入");
+        Check(InstanceParamText.Problem("X", false, false, false, "")!.StartsWith("找不到實例參數「X」"), "參數不存在 → 該支失敗並點名");
+        Check(InstanceParamText.Problem("X", true, true, true, "String")!.Contains("唯讀"), "唯讀 → 該支失敗");
+        Check(InstanceParamText.Problem("X", true, false, false, "Double")!.Contains("不是文字參數（StorageType=Double"), "非文字 → 該支失敗");
+        Check(InstanceParamText.ReadbackError("X", "v", "v") is null && InstanceParamText.ReadbackError("X", "v", "V") != null
+              && InstanceParamText.ReadbackError("X", "v", null)!.Contains("(無值)"), "讀回逐字比對");
+        var note = InstanceParamText.PreviewNote(on.InstanceParams);
+        Check(note.Contains("2 項") && note.Contains("「<參數A>」=「<值A>」") && note.Contains("既有／手動吊架不修改"), "預覽附註列出名稱與值");
+        Check(InstanceParamText.TypeParamError(1, "X").StartsWith("instance_params[1].name："), "預檢：類型參數訊息點名欄位");
     }
 
     static double[] Arr(JsonNode? n) => n!.AsArray().Select(x => x!.GetValue<double>()).ToArray();
