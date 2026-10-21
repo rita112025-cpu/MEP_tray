@@ -275,6 +275,20 @@ static class SupportTests
     static bool Near(double a, double b) => Math.Abs(a - b) <= 2e-3;
     static bool Near3(double[] a, double[] b) => a.Length == b.Length && a.Zip(b).All(z => Near(z.First, z.Second));
 
+    static double[]? OptArr(JsonNode? n) => n is JsonArray a && a.All(x => x is JsonValue v && v.GetValueKind() == System.Text.Json.JsonValueKind.Number)
+        ? a.Select(x => x!.GetValue<double>()).ToArray() : null;
+    static double? OptNum(JsonNode? n) => n is JsonValue v && v.GetValueKind() == System.Text.Json.JsonValueKind.Number ? v.GetValue<double>() : null;
+
+    /// <summary>契約案例的接頭輸入（null／缺欄位 = 該欄位無效；數值型別以 JSON Number 為準，與 Python _num 一致）。</summary>
+    static SupportFitting ToFitting(JsonNode? f) => new()
+    {
+        Id = f!["id"]!.GetValue<string>(), Kind = f["kind"]!.GetValue<string>(),
+        Center = OptArr(f["center"]), Point = OptArr(f["point"]), LocationMm = OptArr(f["location_mm"]),
+        RadiusMm = OptNum(f["radius_mm"]), StartAngleDeg = OptNum(f["start_angle_deg"]), SweepDeg = OptNum(f["sweep_deg"]),
+        MainDirectionDeg = OptNum(f["main_direction_deg"]), WidthMm = OptNum(f["width_mm"]), HeightMm = OptNum(f["height_mm"]),
+        FallbackReason = f["fallback_reason"]?.GetValue<string>(),
+    };
+
     static void RunContract(Action<bool, string> Check, string path)
     {
         var root = JsonNode.Parse(File.ReadAllText(path))!;
@@ -297,7 +311,8 @@ static class SupportTests
             }).ToList();
             var links = c["links"]!.AsArray().Select(l => new SupportLink(l!["a"]!.GetValue<string>(), l["b"]!.GetValue<string>(), l["kind"]!.GetValue<string>())).ToList();
             var cfg = HangerConfigReader.Read(cfgNode!.DeepClone(), false);
-            var got = Supports.Layout(pieces, links, cfg);
+            var fittings = c["fittings"] is JsonArray fa ? fa.Select(ToFitting).ToList() : null;
+            var got = Supports.Layout(pieces, links, cfg, fittings);
             var es = exp["supports"]!.AsArray();
             bool same = es.Count == got.Supports.Count;
             for (int i = 0; same && i < es.Count; i++)
@@ -306,7 +321,8 @@ static class SupportTests
                 same = e["id"]!.GetValue<string>() == g.Id && e["piece_id"]!.GetValue<string>() == g.PieceId && e["chain_id"]!.GetValue<string>() == g.ChainId
                        && Near(e["station_mm"]!.GetValue<double>(), g.StationMm) && Near3(Arr(e["point_mm"]), g.PointMm)
                        && Near(e["direction_deg"]!.GetValue<double>(), g.DirectionDeg) && Near(e["tray_width_mm"]!.GetValue<double>(), g.TrayWidthMm)
-                       && Near(e["bearing_z_mm"]!.GetValue<double>(), g.BearingZMm) && e["reason"]!.GetValue<string>() == g.Reason;
+                       && Near(e["bearing_z_mm"]!.GetValue<double>(), g.BearingZMm) && e["reason"]!.GetValue<string>() == g.Reason
+                       && e["fitting_id"]?.GetValue<string>() == g.FittingId && Near(e["tray_height_mm"]!.GetValue<double>(), g.TrayHeightMm);
             }
             Check(same, $"契約[{name}] 支撐點與 Python 一致（{es.Count}/{got.Supports.Count}）");
             var ei = exp["issues"]!.AsArray();

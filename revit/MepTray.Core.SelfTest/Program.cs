@@ -124,6 +124,8 @@ HangerInventoryTests.Run(Check, Environment.GetEnvironmentVariable("MEPTRAY_INVE
 
 // 吊架支撐點核心（Supports.cs）；MEPTRAY_SUPPORT_CONTRACT 指向 Python 產生的契約案例時一併比對
 SupportTests.Run(Check, Environment.GetEnvironmentVariable("MEPTRAY_SUPPORT_CONTRACT"));
+// 彎頭／三通接頭幾何（實機探查樣本）
+FittingTests.Run(Check);
 // 配管吊架核心（ConduitHangers.cs）；MEPTRAY_CONDUIT_CONTRACT 指向 Python 產生的契約案例時一併比對
 ConduitTests.Run(Check, Environment.GetEnvironmentVariable("MEPTRAY_CONDUIT_CONTRACT"));
 var oldJson = JsonNode.Parse(File.ReadAllText(args[0]))!.AsObject();

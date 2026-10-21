@@ -31,6 +31,28 @@ public sealed class SupportPoint
     public double TrayHeightMm { get; set; }
     public double BearingZMm { get; set; }
     public string Reason { get; set; } = "";
+    /// <summary>彎頭／三通中點吊架才有值（接頭的識別字串）；直線段吊架為 null。</summary>
+    public string? FittingId { get; set; }
+}
+
+/// <summary>
+/// fitting_support 的接頭幾何輸入（由 Revit 端讀取，mm）。elbow：Center、RadiusMm、StartAngleDeg、SweepDeg（逆時針為正，0 到 180 度不含）；
+/// tee：Point（主幹中心）、MainDirectionDeg。FallbackReason 非空 = Revit 端讀不出幾何，該接頭退回只放兩側。
+/// </summary>
+public sealed class SupportFitting
+{
+    public string Id { get; set; } = "";
+    public string Kind { get; set; } = "";
+    public double[]? Center { get; set; }
+    public double[]? Point { get; set; }
+    public double[]? LocationMm { get; set; }
+    public double? RadiusMm { get; set; }
+    public double? StartAngleDeg { get; set; }
+    public double? SweepDeg { get; set; }
+    public double? MainDirectionDeg { get; set; }
+    public double? WidthMm { get; set; }
+    public double? HeightMm { get; set; }
+    public string? FallbackReason { get; set; }
 }
 
 public sealed record SupportIssue(string Level, string Code, string PieceId, double[] LocationMm, string Detail);
@@ -59,6 +81,9 @@ public sealed class HangerConfig
     public string SpacingMode = "even";
     public bool NearFittingEnabled;
     public double? NearFittingMaxDistanceMm;
+    // 選填 fitting_support：彎頭／三通中點吊架（預設關閉）。kinds 啟用時必填（elbow、tee）。
+    public bool FittingSupportEnabled;
+    public List<string> FittingSupportKinds = new();
     // 以下僅放置用（layout-only 讀取時可能為預設值）
     public string SupportedObject = "", FamilyName = "", TypeName = "", PlacementMode = "";
     public double WidenLeftMm, WidenRightMm, InsertionToBearingMm, OrientationCorrectionDeg;
@@ -91,6 +116,8 @@ public static class HangerConfigReader
     public static readonly string[] SupportedObjects = { "cable_tray" };
     public const string TestFailNthKey = "test_fail_nth";
     public const string InstanceParamsKey = "instance_params";
+    public const string FittingSupportKey = "fitting_support";
+    public static readonly string[] FittingKinds = { "elbow", "tee" };
 
     static double? Num(JsonNode? n)
     {
@@ -133,6 +160,26 @@ public static class HangerConfigReader
             if (Missing(nf, "max_distance_mm")) e.Add("near_fitting.max_distance_mm：啟用時必填");
             else if (d is null || d <= 0) e.Add("near_fitting.max_distance_mm：需為 > 0 的有限數");
             else if (s is > 0 && d > s) e.Add("near_fitting.max_distance_mm：不得大於 max_spacing_mm");
+        }
+        e.AddRange(FittingSupportErrors(c));
+        return e;
+    }
+
+    /// <summary>fitting_support（選填）：{"enabled": bool, "kinds": ["elbow", "tee"]}。規則與 Python _fitting_support_errors 一致（欄位、順序、訊息相同）。</summary>
+    static List<string> FittingSupportErrors(JsonObject c)
+    {
+        var e = new List<string>();
+        if (!c.ContainsKey(FittingSupportKey)) return e;
+        if (c[FittingSupportKey] is not JsonObject fs || fs["enabled"] is not JsonValue ev || !ev.TryGetValue<bool>(out var en))
+        { e.Add("fitting_support.enabled：需為 true/false（整個區塊選填；未填 = 關閉）"); return e; }
+        if (!en) return e;
+        if (fs["kinds"] is not JsonArray kinds || kinds.Count == 0)
+        { e.Add("fitting_support.kinds：啟用時必填（elbow、tee 的非空陣列，工具不提供預設）"); return e; }
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        for (int i = 0; i < kinds.Count; i++)
+        {
+            if (!(kinds[i] is JsonValue kv && kv.TryGetValue<string>(out var k) && Array.IndexOf(FittingKinds, k) >= 0)) e.Add($"fitting_support.kinds[{i}]：需為 elbow 或 tee");
+            else if (!seen.Add(k)) e.Add($"fitting_support.kinds[{i}]：「{k}」重複");
         }
         return e;
     }
@@ -269,6 +316,11 @@ public static class HangerConfigReader
             NearFittingEnabled = nf["enabled"]!.GetValue<bool>(),
         };
         if (cfg.NearFittingEnabled) cfg.NearFittingMaxDistanceMm = Num(nf["max_distance_mm"]);
+        if (c[FittingSupportKey] is JsonObject fsn && fsn["enabled"]!.GetValue<bool>())
+        {
+            cfg.FittingSupportEnabled = true;
+            cfg.FittingSupportKinds = fsn["kinds"]!.AsArray().Select(k => k!.GetValue<string>()).ToList();
+        }
         if (!placement) return cfg;
         cfg.SupportedObject = Str(c["supported_object"])!;
         cfg.FamilyName = Str(c["family"]!["family_name"])!;
@@ -378,7 +430,74 @@ public static class Supports
 
     static SupportIssue Issue(string level, string code, string pid, double[] loc, string detail) => new(level, code, pid, P3(loc), detail);
 
-    public static LayoutResult Layout(IReadOnlyList<SupportPiece> pieces, IReadOnlyList<SupportLink> links, HangerConfig cfg)
+    static bool IsNum(double? v) => v is double d && double.IsFinite(d);
+    static bool IsVec3(double[]? v) => v is { Length: 3 } && v.All(double.IsFinite);
+
+    /// <summary>接頭幾何輸入的檢查（由 Revit 端讀取後傳入）；與 Python _fitting_errors 一致（訊息、順序相同）。空 = 可用。</summary>
+    static List<string> FittingErrors(SupportFitting f)
+    {
+        var e = new List<string>();
+        if (!(IsNum(f.WidthMm) && f.WidthMm > 0 && IsNum(f.HeightMm) && f.HeightMm > 0)) e.Add("橋架寬度/高度無效");
+        if (f.Kind == "elbow")
+        {
+            if (!IsVec3(f.Center)) e.Add("圓心無效");
+            if (!(IsNum(f.RadiusMm) && f.RadiusMm > 0)) e.Add("半徑無效");
+            if (!IsNum(f.StartAngleDeg)) e.Add("起始角無效");
+            if (!(IsNum(f.SweepDeg) && Math.Abs(f.SweepDeg!.Value) > 0 && Math.Abs(f.SweepDeg.Value) < 180)) e.Add("掃過角需為 0 到 180 度之間（不含）");
+        }
+        else
+        {
+            if (!IsVec3(f.Point)) e.Add("交點無效");
+            if (!IsNum(f.MainDirectionDeg)) e.Add("主幹方向無效");
+        }
+        return e;
+    }
+
+    static double[] FittingLoc(SupportFitting f) =>
+        IsVec3(f.Center) ? f.Center! : IsVec3(f.Point) ? f.Point! : IsVec3(f.LocationMm) ? f.LocationMm! : new[] { 0.0, 0.0, 0.0 };
+
+    /// <summary>fitting_support 啟用時，為彎頭（中心線弧中點，方向取該點切線）與三通（主幹中心，方向取主幹）各產生 1 支。
+    /// 不判斷「放不下」；只有幾何讀不出或資料無效才退回（該接頭只留兩側吊架）並標 fitting_mid_fallback。與 Python _fitting_supports 一致。</summary>
+    static List<SupportPoint> FittingSupports(IReadOnlyList<SupportFitting> fittings, HangerConfig cfg, List<SupportIssue> issues)
+    {
+        var outp = new List<SupportPoint>();
+        if (!cfg.FittingSupportEnabled) return outp;
+        foreach (var f in fittings)
+        {
+            if (!cfg.FittingSupportKinds.Contains(f.Kind)) continue;
+            var label = f.Kind == "elbow" ? "彎頭" : "三通";
+            var problems = !string.IsNullOrEmpty(f.FallbackReason) ? new List<string> { $"Revit 端：{f.FallbackReason}" } : FittingErrors(f);
+            if (problems.Count > 0)
+            {
+                issues.Add(Issue("warning", "fitting_mid_fallback", f.Id, FittingLoc(f), $"{label} {f.Id} 的中點吊架未放置，退回只放兩側：{string.Join("；", problems)}"));
+                continue;
+            }
+            double w = f.WidthMm!.Value, h = f.HeightMm!.Value, z, direction, station;
+            double[] pt;
+            if (f.Kind == "elbow")
+            {
+                var c = f.Center!; double r = f.RadiusMm!.Value, sw = f.SweepDeg!.Value;
+                var a = f.StartAngleDeg!.Value + sw / 2;
+                var ar = a * Math.PI / 180.0;
+                pt = new[] { c[0] + r * Math.Cos(ar), c[1] + r * Math.Sin(ar), c[2] };
+                z = c[2];
+                direction = a + (sw > 0 ? 90.0 : -90.0);
+                station = r * (Math.Abs(sw) * Math.PI / 180.0) / 2;
+            }
+            else
+            {
+                pt = f.Point!; z = pt[2]; direction = f.MainDirectionDeg!.Value; station = 0.0;
+            }
+            outp.Add(new SupportPoint
+            {
+                PieceId = f.Id, FittingId = f.Id, ChainId = $"fitting:{f.Id}", StationMm = R3(station), PointMm = P3(pt),
+                DirectionDeg = Norm360(direction), TrayWidthMm = R3(w), TrayHeightMm = R3(h), BearingZMm = R3(z - h / 2), Reason = $"{f.Kind}_mid",
+            });
+        }
+        return outp;
+    }
+
+    public static LayoutResult Layout(IReadOnlyList<SupportPiece> pieces, IReadOnlyList<SupportLink> links, HangerConfig cfg, IReadOnlyList<SupportFitting>? fittings = null)
     {
         double s = cfg.MaxSpacingMm, aOff = cfg.StartOffsetMm, bOff = cfg.EndOffsetMm;
         if (!(s > 0) || !(aOff >= 0) || !(bOff >= 0)) throw new InvalidDataException("吊架設定未通過驗證");
@@ -556,6 +675,7 @@ public static class Supports
                 });
             }
         }
+        supports.AddRange(FittingSupports(fittings ?? Array.Empty<SupportFitting>(), cfg, issues));
         for (int i = 0; i < supports.Count; i++) supports[i].Id = $"H{i + 1:000}";
         return res;
     }

@@ -64,7 +64,7 @@ public static class RodToStructure
         rep.Notes.Add($"吊桿長度至結構：以 3D 視圖「{view.Name}」從承托面向上打射線，僅接受樓板／結構構架（含連結模型）；視圖中這些類別或連結須為可見");
         foreach (var it in rep.Items.Where(i => i.Status == "new"))
         {
-            var h = Units.FeetToMm(trays[it.TrayId].get_Parameter(BuiltInParameter.RBS_CABLETRAY_HEIGHT_PARAM).AsDouble());
+            var h = it.TrayHeightMm;   // 被支撐物件（橋架或接頭）的高度；由佈置時帶入，彎頭／三通沒有對應的 CableTray 元素
             var bearingZ = it.BearingPointMm[2];
             StructureHit? hit;
             try { hit = Probe(doc, view, it.BearingPointMm); }
