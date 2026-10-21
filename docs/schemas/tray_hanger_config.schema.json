@@ -23,6 +23,16 @@
       "type": "object", "required": ["enabled"],
       "properties": { "enabled": { "type": "boolean" }, "max_distance_mm": { "type": "number", "exclusiveMinimum": 0 } }
     },
+    "fitting_support": {
+      "type": "object", "required": ["enabled"],
+      "description": "選填；未填 = 關閉，與 near_fitting 並存。啟用時除直線段（含兩側）的吊架外，另在彎頭中心線弧中點、三通主幹中心各加 1 支（只在 Revit 放置時生效；網頁預覽看不到）。接頭幾何讀不出或交叉驗證不一致 → 該接頭退回只放兩側，並在預覽與報告列出（fitting_mid_fallback）。不判斷「放不下」。",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "kinds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["elbow", "tee"] }, "description": "enabled=true 時必填；工具不提供預設。" }
+      },
+      "if": { "properties": { "enabled": { "const": true } } },
+      "then": { "required": ["kinds"] }
+    },
     "widen_left_mm": { "type": "number", "minimum": 0, "description": "橫擔相對橋架寬度在行進方向左側的加長量。" },
     "widen_right_mm": { "type": "number", "minimum": 0 },
     "insertion_to_bearing_mm": { "type": "number", "description": "族插入點到承托面（橋架底）的垂直距離；插入點在承托面下方為正。需由族實測。" },

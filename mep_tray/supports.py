@@ -7,6 +7,8 @@ Web 預覽、router.place_hangers、export_revit 的 hanger_supports 與 Revit �
 - 每條連續段：起點內縮 start_offset、終點內縮 end_offset，中間等分且每一間距 ≤ max_spacing（不會因尾數超過）。
 - 端距衝突（段長 < 起+終內縮）依 short_run_policy：midpoint＝置中 1 支並警告；skip＝不放並列為 failed。
 - 接頭附近加強支撐只有在 near_fitting.enabled=true 且給定 max_distance_mm 時才加。
+- 彎頭／三通中點吊架（fitting_support，預設關閉）：兩側仍由上述直線段規則決定；啟用時另在彎頭中心線弧中點、三通主幹中心各加 1 支。
+  接頭幾何由 Revit 端讀取後以 fittings 傳入；讀不出或資料無效 → 該接頭退回只放兩側，並以 fitting_mid_fallback 標出。
 - 去重只在「同一被支撐物件＋相容方向」時成立；只是點靠近不算重複（其他／手動吊架靠近 → 待確認）。
 本模組不含任何規範數值預設；所有間距與內縮必須由使用者設定，缺漏即拒絕並指出欄位。
 """
@@ -22,6 +24,8 @@ PLACEMENT_MODES = ("level", "workplane")      # face/host-based 族 v1 不支援
 SCOPES = ("type", "instance")
 ROD_MODES = ("none", "fixed", "to_structure")
 SUPPORTED_OBJECTS = ("cable_tray",)            # conduit 之後擴充；核心與物件種類無關
+FITTING_SUPPORT_KEY = "fitting_support"        # 選填；未填 = 關閉
+FITTING_KINDS = ("elbow", "tee")
 TEST_FAIL_NTH_KEY = "test_fail_nth"            # 驗收用測試開關（選填）；只影響 Revit 放置迴圈，Python 端只驗證
 INT64_MAX = 2 ** 63 - 1                        # 與 C# long 上限一致
 INSTANCE_PARAMS_KEY = "instance_params"        # 新建吊架實例要寫入的文字參數（選填）；名稱與值取自業主共用參數檔／物件編碼規則
@@ -87,6 +91,32 @@ def validate_layout_config(cfg) -> list[str]:
             e.append("near_fitting.max_distance_mm：需為 > 0 的有限數")
         elif _num(s) and s > 0 and d > s:
             e.append("near_fitting.max_distance_mm：不得大於 max_spacing_mm")
+    e += _fitting_support_errors(cfg)
+    return e
+
+
+def _fitting_support_errors(cfg: dict) -> list[str]:
+    """fitting_support（選填）：{"enabled": bool, "kinds": ["elbow", "tee"]}。啟用時 kinds 必填，工具不提供預設。
+    規則與 C# HangerConfigReader.FittingSupportErrors 一致（錯誤欄位、順序、訊息相同）。"""
+    if FITTING_SUPPORT_KEY not in cfg:
+        return []
+    fs = cfg[FITTING_SUPPORT_KEY]
+    if not isinstance(fs, dict) or not isinstance(fs.get("enabled"), bool):
+        return ["fitting_support.enabled：需為 true/false（整個區塊選填；未填 = 關閉）"]
+    if not fs["enabled"]:
+        return []
+    kinds = fs.get("kinds")
+    if not isinstance(kinds, list) or not kinds:
+        return ["fitting_support.kinds：啟用時必填（elbow、tee 的非空陣列，工具不提供預設）"]
+    e: list[str] = []
+    seen: set[str] = set()
+    for i, k in enumerate(kinds):
+        if not isinstance(k, str) or k not in FITTING_KINDS:
+            e.append(f"fitting_support.kinds[{i}]：需為 elbow 或 tee")
+        elif k in seen:
+            e.append(f"fitting_support.kinds[{i}]：「{k}」重複")
+        else:
+            seen.add(k)
     return e
 
 
@@ -274,10 +304,84 @@ def _norm360(d: float) -> float:
     return 0.0 if d >= 360.0 else d + 0.0
 
 
-def layout(pieces: list[dict], links: list[dict], cfg: dict) -> dict:
+def _vec3(v) -> bool:
+    return isinstance(v, (list, tuple)) and len(v) == 3 and all(_num(x) for x in v)
+
+
+def _fitting_errors(f: dict) -> list[str]:
+    """接頭幾何輸入的檢查（由 Revit 端讀取後傳入）。回傳問題描述；空 = 可用。"""
+    e: list[str] = []
+    if not (_num(f.get("width_mm")) and f["width_mm"] > 0 and _num(f.get("height_mm")) and f["height_mm"] > 0):
+        e.append("橋架寬度/高度無效")
+    if f.get("kind") == "elbow":
+        if not _vec3(f.get("center")):
+            e.append("圓心無效")
+        r, st, sw = f.get("radius_mm"), f.get("start_angle_deg"), f.get("sweep_deg")
+        if not (_num(r) and r > 0):
+            e.append("半徑無效")
+        if not _num(st):
+            e.append("起始角無效")
+        if not (_num(sw) and 0 < abs(sw) < 180):
+            e.append("掃過角需為 0 到 180 度之間（不含）")
+    else:
+        if not _vec3(f.get("point")):
+            e.append("交點無效")
+        if not _num(f.get("main_direction_deg")):
+            e.append("主幹方向無效")
+    return e
+
+
+def _fitting_loc(f: dict) -> list[float]:
+    for k in ("center", "point", "location_mm"):
+        if _vec3(f.get(k)):
+            return [float(x) for x in f[k]]
+    return [0.0, 0.0, 0.0]
+
+
+def _fitting_supports(fittings: list[dict], cfg: dict, issues: list[dict]) -> list[dict]:
+    """fitting_support 啟用時，為彎頭（中心線弧中點，方向取該點切線）與三通（主幹中心，方向取主幹）各產生 1 支。
+    不判斷「放不下」；只有幾何讀不出或資料無效才退回（該接頭只留兩側吊架）並標 fitting_mid_fallback。"""
+    fs = cfg.get(FITTING_SUPPORT_KEY)
+    if not (isinstance(fs, dict) and fs.get("enabled") is True):
+        return []
+    out: list[dict] = []
+    for f in fittings:
+        kind = f.get("kind")
+        if kind not in fs["kinds"]:
+            continue
+        fid = str(f.get("id"))
+        label = "彎頭" if kind == "elbow" else "三通"
+        problems = [f"Revit 端：{f['fallback_reason']}"] if f.get("fallback_reason") else _fitting_errors(f)
+        if problems:
+            issues.append(_issue("warning", "fitting_mid_fallback", fid, _fitting_loc(f),
+                                 f"{label} {fid} 的中點吊架未放置，退回只放兩側：{'；'.join(problems)}"))
+            continue
+        w, h = float(f["width_mm"]), float(f["height_mm"])
+        if kind == "elbow":
+            c, r, sw = [float(v) for v in f["center"]], float(f["radius_mm"]), float(f["sweep_deg"])
+            a = float(f["start_angle_deg"]) + sw / 2
+            ar = math.radians(a)
+            pt, z = [c[0] + r * math.cos(ar), c[1] + r * math.sin(ar), c[2]], c[2]
+            direction, station = a + (90.0 if sw > 0 else -90.0), r * math.radians(abs(sw)) / 2
+        else:
+            pt = [float(v) for v in f["point"]]
+            z, direction, station = pt[2], float(f["main_direction_deg"]), 0.0
+        out.append({
+            "piece_id": fid, "fitting_id": fid, "chain_id": f"fitting:{fid}", "station_mm": _r3(station), "point_mm": _p3(pt),
+            "direction_deg": _norm360(direction), "tray_width_mm": _r3(w), "tray_height_mm": _r3(h),
+            "bearing_z_mm": _r3(z - h / 2), "reason": f"{kind}_mid",
+        })
+    return out
+
+
+def layout(pieces: list[dict], links: list[dict], cfg: dict, fittings: list[dict] | None = None) -> dict:
     """pieces: [{id, start[mm], end[mm], width_mm, height_mm, start_kind, end_kind}]；kind = free|fitting。
     links: [{a, b, kind}]，kind=union 時嘗試把 a、b 合併為同一連續段（需共線）。
-    回傳 {supports: [...], issues: [...]}；supports 依輸入段順序、沿連續段方向排序。"""
+    fittings（選填，fitting_support 啟用時才使用）：
+      elbow {id, kind, center[mm], radius_mm, start_angle_deg, sweep_deg(帶號，逆時針為正), width_mm, height_mm}
+      tee   {id, kind, point[mm], main_direction_deg, width_mm, height_mm}
+      任一接頭可帶 fallback_reason（Revit 端讀不出幾何時）。
+    回傳 {supports: [...], issues: [...]}；supports 依輸入段順序、沿連續段方向排序，接頭中點排在最後。"""
     errs = validate_layout_config(cfg)
     if errs:
         raise ValueError("; ".join(errs))
@@ -468,6 +572,7 @@ def layout(pieces: list[dict], links: list[dict], cfg: dict) -> dict:
                 "tray_width_mm": _r3(pm["w"]), "tray_height_mm": _r3(pm["h"]),
                 "bearing_z_mm": _r3(pm["z"] - pm["h"] / 2), "reason": pts[t],
             })
+    supports += _fitting_supports(fittings or [], cfg, issues)
     for i, sp in enumerate(supports, 1):
         sp["id"] = f"H{i:03d}"
     return {"supports": supports, "issues": issues}

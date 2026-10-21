@@ -17,6 +17,10 @@ public sealed class HangerItem
     public string SupportId { get; set; } = "";
     public string TrayId { get; set; } = "";
     public string TrayUniqueId { get; set; } = "";
+    /// <summary>彎頭／三通中點吊架（fitting_support）才有值：接頭的 ElementId；此時 TrayId／TrayUniqueId 指接頭，StationMm 為弧長（彎頭）或 0（三通）。</summary>
+    public string? FittingId { get; set; }
+    /// <summary>被支撐物件（橋架或接頭）的高度（mm），吊桿長度至結構用。</summary>
+    public double TrayHeightMm { get; set; }
     public double StationMm { get; set; }
     public double[] TrayPointMm { get; set; } = new double[3];       // 橋架中心線參考點（Revit 內部座標，mm）
     public double[] BearingPointMm { get; set; } = new double[3];    // 承托面點
@@ -67,9 +71,12 @@ public sealed class HangerRunReport
         if (bad.Count > 0)
             s += "\n佈置問題：\n  " + string.Join("\n  ", bad.Take(30).Select(i => $"[{i.Level}] {i.Code} {i.PieceId} @({i.LocationMm[0]:F0},{i.LocationMm[1]:F0},{i.LocationMm[2]:F0}) {i.Detail}"))
                  + (bad.Count > 30 ? $"\n  …其餘 {bad.Count - 30} 筆見報告檔" : "");
+        var fb = LayoutIssues.Where(i => i.Code == "fitting_mid_fallback").ToList();
+        if (fb.Count > 0)
+            s += $"\n彎頭／三通中點退回只放兩側：{fb.Count} 個（接頭 ElementId {string.Join("、", fb.Take(30).Select(i => i.PieceId))}" + (fb.Count > 30 ? $"…其餘 {fb.Count - 30} 個見報告檔" : "") + "）";
         if (RodMode == "to_structure")
         {
-            var rods = Items.Where(i => (i.Status is "new" or "created") && i.RodLengthMm is not null).ToList();
+            var rods =Items.Where(i => (i.Status is "new" or "created") && i.RodLengthMm is not null).ToList();
             if (rods.Count > 0)
                 s += "\n吊桿長度（至結構）：\n  " + string.Join("\n  ", rods.Take(30).Select(i =>
                          $"{i.SupportId} 橋架 {i.TrayId} station {i.StationMm:F0}：{i.RodLengthMm:F1} mm，結構面 Z={i.HitZMm:F1}，{i.HitCategory} {i.HitElementId}" + (i.HitLinkInstanceId is null ? "" : $"（連結實例 {i.HitLinkInstanceId}）")))
@@ -175,6 +182,101 @@ public static class HangerPlacer
         return (pieces, links, trays, problems);
     }
 
+    // ── 1b. 彎頭／三通接頭（fitting_support）：只讀 connector 與幾何，交給 FittingGeometry 重建並交叉驗證 ──
+    /// <summary>族的 FAMILY_CONTENT_PART_TYPE 轉成 PartType 列舉名稱（電纜架配件的 MEPModel 不是 MechanicalFitting，PartType 屬性讀不到）。</summary>
+    public static string? FamilyPartTypeName(FamilyInstance fi)
+    {
+        var p = fi.Symbol?.Family?.get_Parameter(BuiltInParameter.FAMILY_CONTENT_PART_TYPE);
+        if (p is null || p.StorageType != StorageType.Integer) return null;
+        var v = p.AsInteger();
+        return Enum.IsDefined(typeof(PartType), v) ? ((PartType)v).ToString() : null;
+    }
+
+    static List<FittingConnector> FittingConnectors(FamilyInstance fi)
+    {
+        var l = new List<FittingConnector>();
+        var cm = fi.MEPModel?.ConnectorManager ?? throw new InvalidOperationException("接頭沒有 ConnectorManager");
+        foreach (Connector c in cm.Connectors)
+        {
+            if (c.ConnectorType != ConnectorType.End) continue;
+            var z = c.CoordinateSystem.BasisZ;
+            l.Add(new FittingConnector(Mm(c.Origin), new[] { z.X, z.Y, z.Z }, Units.FeetToMm(c.Width), Units.FeetToMm(c.Height)));
+        }
+        return l;
+    }
+
+    /// <summary>接頭幾何中的圓弧邊（Solid 的邊；含 GeometryInstance 內）。彎頭中心線半徑由內外緣半徑推得（探查實測：中心線不是獨立曲線）。</summary>
+    static List<FittingArc> FittingArcs(FamilyInstance fi)
+    {
+        var l = new List<FittingArc>();
+        var opt = new Options { ComputeReferences = false, DetailLevel = ViewDetailLevel.Fine, IncludeNonVisibleObjects = true };
+        var ge = fi.get_Geometry(opt) ?? throw new InvalidOperationException("Element.Geometry 回傳 null");
+        void Walk(GeometryElement g)
+        {
+            foreach (GeometryObject go in g)
+            {
+                if (go is GeometryInstance gi) Walk(gi.GetInstanceGeometry());
+                else if (go is Solid s && s.Faces.Size > 0)
+                    foreach (Edge e in s.Edges)
+                    {
+                        Curve c;
+                        try { c = e.AsCurve(); } catch (Exception) { continue; }
+                        if (c is Arc a && a.IsBound)
+                        {
+                            var n = a.Normal;
+                            l.Add(new FittingArc(Mm(a.Center), Units.FeetToMm(a.Radius), a.Length / a.Radius * 180.0 / Math.PI, new[] { n.X, n.Y, n.Z }));
+                        }
+                    }
+            }
+        }
+        Walk(ge);
+        return l;
+    }
+
+    /// <summary>fitting_support 啟用時，讀取選取橋架相鄰的彎頭／三通。接頭所有相鄰橋架都在選取內才處理（避免替沒選的那一段橋架補接頭吊架）；
+    /// 讀不出或驗證不過者以 FallbackReason 回傳，由 Layout 標為 fitting_mid_fallback。不開交易、不改模型。</summary>
+    public static (List<SupportFitting> Fittings, Dictionary<string, FamilyInstance> Instances, List<string> Notes) ReadFittings(Document doc, IEnumerable<ElementId> trayIds, HangerConfig cfg)
+    {
+        var fittings = new List<SupportFitting>();
+        var instances = new Dictionary<string, FamilyInstance>();
+        var notes = new List<string>();
+        if (!cfg.FittingSupportEnabled) return (fittings, instances, notes);
+        var sel = trayIds.Select(doc.GetElement).OfType<CableTray>().ToList();
+        var selIds = new HashSet<long>(sel.Select(t => t.Id.Value));
+        var found = new Dictionary<long, FamilyInstance>();
+        foreach (var t in sel)
+            foreach (Connector c in t.ConnectorManager.Connectors)
+            {
+                if (c.ConnectorType != ConnectorType.End) continue;
+                foreach (Connector r in c.AllRefs)
+                    if (r.Owner is FamilyInstance fi && r.ConnectorType != ConnectorType.Logical) found[fi.Id.Value] = fi;
+            }
+        int skippedKind = 0, skippedUnselected = 0;
+        foreach (var fi in found.Values.OrderBy(f => f.Id.Value))
+        {
+            var kind = FittingGeometry.KindOf(FamilyPartTypeName(fi));
+            if (kind is null) { skippedKind++; continue; }
+            if (!cfg.FittingSupportKinds.Contains(kind)) continue;
+            if (OtherTrays(fi, ElementId.InvalidElementId).Any(o => !selIds.Contains(o.Value))) { skippedUnselected++; continue; }
+            var id = fi.Id.Value.ToString(CultureInfo.InvariantCulture);
+            SupportFitting f;
+            try
+            {
+                var conns = FittingConnectors(fi);
+                f = kind == "elbow" ? FittingGeometry.Elbow(id, conns, FittingArcs(fi)) : FittingGeometry.Tee(id, conns);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                f = new SupportFitting { Id = id, Kind = kind, LocationMm = (fi.Location as LocationPoint) is { } lp ? Mm(lp.Point) : null, FallbackReason = $"讀取接頭失敗：{ex.GetType().Name}: {ex.Message}" };
+            }
+            fittings.Add(f);
+            instances[id] = fi;
+        }
+        if (skippedKind > 0) notes.Add($"fitting_support：{skippedKind} 個接頭的種類不在彎頭／三通範圍（只處理 LadderCableTrayElbow、LadderCableTrayTee），未處理");
+        if (skippedUnselected > 0) notes.Add($"fitting_support：{skippedUnselected} 個彎頭／三通有相鄰橋架不在選取內，未處理（請一併選取相鄰橋架）");
+        return (fittings, instances, notes);
+    }
+
     static string Pair(long a, long b) => a < b ? $"{a}-{b}" : $"{b}-{a}";
 
     static IEnumerable<ElementId> OtherTrays(FamilyInstance fitting, ElementId self)
@@ -270,9 +372,13 @@ public static class HangerPlacer
         resolved = Preflight(doc, cfg, rep.PreflightErrors, checkCalibration);
         if (!checkCalibration) rep.Notes.Add("校正簽章已於本次命令開始、交易前核對（族文件內容簽章不能在交易群組中途讀取）");
         if (pieces.Count == 0) rep.PreflightErrors.Add("沒有可處理的 Cable Tray");
-        var lay = Supports.Layout(pieces, links, cfg);
+        var (fittings, fittingInstances, fittingNotes) = ReadFittings(doc, trayIds, cfg);
+        rep.Notes.AddRange(fittingNotes);
+        var lay = Supports.Layout(pieces, links, cfg, fittings);
         rep.LayoutIssues.AddRange(lay.Issues);
-        var plan = lay.Supports.Select(s => new PlannedKey(trayMap[s.PieceId].UniqueId, s.StationMm, s.PointMm, s.DirectionDeg)).ToList();
+        // 被支撐物件的 UniqueId：直線段吊架指橋架，彎頭／三通中點吊架指接頭（去重鍵與追蹤資料都用它）
+        string SupportedUniqueId(SupportPoint s) => s.FittingId is string fid ? fittingInstances[fid].UniqueId : trayMap[s.PieceId].UniqueId;
+        var plan = lay.Supports.Select(s => new PlannedKey(SupportedUniqueId(s), s.StationMm, s.PointMm, s.DirectionDeg)).ToList();
         var cls = Supports.Classify(plan, ReadExisting(doc, cfg.FamilyName), cfg.DedupeToleranceMm, cfg.DedupeAngleToleranceDeg);
         for (int i = 0; i < lay.Supports.Count; i++)
         {
@@ -280,7 +386,7 @@ public static class HangerPlacer
             var pl = Supports.Place(s, cfg);
             rep.Items.Add(new HangerItem
             {
-                SupportId = s.Id, TrayId = s.PieceId, TrayUniqueId = trayMap[s.PieceId].UniqueId, StationMm = s.StationMm,
+                SupportId = s.Id, TrayId = s.PieceId, TrayUniqueId = SupportedUniqueId(s), FittingId = s.FittingId, TrayHeightMm = s.TrayHeightMm, StationMm = s.StationMm,
                 TrayPointMm = s.PointMm, BearingPointMm = pl.BearingPointMm, InsertionPointMm = pl.InsertionPointMm, RotationDeg = pl.RotationDeg,
                 TrayDirectionDeg = s.DirectionDeg, CrossMemberLengthMm = pl.CrossMemberLengthMm, RodLengthMm = pl.RodLengthMm, Reason = s.Reason,
                 Status = cls[i].Status,

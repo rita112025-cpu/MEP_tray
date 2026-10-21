@@ -219,6 +219,138 @@ def test_valid_config_passes():
     assert S.validate_placement_config(pcfg()) == []
 
 
+# ---------- 彎頭／三通中點吊架（fitting_support）----------
+FS_ON = {"enabled": True, "kinds": ["elbow", "tee"]}
+# 實機探查樣本（2026-10-20）：M_梯水平彎曲，中心線半徑 450 mm、橋架 300x100、中心線 Z = -1050
+ELBOW90 = {"id": "E90", "kind": "elbow", "center": [3542.471, 9525.553, -1050.0], "radius_mm": 450.0,
+           "start_angle_deg": -90.0, "sweep_deg": 90.0, "width_mm": 300.0, "height_mm": 100.0}
+ELBOW60 = {"id": "E60", "kind": "elbow", "center": [2098.637, 11434.74, -1050.0], "radius_mm": 450.0,
+           "start_angle_deg": -90.0, "sweep_deg": 60.0, "width_mm": 300.0, "height_mm": 100.0}
+TEE = {"id": "T1", "kind": "tee", "point": [1511.28, 9075.553, -1050.0], "main_direction_deg": 0.0,
+       "width_mm": 300.0, "height_mm": 100.0}
+
+
+def fs_layout(fittings, **kw):
+    return S.layout([], [], cfg(fitting_support=kw.pop("fs", FS_ON), **kw), fittings)
+
+
+def test_fitting_support_config_off_by_default_and_validated():
+    assert S.validate_layout_config(cfg()) == []                                   # 未填 = 關閉
+    assert S.validate_layout_config(cfg(fitting_support={"enabled": False})) == []
+    assert S.validate_layout_config(cfg(fitting_support=FS_ON)) == []
+    assert S.validate_layout_config(cfg(fitting_support={"enabled": True, "kinds": ["tee"]})) == []
+    for bad, field in [({"enabled": True}, "fitting_support.kinds"), ({"enabled": True, "kinds": []}, "fitting_support.kinds"),
+                       ({"enabled": True, "kinds": "elbow"}, "fitting_support.kinds"),
+                       ({"enabled": True, "kinds": ["cross"]}, "fitting_support.kinds[0]"),
+                       ({"enabled": True, "kinds": ["tee", "tee"]}, "fitting_support.kinds[1]"),
+                       ({"kinds": ["elbow"]}, "fitting_support.enabled"), ({"enabled": 1, "kinds": ["elbow"]}, "fitting_support.enabled"),
+                       ("on", "fitting_support.enabled")]:
+        assert S.error_fields(S.validate_layout_config(cfg(fitting_support=bad))) == [field], bad
+
+
+def test_elbow_midpoint_matches_probed_90_and_60_degree_elbows():
+    r = fs_layout([ELBOW90, ELBOW60])
+    a, b = r["supports"]
+    assert a["point_mm"] == [3860.669, 9207.355, -1050.0] and a["direction_deg"] == 45.0
+    assert a["station_mm"] == 353.429 and a["bearing_z_mm"] == -1100.0 and a["tray_width_mm"] == 300.0
+    assert a["reason"] == "elbow_mid" and a["piece_id"] == a["fitting_id"] == "E90" and a["id"] == "H001"
+    assert b["point_mm"] == [2323.637, 11045.029, -1050.0] and b["direction_deg"] == 30.0 and b["station_mm"] == 235.619
+    assert r["issues"] == []
+
+
+def test_elbow_clockwise_sweep_heads_along_the_arc():
+    e = dict(ELBOW90, center=[0.0, 0.0, 0.0], start_angle_deg=90.0, sweep_deg=-90.0)
+    sp = fs_layout([e])["supports"][0]
+    assert sp["point_mm"] == [318.198, 318.198, 0.0] and sp["direction_deg"] == 315.0 and sp["station_mm"] == 353.429
+
+
+def test_tee_midpoint_is_main_run_center_along_main_direction():
+    sp = fs_layout([TEE])["supports"][0]
+    assert sp["point_mm"] == [1511.28, 9075.553, -1050.0] and sp["direction_deg"] == 0.0 and sp["station_mm"] == 0.0
+    assert sp["reason"] == "tee_mid" and sp["bearing_z_mm"] == -1100.0
+    assert fs_layout([dict(TEE, main_direction_deg=-90.0)])["supports"][0]["direction_deg"] == 270.0
+
+
+def test_fitting_support_disabled_or_kind_not_listed_adds_nothing():
+    assert S.layout([], [], cfg(), [ELBOW90, TEE]) == {"supports": [], "issues": []}
+    assert fs_layout([ELBOW90, TEE], fs={"enabled": False}) == {"supports": [], "issues": []}
+    only_tee = fs_layout([ELBOW90, TEE], fs={"enabled": True, "kinds": ["tee"]})
+    assert [s["fitting_id"] for s in only_tee["supports"]] == ["T1"] and only_tee["issues"] == []
+    broken = dict(ELBOW90, radius_mm=-1)
+    assert fs_layout([broken], fs={"enabled": True, "kinds": ["tee"]}) == {"supports": [], "issues": []}   # 未列入的種類不檢查
+
+
+def test_fitting_support_leaves_straight_run_supports_unchanged():
+    pieces = [P("A", (0, 0, 3000), (3000, 0, 3000), ek="fitting"), P("B", (3300, 300, 3000), (3300, 3000, 3000), sk="fitting")]
+    base = S.layout(pieces, [], cfg())
+    r = S.layout(pieces, [], cfg(fitting_support=FS_ON), [ELBOW90])
+    assert r["supports"][:-1] == base["supports"] and r["supports"][-1]["reason"] == "elbow_mid"
+    assert r["supports"][-1]["id"] == f"H{len(base['supports']) + 1:03d}" and r["issues"] == base["issues"]
+    assert S.layout(pieces, [], cfg(fitting_support=FS_ON)) == base                     # 沒傳 fittings = 沒有接頭
+
+
+@pytest.mark.parametrize("patch,why", [
+    ({"radius_mm": 0}, "半徑無效"), ({"radius_mm": float("nan")}, "半徑無效"), ({"center": [1, 2]}, "圓心無效"),
+    ({"start_angle_deg": None}, "起始角無效"), ({"sweep_deg": 0}, "掃過角"), ({"sweep_deg": 180}, "掃過角"),
+    ({"sweep_deg": -200}, "掃過角"), ({"width_mm": 0}, "橋架寬度/高度無效"), ({"height_mm": True}, "橋架寬度/高度無效"),
+    ({"fallback_reason": "兩個圓心差 12 mm"}, "Revit 端：兩個圓心差 12 mm"),
+])
+def test_elbow_with_unusable_geometry_falls_back_and_is_reported(patch, why):
+    r = fs_layout([dict(ELBOW90, **patch), ELBOW60])
+    assert [s["fitting_id"] for s in r["supports"]] == ["E60"] and r["supports"][0]["id"] == "H001"
+    (i,) = r["issues"]
+    assert i["code"] == "fitting_mid_fallback" and i["level"] == "warning" and i["piece_id"] == "E90"
+    assert "彎頭 E90" in i["detail"] and "退回只放兩側" in i["detail"] and why in i["detail"]
+
+
+def test_tee_with_unusable_geometry_falls_back_and_is_reported():
+    r = fs_layout([dict(TEE, point=None), dict(TEE, id="T2", fallback_reason="找不到主幹")])
+    assert r["supports"] == [] and [i["piece_id"] for i in r["issues"]] == ["T1", "T2"]
+    assert all(i["code"] == "fitting_mid_fallback" and "三通" in i["detail"] for i in r["issues"])
+    assert r["issues"][0]["location_mm"] == [0.0, 0.0, 0.0] and "交點無效" in r["issues"][0]["detail"]
+
+
+def test_fitting_support_schema_manual_and_csharp_mirror_documented():
+    schema = json.loads((ROOT / "docs" / "schemas" / "tray_hanger_config.schema.json").read_text(encoding="utf-8"))
+    fs = schema["properties"]["fitting_support"]
+    assert fs["required"] == ["enabled"] and fs["properties"]["kinds"]["items"]["enum"] == list(S.FITTING_KINDS)
+    assert "fitting_support" not in schema["required"]                                  # 選填
+    manual = (ROOT / "docs" / "MANUAL.md").read_text(encoding="utf-8")
+    for kw in ("fitting_support", "fitting_mid_fallback", "不判斷「放不下」", "LadderCableTrayElbow", "網頁預覽（Python 端）看不到"):
+        assert kw in manual, kw
+    core = (ROOT / "revit" / "MepTray.Core" / "Supports.cs").read_text(encoding="utf-8")
+    for needle in ("FittingSupportErrors", "fitting_mid_fallback", "FittingSupportKinds", "fitting_support.kinds"):
+        assert needle in core, needle
+
+
+def test_revit_fitting_reader_is_read_only_and_wired_into_plan():
+    import re
+    placer = (ROOT / "revit" / "MepTrayImport" / "HangerPlacer.cs").read_text(encoding="utf-8")
+    start = placer.index("// ── 1b. 彎頭／三通接頭")
+    end = placer.index("static string Pair(")
+    block = re.sub(r"//[^\n]*", "", placer[start:end])
+    for forbidden in ("new Transaction", "SubTransaction", "TransactionGroup", "ElementTransformUtils", ".Delete(", "NewFamilyInstance",
+                      "SetEntity", ".Set(", "Regenerate", "Commit(", "RollBack("):
+        assert forbidden not in block, forbidden
+    # 電纜架配件的 MEPModel 不是 MechanicalFitting（實機探查）：辨識走族的 FAMILY_CONTENT_PART_TYPE，不依賴 MechanicalFitting.PartType
+    assert "FAMILY_CONTENT_PART_TYPE" in block and "MechanicalFitting" not in block and "FittingGeometry.KindOf" in block
+    assert "FittingGeometry.Elbow(" in block and "FittingGeometry.Tee(" in block
+    plan = placer[placer.index("public static HangerRunReport Plan("):placer.index("ApplyTestSwitch(rep, cfg);")]
+    assert "ReadFittings(doc, trayIds, cfg)" in plan and "Supports.Layout(pieces, links, cfg, fittings)" in plan
+    assert "FittingId = s.FittingId" in plan and "TrayHeightMm = s.TrayHeightMm" in plan
+    rod = (ROOT / "revit" / "MepTrayImport" / "RodToStructure.cs").read_text(encoding="utf-8")
+    assert "it.TrayHeightMm" in rod and "trays[it.TrayId]" not in rod       # 接頭沒有對應的 CableTray 元素
+    core = (ROOT / "revit" / "MepTray.Core" / "FittingGeometry.cs").read_text(encoding="utf-8")
+    assert not re.search(r"\b(1000|1500|255)\b", core)                       # 不把支撐間距/接頭距離寫死
+
+
+def test_fitting_support_placement_uses_cross_member_rules():
+    sp = fs_layout([ELBOW90])["supports"][0]
+    pl = S.placement(sp, pcfg(widen_left_mm=50.0, widen_right_mm=50.0, insertion_to_bearing_mm=40.0, orientation_correction_deg=0.0))
+    assert pl["rotation_deg"] == 45.0 and pl["cross_member_length_mm"] == 400.0
+    assert pl["bearing_point_mm"][2] == -1100.0 and pl["insertion_point_mm"][2] == -1140.0
+
+
 # ---------- 族座標換算 ----------
 def test_placement_conversion():
     sp = S.layout([P("A", (0, 0, 3000), (0, 5000, 3000), h=100.0)], [], cfg())["supports"][0]   # 沿 +Y
@@ -549,11 +681,13 @@ def _rod(**kw):
 def contract_cases() -> dict:
     lc = []
 
-    def add(name, pieces, links, c, placement=True):
+    def add(name, pieces, links, c, placement=True, fittings=None):
         errs = S.error_fields(S.validate_placement_config(c))
         case = {"name": name, "pieces": pieces, "links": links, "cfg": c, "config_errors": errs}
+        if fittings is not None:
+            case["fittings"] = fittings
         if not S.validate_layout_config(c):
-            res = S.layout(pieces, links, c)
+            res = S.layout(pieces, links, c, fittings)
             case["expect"] = res
             if placement and not errs:
                 case["placements"] = [S.placement(sp, c) for sp in res["supports"]]
@@ -589,6 +723,19 @@ def contract_cases() -> dict:
     add("fail_nth_on", [P("A", (0, 0, 3000), (6000, 0, 3000))], [], pcfg(max_spacing_mm=1350.0, test_fail_nth=2))
     for nm, v in TEST_FAIL_NTH_BAD:
         add(f"cfg_fail_nth_{nm}", [], [], pcfg(test_fail_nth=v))
+    fl = [P("A", (0, 0, 3000), (3000, 0, 3000), ek="fitting"), P("B", (3300, 300, 3000), (3300, 3000, 3000), sk="fitting")]
+    fit_all = [ELBOW90, ELBOW60, dict(ELBOW90, id="ECW", center=[0.0, 0.0, 0.0], start_angle_deg=90.0, sweep_deg=-90.0), TEE]
+    fit_bad = [dict(ELBOW90, id="E0", radius_mm=0), dict(ELBOW90, id="E1", sweep_deg=180), dict(ELBOW90, id="E2", center=[1, 2]),
+               dict(ELBOW90, id="E3", fallback_reason="圓心不一致"), dict(TEE, id="T0", point=None), dict(TEE, id="T1b", width_mm=0),
+               dict(TEE, id="T2", location_mm=[5.0, 6.0, 7.0], main_direction_deg=None, point=None)]
+    add("fit_on", fl, [], pcfg(fitting_support=FS_ON), fittings=fit_all)
+    add("fit_on_tee_only", fl, [], pcfg(fitting_support={"enabled": True, "kinds": ["tee"]}), fittings=fit_all)
+    add("fit_off", fl, [], pcfg(), fittings=fit_all)
+    add("fit_disabled", fl, [], pcfg(fitting_support={"enabled": False}), fittings=fit_all)
+    add("fit_fallback", fl, [], pcfg(fitting_support=FS_ON), fittings=fit_bad)
+    for nm, v in [("no_kinds", {"enabled": True}), ("empty_kinds", {"enabled": True, "kinds": []}), ("bad_kind", {"enabled": True, "kinds": ["cross"]}),
+                  ("dup_kind", {"enabled": True, "kinds": ["tee", "tee"]}), ("no_enabled", {"kinds": ["tee"]}), ("not_obj", "on"), ("null", None)]:
+        add(f"cfg_fit_{nm}", [], [], pcfg(fitting_support=v))
     add("ip_on", [P("A", (0, 0, 3000), (6000, 0, 3000))], [], pcfg(max_spacing_mm=1350.0, instance_params=IP_OK))
     add("ip_empty", [], [], pcfg(instance_params=[]))
     for nm, v, _ in IP_BAD:
