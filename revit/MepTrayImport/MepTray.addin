@@ -60,4 +60,14 @@
     <VendorId>MEPT</VendorId>
     <VendorDescription>MEP_tray</VendorDescription>
   </AddIn>
+  <AddIn Type="Command">
+    <Name>彎頭三通探查</Name>
+    <Assembly>MepTrayImport.dll</Assembly>
+    <AddInId>e4a7c9b1-5d2f-4b86-a3e0-7c1d9f2b6a48</AddInId>
+    <FullClassName>MepTray.Revit.FittingProbeCommand</FullClassName>
+    <Text>彎頭三通探查</Text>
+    <Description>唯讀讀取選取的 Cable Tray 接頭（彎頭、三通等）的 connector、幾何曲線、PartType 與參數，輸出 JSON；不開交易、不修改模型</Description>
+    <VendorId>MEPT</VendorId>
+    <VendorDescription>MEP_tray</VendorDescription>
+  </AddIn>
 </RevitAddIns>

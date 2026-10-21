@@ -42,6 +42,28 @@ def test_inventory_is_read_only_by_construction():
     assert "fdoc.Close(false)" in code and "openedHere" in code     # 只關閉自己開啟的族文件，且不儲存
 
 
+def test_fitting_probe_is_read_only_by_construction():
+    xml = ADDIN.read_text(encoding="utf-8")
+    assert "<FullClassName>MepTray.Revit.FittingProbeCommand</FullClassName>" in xml
+    path = SRC / "FittingProbeCommand.cs"
+    code = _code_no_comments(path)
+    assert re.search(r"\[Transaction\(TransactionMode\.ReadOnly\)\]\s*public class FittingProbeCommand", code)
+    for forbidden in ("new Transaction", "SubTransaction", "TransactionGroup", "NewFamilyInstance", ".Delete(", "LoadFamily",
+                      "ElementTransformUtils", ".Save(", ".SaveAs(", ".Set(", "CableTray.Create", "NewElbowFitting", "NewTeeFitting",
+                      "SetValueString", "SetEntity", "Regenerate", "Activate(", "OpenDocumentFile", "Commit(", "RollBack(",
+                      "HttpClient", "WebClient", "EditFamily"):
+        assert forbidden not in code, forbidden
+    assert not re.search(r"\b(1000|255)\b", code)                  # 不把支撐間距/接頭距離寫死
+    # 選取範圍只限電纜架配件：不可把風管等其他 MechanicalFitting 一併收進報告
+    pred = re.search(r"static bool IsFitting\(Element e\) =>[^;]*;", code)
+    assert pred and "OST_CableTrayFitting" in pred.group(0) and "MechanicalFitting" not in pred.group(0)
+    # 診斷欄位：族 Part Type、MEPModel 實際類別、Solid 圓弧邊收進頂層 curves 並如實回報是否截斷
+    for needle in ("BuiltInParameter.FAMILY_CONTENT_PART_TYPE", "mep_model_class_full", "is_mechanical_fitting",
+                   "curves_listed", "curves_truncated", "arc_edge_count", "curves.Add(ci)",
+                   "part_type_enum_name", "part_type_enum_table"):
+        assert needle in code, needle
+
+
 def test_inventory_default_folder_and_no_hardcoded_rules():
     code = INV.read_text(encoding="utf-8")
     assert r"04_台灣專用元件族\13_固定工具" in code
