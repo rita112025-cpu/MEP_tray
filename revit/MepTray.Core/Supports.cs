@@ -65,8 +65,12 @@ public sealed class LayoutResult
 
 public sealed record Placement(double[] BearingPointMm, double[] InsertionPointMm, double RotationDeg, double CrossMemberLengthMm, double? RodLengthMm);
 
-public sealed record ExistingHanger(string Id, string Source, string? TrayKey, double? StationMm, double[]? PointMm, double? DirectionDeg);
-public sealed record PlannedKey(string TrayKey, double StationMm, double[] PointMm, double DirectionDeg);
+/// <summary>Actual* 必須來自實際元素（插入點、LocationPoint 旋轉、橫擔長度參數換算），不是保存的追蹤資料；讀不到就是 null。</summary>
+public sealed record ExistingHanger(string Id, string Source, string? TrayKey, double? StationMm, double[]? PointMm, double? DirectionDeg,
+    double[]? ActualPointMm = null, double? ActualRotationDeg = null, double? ActualCrossLengthMm = null);
+/// <summary>InsertionPointMm／RotationDeg／CrossLengthMm = Place() 的結果（已含族校正偏移與方向修正角）；帶值時 Classify 才比對實際幾何。</summary>
+public sealed record PlannedKey(string TrayKey, double StationMm, double[] PointMm, double DirectionDeg,
+    double[]? InsertionPointMm = null, double? RotationDeg = null, double? CrossLengthMm = null);
 public sealed record Classification(string Status, List<string> Match, string Reason);
 
 public sealed record ParamRef(string Name, string Scope);
@@ -701,17 +705,84 @@ public static class Supports
         return Math.Min(d, 180.0 - d) <= tolDeg + 1e-9;
     }
 
-    /// <summary>重跑去重：同橋架＋同 station＋方向相容的本工具吊架恰 1 支 → exists；不確定 → pending（待確認）；絕不刪除或修改。</summary>
+    static bool IsValid(double? v) => v is double d && double.IsFinite(d);
+    static bool IsValid(double[]? v) => v is { Length: 3 } && v.All(double.IsFinite);
+    static bool IsValid(string? v) => !string.IsNullOrWhiteSpace(v);
+
+    /// <summary>追蹤資料缺欄位：null、空白字串、NaN／Infinity 都算缺少（與 Python _has 同一規則）。</summary>
+    static List<string> MissingTracking(ExistingHanger e)
+    {
+        var m = new List<string>();
+        if (!IsValid(e.TrayKey)) m.Add("tray_key");
+        if (!IsValid(e.StationMm)) m.Add("station_mm");
+        if (!IsValid(e.DirectionDeg)) m.Add("direction_deg");
+        return m;
+    }
+
+    static double RotDiff(double a, double b)
+    {
+        var d = Math.Abs((a - b) % 360.0);
+        return Math.Min(d, 360.0 - d);
+    }
+
+    static double Dist3(double[] a, double[] b) => Math.Sqrt(Math.Pow(a[0] - b[0], 2) + Math.Pow(a[1] - b[1], 2) + Math.Pow(a[2] - b[2], 2));
+
+    /// <summary>實際元素與預定插入點／旋轉角／橫擔長度比較（位置為 3D 距離，旋轉以 0–360 嚴格比較）；不符回傳原因，否則 null。</summary>
+    static string? GeometryMismatch(PlannedKey p, ExistingHanger e, double tolMm, double tolDeg)
+    {
+        var dist = Dist3(e.ActualPointMm!, p.InsertionPointMm!);
+        if (dist > tolMm + 1e-9) return $"實際插入點與預定位置不符（差 {dist:F1} mm，容許 {tolMm:G} mm）：位置、高程、橋架或設定已變更";
+        var dr = RotDiff(e.ActualRotationDeg!.Value, p.RotationDeg!.Value);
+        if (dr > tolDeg + 1e-9) return $"實際旋轉角與預定不符（差 {dr:F2}°，容許 {tolDeg:G}°）";
+        var dl = Math.Abs(e.ActualCrossLengthMm!.Value - p.CrossLengthMm!.Value);
+        if (dl > tolMm + 1e-9) return $"實際橫擔長度與預定不符（差 {dl:F1} mm，容許 {tolMm:G} mm）：橫擔尺寸或加寬設定已變更";
+        return null;
+    }
+
+    /// <summary>重跑去重（與 Python supports.classify 同一規則）：同橋架＋同 station＋方向相容的本工具吊架恰 1 支，
+    /// 且（planned 帶幾何時）實際插入點／旋轉角／橫擔長度都在容許內 → exists。
+    /// 追蹤資料不完整、實際幾何讀不到或不符、方向不相容、多支 → pending（待確認）；pending 不新增吊架。絕不刪除或修改。</summary>
     public static List<Classification> Classify(IReadOnlyList<PlannedKey> planned, IReadOnlyList<ExistingHanger> existing, double tolMm, double tolDeg)
     {
         var outp = new List<Classification>();
         foreach (var p in planned)
         {
-            var tm = existing.Where(e => e.Source == "tool" && e.TrayKey == p.TrayKey && e.StationMm is double st && Math.Abs(st - p.StationMm) <= tolMm + 1e-9).ToList();
-            if (tm.Count == 1 && tm[0].DirectionDeg is double dd && AngleCompatible(dd, p.DirectionDeg, tolDeg))
-            { outp.Add(new Classification("exists", new List<string> { tm[0].Id }, "本工具已放置")); continue; }
+            var geometry = p.InsertionPointMm is not null && p.RotationDeg is not null && p.CrossLengthMm is not null;
+            var tools = existing.Where(e => e.Source == "tool").ToList();
+            // 缺 tray_key 時以位置判斷：實際插入點 vs 預定插入點（含族校正偏移；左右加寬不對稱時與中心線點不同）
+            var refPt = geometry ? p.InsertionPointMm! : p.PointMm;
+            bool IsNear(ExistingHanger e)
+            {
+                var q = IsValid(e.ActualPointMm) ? e.ActualPointMm : IsValid(e.PointMm) ? e.PointMm : null;
+                return q is not null && Math.Sqrt(Math.Pow(q[0] - refPt[0], 2) + Math.Pow(q[1] - refPt[1], 2)) <= tolMm + 1e-9;
+            }
+            var incomplete = tools.Where(e => MissingTracking(e).Count > 0 && (IsValid(e.TrayKey) ? e.TrayKey == p.TrayKey : IsNear(e))).ToList();
+            var tm = tools.Where(e => IsValid(e.TrayKey) && e.TrayKey == p.TrayKey && IsValid(e.StationMm) && Math.Abs(e.StationMm!.Value - p.StationMm) <= tolMm + 1e-9).ToList();
             if (tm.Count > 0)
-            { outp.Add(new Classification("pending", tm.Select(e => e.Id).ToList(), tm.Count > 1 ? "同位置有多支本工具吊架" : "同位置本工具吊架方向不相容")); continue; }
+            {
+                if (tm.Count > 1) { outp.Add(new Classification("pending", tm.Select(e => e.Id).ToList(), "同位置有多支本工具吊架")); continue; }
+                var h = tm[0];
+                var one = new List<string> { h.Id };
+                if (!IsValid(h.DirectionDeg)) { outp.Add(new Classification("pending", one, "追蹤資料不完整：缺少 direction_deg")); continue; }
+                if (!AngleCompatible(h.DirectionDeg!.Value, p.DirectionDeg, tolDeg)) { outp.Add(new Classification("pending", one, "同位置本工具吊架方向不相容")); continue; }
+                if (geometry)
+                {
+                    var miss = new List<string>();
+                    if (!IsValid(h.ActualPointMm)) miss.Add("actual_point_mm");
+                    if (!IsValid(h.ActualRotationDeg)) miss.Add("actual_rotation_deg");
+                    if (!IsValid(h.ActualCrossLengthMm)) miss.Add("actual_cross_member_length_mm");
+                    if (miss.Count > 0) { outp.Add(new Classification("pending", one, "實際幾何無法讀取：缺少 " + string.Join("、", miss))); continue; }
+                    if (GeometryMismatch(p, h, tolMm, tolDeg) is string bad) { outp.Add(new Classification("pending", one, bad)); continue; }
+                }
+                outp.Add(new Classification("exists", one, "本工具已放置"));
+                continue;
+            }
+            if (incomplete.Count > 0)
+            {
+                var names = incomplete.SelectMany(MissingTracking).Distinct().OrderBy(x => x, StringComparer.Ordinal);
+                outp.Add(new Classification("pending", incomplete.Select(e => e.Id).ToList(), "本工具吊架的追蹤資料不完整，無法判定是否重複：缺少 " + string.Join("、", names)));
+                continue;
+            }
             var om = existing.Where(e => e.Source != "tool" && e.PointMm is double[] q &&
                                          Math.Sqrt(Math.Pow(q[0] - p.PointMm[0], 2) + Math.Pow(q[1] - p.PointMm[1], 2)) <= tolMm + 1e-9).ToList();
             if (om.Count > 0) { outp.Add(new Classification("pending", om.Select(e => e.Id).ToList(), "附近有非本工具（手動）吊架")); continue; }

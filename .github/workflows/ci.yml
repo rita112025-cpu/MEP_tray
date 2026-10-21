@@ -1,6 +1,7 @@
 # CI for MEP_tray (stage 4 slice 5).
 #
-# Scope: default Python gate + C# core build + Core SelfTest runtime contract.
+# Scope: default Python gate + C# core build + Core SelfTest runtime contract
+# + Python<->C# hanger support contract (layout / dedupe classify / rod length; .NET only, no Revit).
 # NOT built here: revit/MepTrayImport. It references RevitAPI.dll / RevitAPIUI.dll
 # from a local Revit install (RevitInstallDir); those Autodesk binaries cannot be
 # redistributed or committed, and hosted runners have no Revit. The add-in build and
@@ -81,3 +82,15 @@ jobs:
         run: |
           dotnet revit/MepTray.Core.SelfTest/bin/Release/net10.0/MepTray.Core.SelfTest.dll ci-inputs/m.json ci-inputs/expected.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Python<->C# hanger support contract (layout / dedupe / rod length)
+        # Marked `revit` only because it needs the .NET SDK; it does not need Revit.
+        # Override pytest.ini addopts so the marker is not deselected, and fail unless the
+        # test actually ran and passed (a skip or deselect must not count as green).
+        run: |
+          $out = python -m pytest -q -rA -o addopts="" tests/test_supports.py::test_csharp_supports_contract 2>&1 | Out-String
+          Write-Output $out
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($out -notmatch '(?m)^PASSED .*test_csharp_supports_contract' -or $out -match '\b(skipped|deselected)\b') {
+            Write-Error "support contract did not run to PASSED (skipped/deselected?)"; exit 1
+          }

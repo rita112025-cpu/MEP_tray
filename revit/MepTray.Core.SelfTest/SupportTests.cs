@@ -93,6 +93,7 @@ static class SupportTests
         var rot = new List<ExistingHanger> { new("x", "tool", "T1", 300, new[] { 300.0, 0, 0 }, 90) };
         Check(Supports.Classify(plan.Take(1).ToList(), rot, 5, 2)[0].Status == "pending", "方向不相容 → 待確認");
         Check(Supports.AngleCompatible(0, 180, 1) && !Supports.AngleCompatible(0, 90, 1), "方向相容以 180° 對稱判定");
+        DedupeGeometry(Check);
 
         if (contractPath != null) RunContract(Check, contractPath);
     }
@@ -123,6 +124,33 @@ static class SupportTests
         f?.Invoke(rod);
         o["rod_length"] = rod;
         return o;
+    }
+
+    /// <summary>去重：實際幾何（插入點／旋轉角／橫擔長度）與追蹤資料完整性。pending 一律不新增吊架。</summary>
+    static void DedupeGeometry(Action<bool, string> Check)
+    {
+        var plan = new List<PlannedKey> { new("T1", 300, new[] { 300.0, 0, 0 }, 0, new[] { 300.0, 0, -90 }, 90, 400) };
+        ExistingHanger Ex(double[]? pt = null, double? rot = 90, double? len = 400, string? key = "T1", double? st = 300, double? dir = 0, bool nullPt = false)
+            => new("e1", "tool", key, st, new[] { 300.0, 0, 0 }, dir, nullPt ? null : pt ?? new[] { 300.0, 0, -90 }, rot, len);
+        string S(ExistingHanger e) => Supports.Classify(plan, new List<ExistingHanger> { e }, 5, 2)[0].Status;
+        Check(S(Ex()) == "exists", "幾何去重：模型與設定未變 → exists");
+        Check(S(Ex(pt: new[] { 2300.0, 0, -90 })) == "pending", "幾何去重：吊架水平移動 → pending");
+        Check(S(Ex(pt: new[] { 300.0, 0, -2090 })) == "pending", "幾何去重：吊架高程改變 → pending");
+        Check(S(Ex(rot: 120)) == "pending", "幾何去重：旋轉超過容許值 → pending");
+        Check(S(Ex(rot: 270)) == "pending", "幾何去重：旋轉 180° 反向 → pending（旋轉嚴格比較）");
+        Check(S(Ex(len: 500)) == "pending", "幾何去重：橫擔尺寸改變 → pending");
+        Check(S(Ex(nullPt: true)) == "pending", "幾何去重：實際插入點讀不到 → pending");
+        Check(S(Ex(rot: null)) == "pending" && S(Ex(len: null)) == "pending", "幾何去重：實際旋轉角／橫擔長度讀不到 → pending");
+        Check(S(Ex(st: null)) == "pending" && S(Ex(key: null)) == "pending" && S(Ex(dir: null)) == "pending", "追蹤資料缺欄位 → pending（不補一支）");
+        Check(S(Ex(key: "  ")) == "pending" && S(Ex(key: "")) == "pending", "追蹤資料 tray_key 為空白字串 → pending");
+        Check(S(Ex(st: double.NaN)) == "pending" && S(Ex(dir: double.PositiveInfinity)) == "pending" && S(Ex(rot: double.NaN)) == "pending" && S(Ex(len: double.PositiveInfinity)) == "pending",
+              "NaN／Infinity 視為缺少 → pending");
+        // 缺 tray_key、位置在預定插入點（與中心線點相差 50 mm，左右加寬不對稱）→ 以插入點判斷，必須 pending 而不是 new
+        var offPlan = new List<PlannedKey> { new("T1", 300, new[] { 300.0, 0, 0 }, 0, new[] { 300.0, 50, -90 }, 90, 400) };
+        var lost = new ExistingHanger("lost", "tool", null, null, new[] { 300.0, 50, -90 }, null, new[] { 300.0, 50, -90 }, 90, 400);
+        Check(Supports.Classify(offPlan, new List<ExistingHanger> { lost }, 5, 2)[0].Status == "pending", "缺 tray_key 的鄰近判斷用預定插入點（含偏移）→ pending");
+        var movedPlan = new List<PlannedKey> { new("T1", 300, new[] { 300.0, 0, 0 }, 0, new[] { 300.0, 800, -90 }, 90, 400) };
+        Check(Supports.Classify(movedPlan, new List<ExistingHanger> { Ex() }, 5, 2)[0].Status == "pending", "幾何去重：橋架移動、吊架未跟著移動 → pending");
     }
 
     static void RodToStructureCases(Action<bool, string> Check)
@@ -353,9 +381,11 @@ static class SupportTests
         {
             n++;
             var name = c!["name"]!.GetValue<string>();
-            var plan = c["planned"]!.AsArray().Select(p => new PlannedKey(p!["tray_key"]!.GetValue<string>(), p["station_mm"]!.GetValue<double>(), Arr(p["point_mm"]), p["direction_deg"]!.GetValue<double>())).ToList();
+            var plan = c["planned"]!.AsArray().Select(p => new PlannedKey(p!["tray_key"]!.GetValue<string>(), p["station_mm"]!.GetValue<double>(), Arr(p["point_mm"]), p["direction_deg"]!.GetValue<double>(),
+                p["insertion_point_mm"] is null ? null : Arr(p["insertion_point_mm"]), p["rotation_deg"]?.GetValue<double>(), p["cross_member_length_mm"]?.GetValue<double>())).ToList();
             var ex = c["existing"]!.AsArray().Select(e => new ExistingHanger(e!["id"]!.GetValue<string>(), e["source"]!.GetValue<string>(),
-                e["tray_key"]?.GetValue<string>(), e["station_mm"]?.GetValue<double>(), e["point_mm"] is null ? null : Arr(e["point_mm"]), e["direction_deg"]?.GetValue<double>())).ToList();
+                e["tray_key"]?.GetValue<string>(), e["station_mm"]?.GetValue<double>(), e["point_mm"] is null ? null : Arr(e["point_mm"]), e["direction_deg"]?.GetValue<double>(),
+                e["actual_point_mm"] is null ? null : Arr(e["actual_point_mm"]), e["actual_rotation_deg"]?.GetValue<double>(), e["actual_cross_member_length_mm"]?.GetValue<double>())).ToList();
             var got = Supports.Classify(plan, ex, c["tol_mm"]!.GetValue<double>(), c["tol_deg"]!.GetValue<double>());
             var exp = c["expect"]!.AsArray().Select(x => x!["status"]!.GetValue<string>() + ":" + string.Join(",", x["match"]!.AsArray().Select(m => m!.GetValue<string>()))).ToList();
             var g2 = got.Select(x => x.Status + ":" + string.Join(",", x.Match)).ToList();
