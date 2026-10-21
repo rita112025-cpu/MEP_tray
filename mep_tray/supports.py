@@ -624,23 +624,83 @@ def _angle_ok(a: float, b: float, tol: float) -> bool:
     return min(d, 180.0 - d) <= tol + 1e-9
 
 
+# classify 的幾何比對欄位：planned 帶 insertion_point_mm 時啟用（舊呼叫端不帶則維持原行為）。
+# existing 端對應：actual_point_mm／actual_rotation_deg／actual_cross_member_length_mm 必須來自「實際元素」
+# （插入點、LocationPoint 旋轉、橫擔長度參數換算），不是保存的追蹤資料。
+_GEOM_EXISTING = ("actual_point_mm", "actual_rotation_deg", "actual_cross_member_length_mm")
+
+
+def _missing_tracking(e: dict) -> list[str]:
+    return [k for k in ("tray_key", "station_mm", "direction_deg") if e.get(k) is None]
+
+
+def _rot_diff(a: float, b: float) -> float:
+    d = abs(math.fmod(a - b, 360.0))
+    return min(d, 360.0 - d)
+
+
+def _geometry_mismatch(p: dict, e: dict, tol_mm: float, tol_deg: float) -> str | None:
+    """實際元素與「預定插入點／旋轉角／橫擔長度」比較。旋轉以 0–360 嚴格比較（族不保證 180° 對稱）。"""
+    dist = math.dist(e["actual_point_mm"], p["insertion_point_mm"])
+    if dist > tol_mm + 1e-9:
+        return f"實際插入點與預定位置不符（差 {dist:.1f} mm，容許 {tol_mm:g} mm）：位置、高程、橋架或設定已變更"
+    dr = _rot_diff(e["actual_rotation_deg"], p["rotation_deg"])
+    if dr > tol_deg + 1e-9:
+        return f"實際旋轉角與預定不符（差 {dr:.2f}°，容許 {tol_deg:g}°）"
+    dl = abs(e["actual_cross_member_length_mm"] - p["cross_member_length_mm"])
+    if dl > tol_mm + 1e-9:
+        return f"實際橫擔長度與預定不符（差 {dl:.1f} mm，容許 {tol_mm:g} mm）：橫擔尺寸或加寬設定已變更"
+    return None
+
+
 def classify(planned: list[dict], existing: list[dict], tol_mm: float, tol_deg: float) -> list[dict]:
-    """planned: [{tray_key, station_mm, point_mm, direction_deg}]；
-    existing: [{id, source: tool|other, tray_key, station_mm, point_mm, direction_deg}]。
+    """planned: [{tray_key, station_mm, point_mm, direction_deg}]，另可帶
+      {insertion_point_mm, rotation_deg, cross_member_length_mm}（= placement() 的結果，已含族校正偏移與方向修正角）；
+    existing: [{id, source: tool|other, tray_key, station_mm, point_mm, direction_deg}]，另可帶
+      {actual_point_mm, actual_rotation_deg, actual_cross_member_length_mm}（實際元素讀值）。
     回傳每個 planned 的 {status: new|exists|pending, match: [ids], reason}。
-    - exists：同一橋架（tray_key）、同 station（≤ tol）、方向相容的「本工具」吊架恰好 1 支。
-    - pending（待確認）：同橋架同位置但方向不相容／多於 1 支；或附近（水平距離 ≤ tol）有非本工具吊架。
-    絕不因點靠近就判定重複或刪除；他人／手動吊架一律不修改。"""
+    - exists：同一橋架（tray_key）、同 station（≤ tol）、方向相容的「本工具」吊架恰好 1 支；
+      planned 帶幾何時，另須實際插入點／旋轉角／橫擔長度都在容許內（位置容許 = tol_mm 的 3D 距離）。
+    - pending（待確認）：同橋架同位置但方向不相容／多於 1 支；實際幾何與預定不符；本工具吊架的追蹤資料不完整
+      （缺欄位，且屬同橋架或位置在附近）；或附近（水平距離 ≤ tol）有非本工具吊架。
+    絕不因點靠近就判定重複或刪除；pending 不會新增吊架；他人／手動吊架一律不修改。"""
     out = []
     for p in planned:
-        tm = [e for e in existing if e.get("source") == "tool" and e.get("tray_key") == p["tray_key"]
+        geometry = p.get("insertion_point_mm") is not None
+        tools = [e for e in existing if e.get("source") == "tool"]
+        def _near(e):
+            q = e.get("actual_point_mm") or e.get("point_mm")
+            return q is not None and math.hypot(q[0] - p["point_mm"][0], q[1] - p["point_mm"][1]) <= tol_mm + 1e-9
+        incomplete = [e for e in tools if _missing_tracking(e)
+                      and (e.get("tray_key") == p["tray_key"] or (e.get("tray_key") is None and _near(e)))]
+        tm = [e for e in tools if e.get("tray_key") == p["tray_key"]
               and e.get("station_mm") is not None and abs(e["station_mm"] - p["station_mm"]) <= tol_mm + 1e-9]
-        if len(tm) == 1 and tm[0].get("direction_deg") is not None and _angle_ok(tm[0]["direction_deg"], p["direction_deg"], tol_deg):
-            out.append({"status": "exists", "match": [tm[0]["id"]], "reason": "本工具已放置"})
-            continue
         if tm:
-            why = "同位置有多支本工具吊架" if len(tm) > 1 else "同位置本工具吊架方向不相容"
-            out.append({"status": "pending", "match": [e["id"] for e in tm], "reason": why})
+            if len(tm) > 1:
+                out.append({"status": "pending", "match": [e["id"] for e in tm], "reason": "同位置有多支本工具吊架"})
+                continue
+            e = tm[0]
+            if e.get("direction_deg") is None:
+                out.append({"status": "pending", "match": [e["id"]], "reason": "追蹤資料不完整：缺少 direction_deg"})
+                continue
+            if not _angle_ok(e["direction_deg"], p["direction_deg"], tol_deg):
+                out.append({"status": "pending", "match": [e["id"]], "reason": "同位置本工具吊架方向不相容"})
+                continue
+            if geometry:
+                miss = [k for k in _GEOM_EXISTING if e.get(k) is None]
+                if miss:
+                    out.append({"status": "pending", "match": [e["id"]], "reason": "實際幾何無法讀取：缺少 " + "、".join(miss)})
+                    continue
+                bad = _geometry_mismatch(p, e, tol_mm, tol_deg)
+                if bad:
+                    out.append({"status": "pending", "match": [e["id"]], "reason": bad})
+                    continue
+            out.append({"status": "exists", "match": [e["id"]], "reason": "本工具已放置"})
+            continue
+        if incomplete:
+            names = sorted({k for e in incomplete for k in _missing_tracking(e)})
+            out.append({"status": "pending", "match": [e["id"] for e in incomplete],
+                        "reason": "本工具吊架的追蹤資料不完整，無法判定是否重複：缺少 " + "、".join(names)})
             continue
         om = [e for e in existing if e.get("source") != "tool" and e.get("point_mm") is not None
               and math.hypot(e["point_mm"][0] - p["point_mm"][0], e["point_mm"][1] - p["point_mm"][1]) <= tol_mm + 1e-9]

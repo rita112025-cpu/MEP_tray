@@ -289,7 +289,9 @@ public static class HangerPlacer
     }
 
     // ── 2. 既有吊架（本工具 / 其他）──
-    public static List<ExistingHanger> ReadExisting(Document doc, string familyName)
+    /// <summary>cfg 非 null 時另讀「實際幾何」（插入點、旋轉角、橫擔長度），供 Classify 與預定位置比對；讀不到的欄位為 null（Classify 視為待確認）。
+    /// 追蹤資料（StationMm／DirectionDeg）只當追蹤用，不當實際位置。</summary>
+    public static List<ExistingHanger> ReadExisting(Document doc, string familyName, HangerConfig? cfg = null)
     {
         var schema = GetSchema();
         var list = new List<ExistingHanger>();
@@ -299,8 +301,9 @@ public static class HangerPlacer
             var e = fi.GetEntity(schema);
             if (!e.IsValid() || e.Get<string>("Source") != ToolSource) continue;
             seen.Add(fi.Id.Value);
+            (double[]? actPt, double? actRot, double? actLen) = cfg is null ? default : ReadActual(fi, cfg);
             list.Add(new ExistingHanger(fi.Id.Value.ToString(CultureInfo.InvariantCulture), "tool", e.Get<string>("TrayUniqueId"),
-                Parse(e.Get<string>("StationMm")), PointOf(fi), Parse(e.Get<string>("DirectionDeg"))));
+                Parse(e.Get<string>("StationMm")), PointOf(fi), Parse(e.Get<string>("DirectionDeg")), actPt, actRot, actLen));
         }
         foreach (var fi in new FilteredElementCollector(doc).OfClass(typeof(FamilyInstance)).Cast<FamilyInstance>())
         {
@@ -308,6 +311,16 @@ public static class HangerPlacer
             list.Add(new ExistingHanger(fi.Id.Value.ToString(CultureInfo.InvariantCulture), "other", null, null, PointOf(fi), null));
         }
         return list;
+    }
+
+    /// <summary>實際元素：插入點（LocationPoint）、旋轉角（0–360°）、橫擔長度（參數值經校正線性模型換算：範圍 = ratio × 參數 + offset）。</summary>
+    static (double[]? Point, double? RotationDeg, double? CrossLengthMm) ReadActual(FamilyInstance fi, HangerConfig cfg)
+    {
+        double[]? pt = null; double? rot = null; double? len = null;
+        if (fi.Location is LocationPoint lp) { pt = Mm(lp.Point); rot = Supports.Norm360(lp.Rotation * 180.0 / Math.PI); }
+        var p = cfg.CrossMemberLength is { } cm ? fi.LookupParameter(cm.Name) : null;
+        if (p is { StorageType: StorageType.Double }) len = cfg.CrossRatio * Units.FeetToMm(p.AsDouble()) + cfg.CrossOffsetMm;
+        return (pt, rot, len);
     }
 
     static double? Parse(string? s) => double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : null;
@@ -378,12 +391,15 @@ public static class HangerPlacer
         rep.LayoutIssues.AddRange(lay.Issues);
         // 被支撐物件的 UniqueId：直線段吊架指橋架，彎頭／三通中點吊架指接頭（去重鍵與追蹤資料都用它）
         string SupportedUniqueId(SupportPoint s) => s.FittingId is string fid ? fittingInstances[fid].UniqueId : trayMap[s.PieceId].UniqueId;
-        var plan = lay.Supports.Select(s => new PlannedKey(SupportedUniqueId(s), s.StationMm, s.PointMm, s.DirectionDeg)).ToList();
-        var cls = Supports.Classify(plan, ReadExisting(doc, cfg.FamilyName), cfg.DedupeToleranceMm, cfg.DedupeAngleToleranceDeg);
+        // 預定幾何 = 套用族校正偏移與方向修正角後的插入點／旋轉角／橫擔長度（與實際放置用同一份 Place 結果）；去重以此與實際元素比對
+        var places = lay.Supports.Select(s => Supports.Place(s, cfg)).ToList();
+        var plan = lay.Supports.Select((s, i) => new PlannedKey(SupportedUniqueId(s), s.StationMm, s.PointMm, s.DirectionDeg,
+            places[i].InsertionPointMm, places[i].RotationDeg, places[i].CrossMemberLengthMm)).ToList();
+        var cls = Supports.Classify(plan, ReadExisting(doc, cfg.FamilyName, cfg), cfg.DedupeToleranceMm, cfg.DedupeAngleToleranceDeg);
         for (int i = 0; i < lay.Supports.Count; i++)
         {
             var s = lay.Supports[i];
-            var pl = Supports.Place(s, cfg);
+            var pl = places[i];
             rep.Items.Add(new HangerItem
             {
                 SupportId = s.Id, TrayId = s.PieceId, TrayUniqueId = SupportedUniqueId(s), FittingId = s.FittingId, TrayHeightMm = s.TrayHeightMm, StationMm = s.StationMm,

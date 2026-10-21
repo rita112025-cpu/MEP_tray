@@ -396,6 +396,86 @@ def test_dedupe_requires_same_object_and_orientation():
     assert S.classify(plan, dup, 5, 2)[0]["status"] == "pending"              # 複製出的多支 → 待確認，不刪
 
 
+# ---------- 去重：實際幾何比對（驗收表）----------
+def _geom_case():
+    """planned 帶 placement() 的預定插入點／旋轉／橫擔長度；existing 為與之完全一致的實際元素。"""
+    r = S.layout([P("A", (0, 0, 0), (5000, 0, 0))], [], cfg())
+    pc = pcfg()
+    plan = []
+    for sp in r["supports"]:
+        pl = S.placement(sp, pc)
+        plan.append({"tray_key": "T1", "station_mm": sp["station_mm"], "point_mm": sp["point_mm"], "direction_deg": sp["direction_deg"],
+                     "insertion_point_mm": pl["insertion_point_mm"], "rotation_deg": pl["rotation_deg"],
+                     "cross_member_length_mm": pl["cross_member_length_mm"]})
+    placed = [{"id": f"e{i}", "source": "tool", "tray_key": p["tray_key"], "station_mm": p["station_mm"], "point_mm": p["point_mm"],
+               "direction_deg": p["direction_deg"], "actual_point_mm": list(p["insertion_point_mm"]),
+               "actual_rotation_deg": p["rotation_deg"], "actual_cross_member_length_mm": p["cross_member_length_mm"]}
+              for i, p in enumerate(plan)]
+    return plan, placed
+
+
+def test_geometry_unchanged_rerun_exists():
+    plan, placed = _geom_case()
+    assert {c["status"] for c in S.classify(plan, placed, 5, 2)} == {"exists"}
+
+
+@pytest.mark.parametrize("name,patch,why", [
+    ("moved_xy", lambda e: e.update(actual_point_mm=[e["actual_point_mm"][0] + 2000, e["actual_point_mm"][1], e["actual_point_mm"][2]]), "實際插入點"),
+    ("elevation", lambda e: e.update(actual_point_mm=[e["actual_point_mm"][0], e["actual_point_mm"][1], e["actual_point_mm"][2] - 2000]), "實際插入點"),
+    ("rotated", lambda e: e.update(actual_rotation_deg=(e["actual_rotation_deg"] + 30) % 360), "實際旋轉角"),
+    ("flipped_180", lambda e: e.update(actual_rotation_deg=(e["actual_rotation_deg"] + 180) % 360), "實際旋轉角"),
+    ("cross_len", lambda e: e.update(actual_cross_member_length_mm=e["actual_cross_member_length_mm"] + 100), "實際橫擔長度"),
+])
+def test_geometry_mismatch_is_pending_not_new(name, patch, why):
+    plan, placed = _geom_case()
+    patch(placed[0])
+    cl = S.classify(plan, placed, 5, 2)
+    assert cl[0]["status"] == "pending" and why in cl[0]["reason"] and cl[0]["match"] == ["e0"]
+    assert {c["status"] for c in cl[1:]} == {"exists"}
+
+
+def test_tray_moved_but_hanger_not_is_pending():
+    plan, placed = _geom_case()
+    for p in plan:   # 橋架整體平移：預定插入點與方向修正後的位置全部改變，保存的 station／tray_key 不變
+        p["insertion_point_mm"] = [p["insertion_point_mm"][0], p["insertion_point_mm"][1] + 800, p["insertion_point_mm"][2]]
+    cl = S.classify(plan, placed, 5, 2)
+    assert {c["status"] for c in cl} == {"pending"}
+
+
+def test_orientation_correction_included_in_expected_rotation():
+    r = S.layout([P("A", (0, 0, 0), (5000, 0, 0))], [], cfg())
+    sp = r["supports"][0]
+    assert S.placement(sp, pcfg(orientation_correction_deg=0.0))["rotation_deg"] == pytest.approx(0.0)
+    assert S.placement(sp, pcfg(orientation_correction_deg=90.0))["rotation_deg"] == pytest.approx(90.0)   # 橋架方向 + 族修正角
+    plan, placed = _geom_case()                                  # 預定 90°（pcfg 預設修正角）
+    placed[0]["actual_rotation_deg"] = sp["direction_deg"]       # 實際元素只轉到橋架方向、少了族修正角
+    assert S.classify(plan, placed, 5, 2)[0]["status"] == "pending"
+
+
+@pytest.mark.parametrize("field", ["actual_point_mm", "actual_rotation_deg", "actual_cross_member_length_mm"])
+def test_unreadable_geometry_is_pending_with_field_named(field):
+    plan, placed = _geom_case()
+    placed[0][field] = None
+    cl = S.classify(plan, placed, 5, 2)
+    assert cl[0]["status"] == "pending" and field in cl[0]["reason"]
+
+
+@pytest.mark.parametrize("field", ["tray_key", "station_mm", "direction_deg"])
+def test_incomplete_tracking_is_pending_not_new(field):
+    plan, placed = _geom_case()
+    placed[0][field] = None
+    cl = S.classify(plan, placed, 5, 2)
+    assert cl[0]["status"] == "pending" and field in cl[0]["reason"]   # 不得 new（會在同位置再補一支）
+    assert cl[0]["match"] == ["e0"]
+
+
+def test_incomplete_tracking_far_away_does_not_block_others():
+    plan, placed = _geom_case()
+    placed.append({"id": "lost", "source": "tool", "tray_key": None, "station_mm": None, "point_mm": None, "direction_deg": None,
+                   "actual_point_mm": [90000.0, 0.0, 0.0]})
+    assert {c["status"] for c in S.classify(plan, placed, 5, 2)} == {"exists"}
+
+
 # ---------- JSON / 預覽 ----------
 def test_model_carries_hanger_supports_consistent_with_preview():
     from tests.test_export_revit import GOV, routed
@@ -750,6 +830,23 @@ def contract_cases() -> dict:
                                                           "point_mm": [301.0, 0, 0], "direction_deg": 90.0}]},
         {"name": "other_tray", "planned": plan, "existing": [{"id": "x", "source": "tool", "tray_key": "T2", "station_mm": 300.0,
                                                               "point_mm": [300.0, 0, 0], "direction_deg": 0.0}]},
+    ]
+    gplan, gplaced = _geom_case()
+
+    def gcase(name, patch=None, key=None):
+        ex = copy.deepcopy(gplaced)
+        if patch:
+            patch(ex[0])
+        return {"name": name, "planned": gplan, "existing": ex}
+    cc += [
+        gcase("geom_rerun"),
+        gcase("geom_moved", lambda e: e.update(actual_point_mm=[e["actual_point_mm"][0] + 2000, e["actual_point_mm"][1], e["actual_point_mm"][2]])),
+        gcase("geom_elevation", lambda e: e.update(actual_point_mm=[e["actual_point_mm"][0], e["actual_point_mm"][1], e["actual_point_mm"][2] - 2000])),
+        gcase("geom_rotated", lambda e: e.update(actual_rotation_deg=(e["actual_rotation_deg"] + 30) % 360)),
+        gcase("geom_cross_len", lambda e: e.update(actual_cross_member_length_mm=e["actual_cross_member_length_mm"] + 100)),
+        gcase("geom_unreadable", lambda e: e.update(actual_point_mm=None)),
+        gcase("tracking_no_station", lambda e: e.update(station_mm=None)),
+        gcase("tracking_no_traykey", lambda e: e.update(tray_key=None)),
     ]
     for c in cc:
         c["tol_mm"], c["tol_deg"] = 5.0, 2.0
