@@ -705,17 +705,17 @@ public static class Supports
         return Math.Min(d, 180.0 - d) <= tolDeg + 1e-9;
     }
 
-    static bool Ok(double? v) => v is double d && double.IsFinite(d);
-    static bool Ok(double[]? v) => v is { Length: 3 } && v.All(double.IsFinite);
-    static bool Ok(string? v) => !string.IsNullOrWhiteSpace(v);
+    static bool IsValid(double? v) => v is double d && double.IsFinite(d);
+    static bool IsValid(double[]? v) => v is { Length: 3 } && v.All(double.IsFinite);
+    static bool IsValid(string? v) => !string.IsNullOrWhiteSpace(v);
 
     /// <summary>追蹤資料缺欄位：null、空白字串、NaN／Infinity 都算缺少（與 Python _has 同一規則）。</summary>
     static List<string> MissingTracking(ExistingHanger e)
     {
         var m = new List<string>();
-        if (!Ok(e.TrayKey)) m.Add("tray_key");
-        if (!Ok(e.StationMm)) m.Add("station_mm");
-        if (!Ok(e.DirectionDeg)) m.Add("direction_deg");
+        if (!IsValid(e.TrayKey)) m.Add("tray_key");
+        if (!IsValid(e.StationMm)) m.Add("station_mm");
+        if (!IsValid(e.DirectionDeg)) m.Add("direction_deg");
         return m;
     }
 
@@ -753,24 +753,24 @@ public static class Supports
             var refPt = geometry ? p.InsertionPointMm! : p.PointMm;
             bool IsNear(ExistingHanger e)
             {
-                var q = Ok(e.ActualPointMm) ? e.ActualPointMm : Ok(e.PointMm) ? e.PointMm : null;
+                var q = IsValid(e.ActualPointMm) ? e.ActualPointMm : IsValid(e.PointMm) ? e.PointMm : null;
                 return q is not null && Math.Sqrt(Math.Pow(q[0] - refPt[0], 2) + Math.Pow(q[1] - refPt[1], 2)) <= tolMm + 1e-9;
             }
-            var incomplete = tools.Where(e => MissingTracking(e).Count > 0 && (Ok(e.TrayKey) ? e.TrayKey == p.TrayKey : IsNear(e))).ToList();
-            var tm = tools.Where(e => Ok(e.TrayKey) && e.TrayKey == p.TrayKey && Ok(e.StationMm) && Math.Abs(e.StationMm!.Value - p.StationMm) <= tolMm + 1e-9).ToList();
+            var incomplete = tools.Where(e => MissingTracking(e).Count > 0 && (IsValid(e.TrayKey) ? e.TrayKey == p.TrayKey : IsNear(e))).ToList();
+            var tm = tools.Where(e => IsValid(e.TrayKey) && e.TrayKey == p.TrayKey && IsValid(e.StationMm) && Math.Abs(e.StationMm!.Value - p.StationMm) <= tolMm + 1e-9).ToList();
             if (tm.Count > 0)
             {
                 if (tm.Count > 1) { outp.Add(new Classification("pending", tm.Select(e => e.Id).ToList(), "同位置有多支本工具吊架")); continue; }
                 var h = tm[0];
                 var one = new List<string> { h.Id };
-                if (!Ok(h.DirectionDeg)) { outp.Add(new Classification("pending", one, "追蹤資料不完整：缺少 direction_deg")); continue; }
+                if (!IsValid(h.DirectionDeg)) { outp.Add(new Classification("pending", one, "追蹤資料不完整：缺少 direction_deg")); continue; }
                 if (!AngleCompatible(h.DirectionDeg.Value, p.DirectionDeg, tolDeg)) { outp.Add(new Classification("pending", one, "同位置本工具吊架方向不相容")); continue; }
                 if (geometry)
                 {
                     var miss = new List<string>();
-                    if (!Ok(h.ActualPointMm)) miss.Add("actual_point_mm");
-                    if (!Ok(h.ActualRotationDeg)) miss.Add("actual_rotation_deg");
-                    if (!Ok(h.ActualCrossLengthMm)) miss.Add("actual_cross_member_length_mm");
+                    if (!IsValid(h.ActualPointMm)) miss.Add("actual_point_mm");
+                    if (!IsValid(h.ActualRotationDeg)) miss.Add("actual_rotation_deg");
+                    if (!IsValid(h.ActualCrossLengthMm)) miss.Add("actual_cross_member_length_mm");
                     if (miss.Count > 0) { outp.Add(new Classification("pending", one, "實際幾何無法讀取：缺少 " + string.Join("、", miss))); continue; }
                     if (GeometryMismatch(p, h, tolMm, tolDeg) is string bad) { outp.Add(new Classification("pending", one, bad)); continue; }
                 }
