@@ -764,7 +764,7 @@ public static class Supports
                 var h = tm[0];
                 var one = new List<string> { h.Id };
                 if (!IsValid(h.DirectionDeg)) { outp.Add(new Classification("pending", one, "追蹤資料不完整：缺少 direction_deg")); continue; }
-                if (!AngleCompatible(h.DirectionDeg.Value, p.DirectionDeg, tolDeg)) { outp.Add(new Classification("pending", one, "同位置本工具吊架方向不相容")); continue; }
+                if (!AngleCompatible(h.DirectionDeg!.Value, p.DirectionDeg, tolDeg)) { outp.Add(new Classification("pending", one, "同位置本工具吊架方向不相容")); continue; }
                 if (geometry)
                 {
                     var miss = new List<string>();
