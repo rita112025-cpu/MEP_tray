@@ -32,7 +32,7 @@ public class FittingProbeCommand : IExternalCommand
     }
 
     static bool IsFitting(Element e) =>
-        e is FamilyInstance fi && (fi.Category?.BuiltInCategory == BuiltInCategory.OST_CableTrayFitting || fi.MEPModel is MechanicalFitting);
+        e is FamilyInstance fi && fi.Category?.BuiltInCategory == BuiltInCategory.OST_CableTrayFitting;
 
     public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
     {

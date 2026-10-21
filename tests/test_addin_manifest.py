@@ -54,6 +54,9 @@ def test_fitting_probe_is_read_only_by_construction():
                       "HttpClient", "WebClient", "EditFamily"):
         assert forbidden not in code, forbidden
     assert not re.search(r"\b(1000|255)\b", code)                  # 不把支撐間距/接頭距離寫死
+    # 選取範圍只限電纜架配件：不可把風管等其他 MechanicalFitting 一併收進報告
+    pred = re.search(r"static bool IsFitting\(Element e\) =>[^;]*;", code)
+    assert pred and "OST_CableTrayFitting" in pred.group(0) and "MechanicalFitting" not in pred.group(0)
     # 診斷欄位：族 Part Type、MEPModel 實際類別、Solid 圓弧邊收進頂層 curves 並如實回報是否截斷
     for needle in ("BuiltInParameter.FAMILY_CONTENT_PART_TYPE", "mep_model_class_full", "is_mechanical_fitting",
                    "curves_listed", "curves_truncated", "arc_edge_count", "curves.Add(ci)",
