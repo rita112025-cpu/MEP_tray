@@ -1,0 +1,19 @@
+{
+  "$schema": "../schemas/tray_hanger_config.schema.json",
+  "units": "mm",
+  "supported_object": "cable_tray",
+  "family": { "family_name": "吊架(角鐵)", "type_name": "矩形" },
+  "placement_mode": null,
+  "max_spacing_mm": null,
+  "start_offset_mm": null,
+  "end_offset_mm": null,
+  "short_run_policy": null,
+  "near_fitting": { "enabled": false },
+  "widen_left_mm": null,
+  "widen_right_mm": null,
+  "insertion_to_bearing_mm": null,
+  "orientation_correction_deg": null,
+  "parameter_map": { "cross_member_length": { "name": null, "scope": null } },
+  "rod_length": { "mode": "none" },
+  "dedupe": { "tolerance_mm": null, "angle_tolerance_deg": null }
+}

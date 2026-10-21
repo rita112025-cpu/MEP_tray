@@ -522,8 +522,9 @@ def human_error(err: P.PipelineError) -> dict:
 
 # ───────────────────────── 工作管理（同時只跑一個） ─────────────────────────
 class JobManager:
-    def __init__(self, token: str, make_dwg: bool = True, keep: int = 20):
+    def __init__(self, token: str, make_dwg: bool = True, keep: int = 20, rules: dict | None = None):
         self.token, self.make_dwg, self.keep = token, make_dwg, keep
+        self.rules = rules          # 與表單驗證同一份；None=由管線自行載入
         self._lock = threading.Lock()
         self._running: str | None = None
         self.jobs: OrderedDict = OrderedDict()
@@ -548,7 +549,7 @@ class JobManager:
             res = None
             for _ in range(3):
                 run_id = V.new_run_id(inp, codes, **coord)
-                res = P.run(inp, codes, run_id, make_dwg=self.make_dwg, **coord)
+                res = P.run(inp, codes, run_id, make_dwg=self.make_dwg, rules=self.rules, **coord)
                 if res.ok or res.error.code != "run_exists":
                     break
             out = self._view(res)
@@ -1115,8 +1116,8 @@ class WebServer(ThreadingHTTPServer):
         super().__init__((host, port), Handler)
         self.port = self.server_address[1]
         self.token = token
-        self.jobs = JobManager(token, make_dwg)
         self.rules = load_rules()
+        self.jobs = JobManager(token, make_dwg, rules=self.rules)
         self.index = render_index(token, self.rules).encode("utf-8")
         self._sem = threading.BoundedSemaphore(MAX_CONNECTIONS)
         self.log_lines: deque = deque(maxlen=500)

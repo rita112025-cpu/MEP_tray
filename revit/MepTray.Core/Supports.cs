@@ -1,0 +1,817 @@
+using System.Text.Json.Nodes;
+
+namespace MepTray.Core;
+
+// 吊架支撐點核心（純邏輯，mm）。與 Python mep_tray/supports.py 行為一致；契約案例由 tests/test_supports.py 產生、SelfTest 比對。
+// 不含任何規範數值預設：間距/內縮/族參數全部來自使用者設定，缺漏即拒絕並指出欄位。
+
+public sealed class SupportPiece
+{
+    public string Id { get; set; } = "";
+    public double[] Start { get; set; } = new double[3];
+    public double[] End { get; set; } = new double[3];
+    public double WidthMm { get; set; }
+    public double HeightMm { get; set; }
+    /// <summary>free | fitting（端點接到接頭本體）。</summary>
+    public string StartKind { get; set; } = "free";
+    public string EndKind { get; set; } = "free";
+}
+
+public sealed record SupportLink(string A, string B, string Kind);
+
+public sealed class SupportPoint
+{
+    public string Id { get; set; } = "";
+    public string PieceId { get; set; } = "";
+    public string ChainId { get; set; } = "";
+    public double StationMm { get; set; }
+    public double[] PointMm { get; set; } = new double[3];
+    public double DirectionDeg { get; set; }
+    public double TrayWidthMm { get; set; }
+    public double TrayHeightMm { get; set; }
+    public double BearingZMm { get; set; }
+    public string Reason { get; set; } = "";
+    /// <summary>彎頭／三通中點吊架才有值（接頭的識別字串）；直線段吊架為 null。</summary>
+    public string? FittingId { get; set; }
+}
+
+/// <summary>
+/// fitting_support 的接頭幾何輸入（由 Revit 端讀取，mm）。elbow：Center、RadiusMm、StartAngleDeg、SweepDeg（逆時針為正，0 到 180 度不含）；
+/// tee：Point（主幹中心）、MainDirectionDeg。FallbackReason 非空 = Revit 端讀不出幾何，該接頭退回只放兩側。
+/// </summary>
+public sealed class SupportFitting
+{
+    public string Id { get; set; } = "";
+    public string Kind { get; set; } = "";
+    public double[]? Center { get; set; }
+    public double[]? Point { get; set; }
+    public double[]? LocationMm { get; set; }
+    public double? RadiusMm { get; set; }
+    public double? StartAngleDeg { get; set; }
+    public double? SweepDeg { get; set; }
+    public double? MainDirectionDeg { get; set; }
+    public double? WidthMm { get; set; }
+    public double? HeightMm { get; set; }
+    public string? FallbackReason { get; set; }
+}
+
+public sealed record SupportIssue(string Level, string Code, string PieceId, double[] LocationMm, string Detail);
+
+public sealed class LayoutResult
+{
+    public List<SupportPoint> Supports { get; } = new();
+    public List<SupportIssue> Issues { get; } = new();
+}
+
+public sealed record Placement(double[] BearingPointMm, double[] InsertionPointMm, double RotationDeg, double CrossMemberLengthMm, double? RodLengthMm);
+
+/// <summary>Actual* 必須來自實際元素（插入點、LocationPoint 旋轉、橫擔長度參數換算），不是保存的追蹤資料；讀不到就是 null。</summary>
+public sealed record ExistingHanger(string Id, string Source, string? TrayKey, double? StationMm, double[]? PointMm, double? DirectionDeg,
+    double[]? ActualPointMm = null, double? ActualRotationDeg = null, double? ActualCrossLengthMm = null);
+/// <summary>InsertionPointMm／RotationDeg／CrossLengthMm = Place() 的結果（已含族校正偏移與方向修正角）；帶值時 Classify 才比對實際幾何。</summary>
+public sealed record PlannedKey(string TrayKey, double StationMm, double[] PointMm, double DirectionDeg,
+    double[]? InsertionPointMm = null, double? RotationDeg = null, double? CrossLengthMm = null);
+public sealed record Classification(string Status, List<string> Match, string Reason);
+
+public sealed record ParamRef(string Name, string Scope);
+/// <summary>instance_params 的一項：Revit 參數確切名稱與要寫入的文字值（皆取自設定）。</summary>
+public sealed record InstanceParamValue(string Name, string Value);
+
+/// <summary>已驗證的設定（由 HangerConfigReader.Read 產生）。</summary>
+public sealed class HangerConfig
+{
+    public double MaxSpacingMm, StartOffsetMm, EndOffsetMm;
+    public string ShortRunPolicy = "";
+    public string SpacingMode = "even";
+    public bool NearFittingEnabled;
+    public double? NearFittingMaxDistanceMm;
+    // 選填 fitting_support：彎頭／三通中點吊架（預設關閉）。kinds 啟用時必填（elbow、tee）。
+    public bool FittingSupportEnabled;
+    public List<string> FittingSupportKinds = new();
+    // 以下僅放置用（layout-only 讀取時可能為預設值）
+    public string SupportedObject = "", FamilyName = "", TypeName = "", PlacementMode = "";
+    public double WidenLeftMm, WidenRightMm, InsertionToBearingMm, OrientationCorrectionDeg;
+    public ParamRef? CrossMemberLength;
+    public string RodMode = "";
+    public double? RodLengthMm;
+    public ParamRef? RodParam;
+    // rod_length.mode = to_structure 專用（皆由設定檔提供，無預設值）
+    public double RodOffsetMm, RodMinMm, RodMaxMm;
+    public double? RodRoundToMm;
+    public double DedupeToleranceMm, DedupeAngleToleranceDeg;
+    // 校正（「校正目標吊架」寫入；放置前由 Revit 端核對族檔與專案中的族）
+    public string CalibFilePath = "", CalibSha256 = "", CalibProjectSignature = "";
+    public double CalibFileSize;
+    public double CrossRatio = 1, CrossOffsetMm;
+    // 驗收用測試開關（選填 test_fail_nth；null = 關閉）：只讓 Revit 放置迴圈的第 N 支 new 吊架故意失敗。
+    // 不影響佈置、去重、族座標換算，也不計入校正簽章（簽章只看族內容）。
+    public long? TestFailNth;
+    // 選填 instance_params：新建吊架實例要寫入的文字參數（空 = 不寫入，行為不變）。名稱／值取自業主共用參數檔與物件編碼規則。
+    public List<InstanceParamValue> InstanceParams = new();
+}
+
+public static class HangerConfigReader
+{
+    public static readonly string[] ShortPolicies = { "midpoint", "skip" };
+    public static readonly string[] SpacingModes = { "even", "fixed" };
+    public static readonly string[] PlacementModes = { "level", "workplane" };
+    public static readonly string[] Scopes = { "type", "instance" };
+    public static readonly string[] RodModes = { "none", "fixed", "to_structure" };
+    public static readonly string[] SupportedObjects = { "cable_tray" };
+    public const string TestFailNthKey = "test_fail_nth";
+    public const string InstanceParamsKey = "instance_params";
+    public const string FittingSupportKey = "fitting_support";
+    public static readonly string[] FittingKinds = { "elbow", "tee" };
+
+    static double? Num(JsonNode? n)
+    {
+        if (n is not JsonValue v) return null;
+        if (v.TryGetValue<double>(out var d) && double.IsFinite(d) && v.GetValueKind() == System.Text.Json.JsonValueKind.Number) return d;
+        return null;
+    }
+    static string? Str(JsonNode? n) => n is JsonValue v && v.TryGetValue<string>(out var s) && !string.IsNullOrWhiteSpace(s) ? s : null;
+    static bool Missing(JsonObject o, string k) => !o.TryGetPropertyValue(k, out var n) || n is null;
+    /// <summary>JSON 整數字面且 ≥ 1（不接受 2.0、1e3、"2"、true、null；與 Python _pos_int 一致）。</summary>
+    static long? PositiveInt(JsonNode? n)
+    {
+        if (n is not JsonValue v || v.GetValueKind() != System.Text.Json.JsonValueKind.Number) return null;
+        return long.TryParse(v.ToJsonString(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var x) && x >= 1 ? x : null;
+    }
+
+    public static List<string> ValidateLayout(JsonNode? root)
+    {
+        if (root is not JsonObject c) return new List<string> { "config：必須是 JSON 物件" };
+        var e = new List<string>();
+        if (Str(c["units"]) != "mm") e.Add("units：必須為 \"mm\"");
+        var s = Num(c["max_spacing_mm"]);
+        if (Missing(c, "max_spacing_mm")) e.Add("max_spacing_mm：缺少（最大支撐間距，工具不提供預設）");
+        else if (s is null || s <= 0) e.Add("max_spacing_mm：需為 > 0 的有限數");
+        foreach (var k in new[] { "start_offset_mm", "end_offset_mm" })
+        {
+            var v = Num(c[k]);
+            if (Missing(c, k)) e.Add($"{k}：缺少（工具不提供預設）");
+            else if (v is null || v < 0) e.Add($"{k}：需為 ≥ 0 的有限數");
+        }
+        if (Missing(c, "short_run_policy")) e.Add("short_run_policy：缺少（midpoint 或 skip）");
+        else if (Array.IndexOf(ShortPolicies, Str(c["short_run_policy"])) < 0) e.Add("short_run_policy：需為 midpoint 或 skip");
+        if (c.ContainsKey("spacing_mode") && Array.IndexOf(SpacingModes, Str(c["spacing_mode"])) < 0) e.Add("spacing_mode：需為 even 或 fixed（未填 = even）");
+        if (Missing(c, "near_fitting")) e.Add("near_fitting：缺少（不加強時填 {\"enabled\": false}）");
+        else if (c["near_fitting"] is not JsonObject nf || nf["enabled"] is not JsonValue ev || !ev.TryGetValue<bool>(out var en))
+            e.Add("near_fitting.enabled：需為 true/false");
+        else if (en)
+        {
+            var d = Num(nf["max_distance_mm"]);
+            if (Missing(nf, "max_distance_mm")) e.Add("near_fitting.max_distance_mm：啟用時必填");
+            else if (d is null || d <= 0) e.Add("near_fitting.max_distance_mm：需為 > 0 的有限數");
+            else if (s is > 0 && d > s) e.Add("near_fitting.max_distance_mm：不得大於 max_spacing_mm");
+        }
+        e.AddRange(FittingSupportErrors(c));
+        return e;
+    }
+
+    /// <summary>fitting_support（選填）：{"enabled": bool, "kinds": ["elbow", "tee"]}。規則與 Python _fitting_support_errors 一致（欄位、順序、訊息相同）。</summary>
+    static List<string> FittingSupportErrors(JsonObject c)
+    {
+        var e = new List<string>();
+        if (!c.ContainsKey(FittingSupportKey)) return e;
+        if (c[FittingSupportKey] is not JsonObject fs || fs["enabled"] is not JsonValue ev || !ev.TryGetValue<bool>(out var en))
+        { e.Add("fitting_support.enabled：需為 true/false（整個區塊選填；未填 = 關閉）"); return e; }
+        if (!en) return e;
+        if (fs["kinds"] is not JsonArray kinds || kinds.Count == 0)
+        { e.Add("fitting_support.kinds：啟用時必填（elbow、tee 的非空陣列，工具不提供預設）"); return e; }
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        for (int i = 0; i < kinds.Count; i++)
+        {
+            if (!(kinds[i] is JsonValue kv && kv.TryGetValue<string>(out var k) && Array.IndexOf(FittingKinds, k) >= 0)) e.Add($"fitting_support.kinds[{i}]：需為 elbow 或 tee");
+            else if (!seen.Add(k)) e.Add($"fitting_support.kinds[{i}]：「{k}」重複");
+        }
+        return e;
+    }
+
+    static List<string> ParamRefErrors(JsonNode? n, string field)
+    {
+        if (n is not JsonObject o) return new List<string> { $"{field}：缺少（需 {{\"name\": 族參數名稱, \"scope\": type|instance}}，取自族盤點）" };
+        var e = new List<string>();
+        if (Str(o["name"]) is null) e.Add($"{field}.name：缺少");
+        if (Array.IndexOf(Scopes, Str(o["scope"])) < 0) e.Add($"{field}.scope：需為 type 或 instance");
+        return e;
+    }
+
+    /// <summary>rod_length.mode=to_structure 的欄位：吊桿長度參數（限 instance）、offset／min／max 必填、round_to 選填；與 Python _rod_to_structure_errors 一致。</summary>
+    static List<string> RodToStructureErrors(JsonObject rod)
+    {
+        var e = ParamRefErrors(rod["param"], "rod_length.param");
+        if (rod["param"] is JsonObject pr && Str(pr["scope"]) == "type")
+            e.Add("rod_length.param.scope：to_structure 的吊桿長度每支不同，必須為 instance（type 會產生大量工具類型）");
+        var off = Num(rod["offset_mm"]);
+        if (Missing(rod, "offset_mm")) e.Add("rod_length.offset_mm：to_structure 時必填（長度 = 結構面 Z − 吊架承托面 Z + offset；可為負或 0，需明確填寫）");
+        else if (off is null) e.Add("rod_length.offset_mm：需為有限數");
+        var min = Num(rod["min_mm"]);
+        if (Missing(rod, "min_mm")) e.Add("rod_length.min_mm：to_structure 時必填（工具不提供預設）");
+        else if (min is null || min < 0) e.Add("rod_length.min_mm：需為 ≥ 0 的有限數");
+        var max = Num(rod["max_mm"]);
+        if (Missing(rod, "max_mm")) e.Add("rod_length.max_mm：to_structure 時必填（工具不提供預設）");
+        else if (max is null || max <= 0) e.Add("rod_length.max_mm：需為 > 0 的有限數");
+        else if (min is not null && min >= 0 && max < min) e.Add("rod_length.max_mm：不得小於 min_mm");
+        if (rod.ContainsKey("round_to_mm") && !(Num(rod["round_to_mm"]) is double rt && rt > 0)) e.Add("rod_length.round_to_mm：選填，需為 > 0 的有限數（未填 = 只取到 0.001 mm）");
+        return e;
+    }
+
+    public static List<string> ValidatePlacement(JsonNode? root)
+    {
+        var e = ValidateLayout(root);
+        if (root is not JsonObject c) return e;
+        if (Array.IndexOf(SupportedObjects, Str(c["supported_object"])) < 0) e.Add("supported_object：v1 只支援 cable_tray");
+        if (c["family"] is not JsonObject fam) e.Add("family：缺少（family_name、type_name）");
+        else foreach (var k in new[] { "family_name", "type_name" }) if (Str(fam[k]) is null) e.Add($"family.{k}：缺少");
+        foreach (var k in new[] { "widen_left_mm", "widen_right_mm" })
+        {
+            var v = Num(c[k]);
+            if (Missing(c, k)) e.Add($"{k}：缺少（相對橋架寬度的加寬量，可為 0，但需明確填寫）");
+            else if (v is null || v < 0) e.Add($"{k}：需為 ≥ 0 的有限數");
+        }
+        if (Missing(c, "insertion_to_bearing_mm")) e.Add("insertion_to_bearing_mm：缺少（族插入點到承托面的垂直距離，需由族實測）");
+        else if (Num(c["insertion_to_bearing_mm"]) is null) e.Add("insertion_to_bearing_mm：需為有限數");
+        if (Missing(c, "orientation_correction_deg")) e.Add("orientation_correction_deg：缺少（族橫擔軸向相對橋架方向的修正角，需由族實測）");
+        else if (Num(c["orientation_correction_deg"]) is null) e.Add("orientation_correction_deg：需為有限數");
+        if (Array.IndexOf(PlacementModes, Str(c["placement_mode"])) < 0) e.Add("placement_mode：需為 level 或 workplane（需與族的放置方式一致）");
+        if (c["parameter_map"] is not JsonObject pm) e.Add("parameter_map：缺少");
+        else e.AddRange(ParamRefErrors(pm["cross_member_length"], "parameter_map.cross_member_length"));
+        if (c["rod_length"] is not JsonObject rod || Array.IndexOf(RodModes, Str(rod["mode"])) < 0) e.Add("rod_length.mode：需為 none、fixed 或 to_structure");
+        else if (Str(rod["mode"]) == "fixed")
+        {
+            var v = Num(rod["value_mm"]);
+            if (Missing(rod, "value_mm")) e.Add("rod_length.value_mm：fixed 時必填");
+            else if (v is null || v <= 0) e.Add("rod_length.value_mm：需為 > 0 的有限數");
+            e.AddRange(ParamRefErrors(rod["param"], "rod_length.param"));
+        }
+        else if (Str(rod["mode"]) == "to_structure") e.AddRange(RodToStructureErrors(rod));
+        if (c["dedupe"] is not JsonObject dd) e.Add("dedupe：缺少（tolerance_mm、angle_tolerance_deg）");
+        else
+        {
+            var t = Num(dd["tolerance_mm"]);
+            if (t is null || t <= 0) e.Add("dedupe.tolerance_mm：需為 > 0 的有限數");
+            var a = Num(dd["angle_tolerance_deg"]);
+            if (a is null || a < 0 || a >= 90) e.Add("dedupe.angle_tolerance_deg：需為 0 ≤ 值 < 90");
+        }
+        if (c.ContainsKey(TestFailNthKey) && PositiveInt(c[TestFailNthKey]) is null) e.Add("test_fail_nth：驗收用測試開關，需為 ≥ 1 的整數（未填 = 關閉；正式設定勿使用）");
+        e.AddRange(InstanceParamErrors(c));
+        e.AddRange(CalibrationErrors(c));
+        return e;
+    }
+
+    /// <summary>instance_params（選填）：新建吊架實例要寫入的文字參數。規則與 Python _instance_params_errors 一致（欄位、順序、訊息相同）。</summary>
+    static List<string> InstanceParamErrors(JsonObject c)
+    {
+        var e = new List<string>();
+        if (!c.ContainsKey(InstanceParamsKey)) return e;
+        if (c[InstanceParamsKey] is not JsonArray arr) { e.Add("instance_params：需為陣列（每項 {\"name\": 參數確切名稱, \"value\": 文字}；未填或 [] = 不寫入）"); return e; }
+        var reserved = new HashSet<string>(StringComparer.Ordinal);
+        if (c["parameter_map"] is JsonObject pm && pm["cross_member_length"] is JsonObject cm && Str(cm["name"]) is string cn) reserved.Add(cn);
+        if (c["rod_length"] is JsonObject rod && Str(rod["mode"]) == "fixed" && rod["param"] is JsonObject rp && Str(rp["name"]) is string rn) reserved.Add(rn);
+        var seen = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (int i = 0; i < arr.Count; i++)
+        {
+            var f = $"instance_params[{i}]";
+            if (arr[i] is not JsonObject it) { e.Add($"{f}：需為物件 {{\"name\": 參數確切名稱, \"value\": 文字}}"); continue; }
+            var extra = it.Select(kv => kv.Key).Where(k => k != "name" && k != "value").ToList();
+            if (extra.Count > 0) e.Add($"{f}：只接受 name、value（多出 {string.Join(", ", extra)}）");
+            var n = Str(it["name"]);
+            if (n is null) e.Add($"{f}.name：缺少（需為吊架實例上 Revit 文字參數的確切名稱，取自業主共用參數檔）");
+            else if (n.Trim() != n) e.Add($"{f}.name：前後不可有空白（需與 Revit 參數名稱完全相同）");
+            else if (seen.TryGetValue(n, out var j)) e.Add($"{f}.name：「{n}」與 instance_params[{j}] 重複");
+            else if (reserved.Contains(n)) e.Add($"{f}.name：「{n}」是橫擔／吊桿長度參數，不可由 instance_params 覆寫");
+            else seen[n] = i;
+            if (Str(it["value"]) is null) e.Add($"{f}.value：需為非空白文字（取自物件編碼規則；工具不寫入空值）");
+        }
+        return e;
+    }
+
+    static List<string> CalibrationErrors(JsonObject c)
+    {
+        var e = new List<string>();
+        if (c["calibration"] is not JsonObject cal) { e.Add("calibration：缺少（請在 Revit 依序執行「讀取目標吊架族」「校正目標吊架」）"); return e; }
+        if (cal["family_file"] is not JsonObject ff || Str(ff["path"]) is null || Str(ff["sha256"]) is null || Num(ff["size"]) is null)
+            e.Add("calibration.family_file：缺少或不完整（path、size、sha256）");
+        if (Str(cal["project_signature"]) is null) e.Add("calibration.project_signature：缺少");
+        if (cal["cross_member_model"] is not JsonObject cm || !(Num(cm["ratio"]) is double r && Math.Abs(r) > 1e-6) || Num(cm["offset_mm"]) is null)
+            e.Add("calibration.cross_member_model：缺少或無效（ratio≠0、offset_mm）");
+        if (c["family"] is JsonObject fam && (Str(cal["family_name"]) != Str(fam["family_name"]) || Str(cal["type_name"]) != Str(fam["type_name"])))
+            e.Add("calibration.family_name：與 family 不符，需重新校正");
+        return e;
+    }
+
+    public static List<string> ErrorFields(IEnumerable<string> errors) => errors.Select(x => x.Split('：', 2)[0]).ToList();
+
+    /// <summary>驗證並轉成型別化設定；placement=false 只檢查佈置欄位。驗證失敗拋 InvalidDataException（訊息含全部欄位）。</summary>
+    public static HangerConfig Read(JsonNode? root, bool placement)
+    {
+        var errs = placement ? ValidatePlacement(root) : ValidateLayout(root);
+        if (errs.Count > 0) throw new InvalidDataException("吊架設定不完整：" + string.Join("; ", errs));
+        var c = (JsonObject)root!;
+        var nf = (JsonObject)c["near_fitting"]!;
+        var cfg = new HangerConfig
+        {
+            MaxSpacingMm = Num(c["max_spacing_mm"])!.Value,
+            StartOffsetMm = Num(c["start_offset_mm"])!.Value,
+            EndOffsetMm = Num(c["end_offset_mm"])!.Value,
+            ShortRunPolicy = Str(c["short_run_policy"])!,
+            SpacingMode = c.ContainsKey("spacing_mode") ? Str(c["spacing_mode"])! : "even",
+            NearFittingEnabled = nf["enabled"]!.GetValue<bool>(),
+        };
+        if (cfg.NearFittingEnabled) cfg.NearFittingMaxDistanceMm = Num(nf["max_distance_mm"]);
+        if (c[FittingSupportKey] is JsonObject fsn && fsn["enabled"]!.GetValue<bool>())
+        {
+            cfg.FittingSupportEnabled = true;
+            cfg.FittingSupportKinds = fsn["kinds"]!.AsArray().Select(k => k!.GetValue<string>()).ToList();
+        }
+        if (!placement) return cfg;
+        cfg.SupportedObject = Str(c["supported_object"])!;
+        cfg.FamilyName = Str(c["family"]!["family_name"])!;
+        cfg.TypeName = Str(c["family"]!["type_name"])!;
+        cfg.PlacementMode = Str(c["placement_mode"])!;
+        cfg.WidenLeftMm = Num(c["widen_left_mm"])!.Value;
+        cfg.WidenRightMm = Num(c["widen_right_mm"])!.Value;
+        cfg.InsertionToBearingMm = Num(c["insertion_to_bearing_mm"])!.Value;
+        cfg.OrientationCorrectionDeg = Num(c["orientation_correction_deg"])!.Value;
+        var cm = c["parameter_map"]!["cross_member_length"]!;
+        cfg.CrossMemberLength = new ParamRef(Str(cm["name"])!, Str(cm["scope"])!);
+        var rod = c["rod_length"]!;
+        cfg.RodMode = Str(rod["mode"])!;
+        if (cfg.RodMode == "fixed")
+        {
+            cfg.RodLengthMm = Num(rod["value_mm"]);
+            cfg.RodParam = new ParamRef(Str(rod["param"]!["name"])!, Str(rod["param"]!["scope"])!);
+        }
+        else if (cfg.RodMode == "to_structure")
+        {
+            cfg.RodParam = new ParamRef(Str(rod["param"]!["name"])!, Str(rod["param"]!["scope"])!);
+            cfg.RodOffsetMm = Num(rod["offset_mm"])!.Value;
+            cfg.RodMinMm = Num(rod["min_mm"])!.Value;
+            cfg.RodMaxMm = Num(rod["max_mm"])!.Value;
+            cfg.RodRoundToMm = Num(rod["round_to_mm"]);
+        }
+        cfg.DedupeToleranceMm = Num(c["dedupe"]!["tolerance_mm"])!.Value;
+        cfg.DedupeAngleToleranceDeg = Num(c["dedupe"]!["angle_tolerance_deg"])!.Value;
+        var cal = c["calibration"]!;
+        cfg.CalibFilePath = Str(cal["family_file"]!["path"])!;
+        cfg.CalibSha256 = Str(cal["family_file"]!["sha256"])!;
+        cfg.CalibFileSize = Num(cal["family_file"]!["size"])!.Value;
+        cfg.CalibProjectSignature = Str(cal["project_signature"])!;
+        cfg.CrossRatio = Num(cal["cross_member_model"]!["ratio"])!.Value;
+        cfg.CrossOffsetMm = Num(cal["cross_member_model"]!["offset_mm"])!.Value;
+        cfg.TestFailNth = c.ContainsKey(TestFailNthKey) ? PositiveInt(c[TestFailNthKey]) : null;
+        cfg.InstanceParams = c[InstanceParamsKey] is JsonArray ipa
+            ? ipa.Select(x => new InstanceParamValue(Str(x!["name"])!, Str(x["value"])!)).ToList()
+            : new List<InstanceParamValue>();
+        return cfg;
+    }
+}
+
+/// <summary>驗收用測試開關 test_fail_nth 的訊息與判定（Revit 放置迴圈與預覽共用；SelfTest 驗證）。</summary>
+public static class TestSwitch
+{
+    public static string PreviewNote(long n) => $"⚠ 測試開關 test_fail_nth={n} 已啟用：本次第 {n} 支新增吊架會故意失敗並只回滾該支（僅供驗收，正式設定勿使用）";
+    public static string FailMessage(long n) => $"測試開關 test_fail_nth={n}：故意讓第 {n} 支失敗";
+    public static string NotTriggeredNote(long n, int newCount) => $"⚠ 測試開關 test_fail_nth={n} 大於本次新增數 {newCount}，不會觸發失敗";
+    /// <summary>ordinal = 本次 Execute 中第幾支 Status=new 的吊架（1 起算）。</summary>
+    public static bool ShouldFail(long? nth, int ordinal) => nth is long n && ordinal == n;
+}
+
+/// <summary>instance_params 的預覽與逐支檢查訊息（Revit 放置迴圈與預檢共用；SelfTest 驗證）。名稱與值全部來自設定，本類別不含任何參數名稱或編碼。</summary>
+public static class InstanceParamText
+{
+    public static string PreviewNote(IReadOnlyList<InstanceParamValue> ps) =>
+        $"新建吊架將寫入實例參數 instance_params（{ps.Count} 項；既有／手動吊架不修改）：" + string.Join("；", ps.Select(p => $"「{p.Name}」=「{p.Value}」"));
+    /// <summary>單支吊架上的參數狀態 → 失敗訊息；null = 可寫入。</summary>
+    public static string? Problem(string name, bool found, bool readOnly, bool isText, string storageType) =>
+        !found ? $"找不到實例參數「{name}」（instance_params；需為吊架族實例上的文字參數，例如已綁定到該類別的共用參數）"
+        : readOnly ? $"實例參數「{name}」唯讀（instance_params）"
+        : !isText ? $"實例參數「{name}」不是文字參數（StorageType={storageType}；instance_params 只支援文字）"
+        : null;
+    public static string SetFailed(string name) => $"實例參數「{name}」設定失敗（instance_params）";
+    /// <summary>讀回值與設定值逐字比對（ordinal）；null = 一致。</summary>
+    public static string? ReadbackError(string name, string expected, string? got) =>
+        string.Equals(expected, got, StringComparison.Ordinal) ? null : $"實例參數「{name}」讀回「{got ?? "(無值)"}」與設定值「{expected}」不符（instance_params）";
+    /// <summary>預檢：名稱在族類型上找到 → 是類型參數，不在 instance_params 範圍。</summary>
+    public static string TypeParamError(int index, string name) => $"instance_params[{index}].name：「{name}」是族類型參數；instance_params 只寫實例參數（類型參數不在範圍）";
+}
+
+/// <summary>放置後的整批決策（選取補吊架、選取配管補吊架、匯入橋架＋吊架同一語意；SelfTest 驗證）。</summary>
+public static class HangerBatch
+{
+    /// <summary>plannedNew = 放置前 Status=new 的支數；created = 放置後建立成功的支數。
+    /// 計畫有新增、但一支都沒有建立成功 → 整批回滾（匯入入口的整批含橋架）。計畫沒有新增時不因此回滾。</summary>
+    public static bool RollBackAllFailed(int plannedNew, int created) => plannedNew > 0 && created == 0;
+}
+
+public static class Supports
+{
+    public const double GeomTolMm = 0.5;   // 幾何判定容差；非規範值
+    const double Eps = 1e-9;
+
+    static double R3(double v) => Math.Round(v, 3) + 0.0;
+    static double[] P3(double[] p) => p.Select(R3).ToArray();
+
+    public static double Norm360(double d)
+    {
+        d %= 360.0;
+        if (d < 0) d += 360.0;
+        d = Math.Round(d, 6);
+        return d >= 360.0 ? 0.0 : d + 0.0;
+    }
+
+    sealed class Ok
+    {
+        public string Id = "", StartKind = "free", EndKind = "free";
+        public double[] Start = new double[3], End = new double[3];
+        public double Len, W, H, Z;
+        public double[] U = new double[2];
+        public int Order;
+    }
+
+    sealed record Iv(double Lo, double Hi, string Id, bool Fwd, double T0);
+
+    static SupportIssue Issue(string level, string code, string pid, double[] loc, string detail) => new(level, code, pid, P3(loc), detail);
+
+    static bool IsNum(double? v) => v is double d && double.IsFinite(d);
+    static bool IsVec3(double[]? v) => v is { Length: 3 } && v.All(double.IsFinite);
+
+    /// <summary>接頭幾何輸入的檢查（由 Revit 端讀取後傳入）；與 Python _fitting_errors 一致（訊息、順序相同）。空 = 可用。</summary>
+    static List<string> FittingErrors(SupportFitting f)
+    {
+        var e = new List<string>();
+        if (!(IsNum(f.WidthMm) && f.WidthMm > 0 && IsNum(f.HeightMm) && f.HeightMm > 0)) e.Add("橋架寬度/高度無效");
+        if (f.Kind == "elbow")
+        {
+            if (!IsVec3(f.Center)) e.Add("圓心無效");
+            if (!(IsNum(f.RadiusMm) && f.RadiusMm > 0)) e.Add("半徑無效");
+            if (!IsNum(f.StartAngleDeg)) e.Add("起始角無效");
+            if (!(IsNum(f.SweepDeg) && Math.Abs(f.SweepDeg!.Value) > 0 && Math.Abs(f.SweepDeg.Value) < 180)) e.Add("掃過角需為 0 到 180 度之間（不含）");
+        }
+        else
+        {
+            if (!IsVec3(f.Point)) e.Add("交點無效");
+            if (!IsNum(f.MainDirectionDeg)) e.Add("主幹方向無效");
+        }
+        return e;
+    }
+
+    static double[] FittingLoc(SupportFitting f) =>
+        IsVec3(f.Center) ? f.Center! : IsVec3(f.Point) ? f.Point! : IsVec3(f.LocationMm) ? f.LocationMm! : new[] { 0.0, 0.0, 0.0 };
+
+    /// <summary>fitting_support 啟用時，為彎頭（中心線弧中點，方向取該點切線）與三通（主幹中心，方向取主幹）各產生 1 支。
+    /// 不判斷「放不下」；只有幾何讀不出或資料無效才退回（該接頭只留兩側吊架）並標 fitting_mid_fallback。與 Python _fitting_supports 一致。</summary>
+    static List<SupportPoint> FittingSupports(IReadOnlyList<SupportFitting> fittings, HangerConfig cfg, List<SupportIssue> issues)
+    {
+        var outp = new List<SupportPoint>();
+        if (!cfg.FittingSupportEnabled) return outp;
+        foreach (var f in fittings)
+        {
+            if (!cfg.FittingSupportKinds.Contains(f.Kind)) continue;
+            var label = f.Kind == "elbow" ? "彎頭" : "三通";
+            var problems = !string.IsNullOrEmpty(f.FallbackReason) ? new List<string> { $"Revit 端：{f.FallbackReason}" } : FittingErrors(f);
+            if (problems.Count > 0)
+            {
+                issues.Add(Issue("warning", "fitting_mid_fallback", f.Id, FittingLoc(f), $"{label} {f.Id} 的中點吊架未放置，退回只放兩側：{string.Join("；", problems)}"));
+                continue;
+            }
+            double w = f.WidthMm!.Value, h = f.HeightMm!.Value, z, direction, station;
+            double[] pt;
+            if (f.Kind == "elbow")
+            {
+                var c = f.Center!; double r = f.RadiusMm!.Value, sw = f.SweepDeg!.Value;
+                var a = f.StartAngleDeg!.Value + sw / 2;
+                var ar = a * Math.PI / 180.0;
+                pt = new[] { c[0] + r * Math.Cos(ar), c[1] + r * Math.Sin(ar), c[2] };
+                z = c[2];
+                direction = a + (sw > 0 ? 90.0 : -90.0);
+                station = r * (Math.Abs(sw) * Math.PI / 180.0) / 2;
+            }
+            else
+            {
+                pt = f.Point!; z = pt[2]; direction = f.MainDirectionDeg!.Value; station = 0.0;
+            }
+            outp.Add(new SupportPoint
+            {
+                PieceId = f.Id, FittingId = f.Id, ChainId = $"fitting:{f.Id}", StationMm = R3(station), PointMm = P3(pt),
+                DirectionDeg = Norm360(direction), TrayWidthMm = R3(w), TrayHeightMm = R3(h), BearingZMm = R3(z - h / 2), Reason = $"{f.Kind}_mid",
+            });
+        }
+        return outp;
+    }
+
+    public static LayoutResult Layout(IReadOnlyList<SupportPiece> pieces, IReadOnlyList<SupportLink> links, HangerConfig cfg, IReadOnlyList<SupportFitting>? fittings = null)
+    {
+        double s = cfg.MaxSpacingMm, aOff = cfg.StartOffsetMm, bOff = cfg.EndOffsetMm;
+        if (!(s > 0) || !(aOff >= 0) || !(bOff >= 0)) throw new InvalidDataException("吊架設定未通過驗證");
+        double? nfD = cfg.NearFittingEnabled ? cfg.NearFittingMaxDistanceMm : null;
+        var res = new LayoutResult();
+        var issues = res.Issues;
+        var ok = new Dictionary<string, Ok>();
+        for (int idx = 0; idx < pieces.Count; idx++)
+        {
+            var p = pieces[idx];
+            var st = p.Start; var en = p.End;
+            var d = new[] { en[0] - st[0], en[1] - st[1], en[2] - st[2] };
+            var h = Math.Sqrt(d[0] * d[0] + d[1] * d[1]);
+            var L = Math.Sqrt(h * h + d[2] * d[2]);
+            var mid = new[] { (st[0] + en[0]) / 2, (st[1] + en[1]) / 2, (st[2] + en[2]) / 2 };
+            if (L <= GeomTolMm) { issues.Add(Issue("failed", "zero_length", p.Id, st, "長度為 0，無法放置")); continue; }
+            if (Math.Abs(d[2]) > GeomTolMm)
+            {
+                var code = h <= GeomTolMm ? "vertical" : "sloped";
+                issues.Add(Issue("unsupported", code, p.Id, mid, code == "vertical" ? "垂直段 v1 不支援" : $"斜段 v1 不支援（高差 {Math.Abs(d[2]):F1} mm）"));
+                continue;
+            }
+            if (!(p.WidthMm > 0 && double.IsFinite(p.WidthMm) && p.HeightMm > 0 && double.IsFinite(p.HeightMm)))
+            { issues.Add(Issue("failed", "invalid_size", p.Id, mid, "橋架寬度/高度無效")); continue; }
+            ok[p.Id] = new Ok
+            {
+                Id = p.Id, Start = (double[])st.Clone(), End = (double[])en.Clone(), Len = h, U = new[] { d[0] / h, d[1] / h },
+                W = p.WidthMm, H = p.HeightMm, Z = st[2], StartKind = p.StartKind, EndKind = p.EndKind, Order = idx,
+            };
+        }
+
+        var parent = ok.Keys.ToDictionary(k => k, k => k);
+        string Find(string x) { while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+        foreach (var ln in links)
+        {
+            if (ln.Kind != "union" || !ok.ContainsKey(ln.A) || !ok.ContainsKey(ln.B)) continue;
+            var pa = ok[ln.A]; var pb = ok[ln.B];
+            var cross = pa.U[0] * pb.U[1] - pa.U[1] * pb.U[0];
+            var lat = Math.Abs((pb.Start[0] - pa.Start[0]) * -pa.U[1] + (pb.Start[1] - pa.Start[1]) * pa.U[0]);
+            if (Math.Abs(cross) > 1e-4 || lat > GeomTolMm || Math.Abs(pb.Z - pa.Z) > GeomTolMm)
+            {
+                issues.Add(Issue("warning", "union_not_collinear", pa.Id, pa.End, $"{pa.Id} 與 {pb.Id} 以 union 相接但不共線，分開計算"));
+                continue;
+            }
+            string ra = Find(pa.Id), rb = Find(pb.Id);
+            if (ra != rb) { if (ok[ra].Order < ok[rb].Order) parent[rb] = ra; else parent[ra] = rb; }
+        }
+        var groups = new Dictionary<string, List<string>>();
+        foreach (var k in ok.Keys.OrderBy(x => ok[x].Order))
+        {
+            var r = Find(k);
+            if (!groups.TryGetValue(r, out var g)) groups[r] = g = new List<string>();
+            g.Add(k);
+        }
+        var chains = groups.Values.OrderBy(g => ok[g[0]].Order).ToList();
+
+        var supports = res.Supports;
+        int ci = 0;
+        foreach (var members in chains)
+        {
+            ci++;
+            var cid = $"C{ci:000}";
+            var refp = ok[members[0]];
+            var u = refp.U; var O = refp.Start;
+            double Proj(double[] pt) => (pt[0] - O[0]) * u[0] + (pt[1] - O[1]) * u[1];
+            var iv = members.Select(m =>
+            {
+                var pm = ok[m];
+                double t0 = Proj(pm.Start), t1 = Proj(pm.End);
+                return new Iv(Math.Min(t0, t1), Math.Max(t0, t1), m, t0 <= t1, t0);
+            }).OrderBy(x => x.Lo).ThenBy(x => ok[x.Id].Order).ToList();
+            bool bad = false;
+            var gaps = new List<(double G0, double G1)>();
+            for (int i = 0; i + 1 < iv.Count; i++)
+            {
+                var x = iv[i]; var y = iv[i + 1];
+                if (y.Lo < x.Hi - GeomTolMm) { issues.Add(Issue("failed", "overlap", y.Id, ok[y.Id].Start, $"{x.Id} 與 {y.Id} 重疊，整條連續段不放置")); bad = true; }
+                else if (y.Lo - x.Hi > GeomTolMm) gaps.Add((x.Hi, y.Lo));
+            }
+            if (bad) continue;
+            double T0 = iv[0].Lo, T1 = iv.Max(x => x.Hi), L = T1 - T0;
+            var first = iv[0];
+            var last = iv.OrderByDescending(x => x.Hi).ThenBy(x => ok[x.Id].Order).First();
+            var k0 = first.Fwd ? ok[first.Id].StartKind : ok[first.Id].EndKind;
+            var k1 = last.Fwd ? ok[last.Id].EndKind : ok[last.Id].StartKind;
+            var gapsRel = gaps.Select(g => (G0: g.G0 - T0, G1: g.G1 - T0)).ToList();
+            double[] At(double t) => new[] { O[0] + u[0] * (T0 + t), O[1] + u[1] * (T0 + t), refp.Z };
+            (double, bool) Snap(double t)
+            {
+                foreach (var (g0, g1) in gapsRel)
+                    if (g0 + Eps < t && t < g1 - Eps) return (t - g0 <= g1 - t ? g0 : g1, true);
+                return (t, false);
+            }
+            var pts = new SortedDictionary<double, string>();
+            void Add(double t, string reason)
+            {
+                var (t2, moved) = Snap(t);
+                var key = Math.Round(t2, 6);
+                if (moved) issues.Add(Issue("info", "moved_out_of_fitting", first.Id, At(t2), $"{cid} 支撐點落在接頭本體內，已移到接頭邊緣（移動 {Math.Abs(t2 - t):F1} mm）"));
+                if (!pts.ContainsKey(key)) pts[key] = reason;
+            }
+            if (aOff > s + Eps) issues.Add(Issue("warning", "start_offset_exceeds_spacing", first.Id, At(0), "起點內縮大於最大間距（懸臂段）"));
+            if (bOff > s + Eps) issues.Add(Issue("warning", "end_offset_exceeds_spacing", last.Id, At(L), "終點內縮大於最大間距（懸臂段）"));
+            foreach (var (g0, g1) in gapsRel)
+                if (g1 - g0 > s + Eps) issues.Add(Issue("failed", "fitting_gap_exceeds_spacing", first.Id, At(g0), $"{cid} 接頭本體長 {g1 - g0:F1} mm 大於最大間距，無法滿足間距"));
+            var usable = L - aOff - bOff;
+            if (usable < -Eps)
+            {
+                if (cfg.ShortRunPolicy == "midpoint")
+                {
+                    Add(L / 2, "short_midpoint");
+                    issues.Add(Issue("warning", "short_run", first.Id, At(L / 2), $"{cid} 長 {L:F1} mm 小於起終點內縮和 {aOff + bOff:F1} mm，置中 1 支"));
+                }
+                else
+                {
+                    issues.Add(Issue("failed", "short_run", first.Id, At(L / 2), $"{cid} 長 {L:F1} mm 小於起終點內縮和 {aOff + bOff:F1} mm，未放置"));
+                    continue;
+                }
+            }
+            else if (cfg.SpacingMode == "fixed" && usable > Eps)
+            {
+                int n = (int)Math.Floor(usable / s + 1e-9);
+                for (int i = 0; i <= n; i++) Add(aOff + s * i, "spacing");
+                var rem = usable - s * n;
+                if (rem > 1e-6)
+                {
+                    double x0 = aOff + s * n, x1 = L - bOff;
+                    issues.Add(Issue("pending", "fixed_remainder", last.Id, At(x0), $"{cid} 固定間距 {s:F1} mm 排至終點剩餘 {rem:F3} mm（位置 {x0:F1}–{x1:F1} mm），終點未放支撐，待確認（人工決定是否補點）"));
+                }
+            }
+            else
+            {
+                int n = usable <= Eps ? 0 : Math.Max(1, (int)Math.Ceiling(usable / s - 1e-9));
+                if (n == 0) Add(aOff, "spacing");
+                else for (int i = 0; i <= n; i++) Add(aOff + usable * i / n, "spacing");
+            }
+            if (nfD is double nd)
+            {
+                var ts0 = pts.Keys.ToList();
+                if (k0 == "fitting" && ts0.Count > 0 && ts0[0] > nd + Eps) Add(nd, "near_fitting");
+                if (k1 == "fitting" && ts0.Count > 0 && L - ts0[^1] > nd + Eps) Add(L - nd, "near_fitting");
+            }
+            for (int it = 0; it < 50; it++)
+            {
+                var ts1 = pts.Keys.ToList();
+                int before = ts1.Count;
+                for (int i = 0; i + 1 < ts1.Count; i++)
+                {
+                    double x = ts1[i], y = ts1[i + 1];
+                    if (y - x > s + 1e-6)
+                    {
+                        int k = (int)Math.Ceiling((y - x) / s - 1e-9);
+                        for (int j = 1; j < k; j++) Add(x + (y - x) * j / k, "gap_fix");
+                    }
+                }
+                if (pts.Count == before) break;
+            }
+            var ts = pts.Keys.ToList();
+            for (int i = 0; i + 1 < ts.Count; i++)
+                if (ts[i + 1] - ts[i] > s + 1e-6) issues.Add(Issue("failed", "spacing_not_met", first.Id, At(ts[i]), $"{cid} 有間距 {ts[i + 1] - ts[i]:F1} mm 超過最大間距"));
+            foreach (var t in ts)
+            {
+                var T = T0 + t;
+                var host = iv.FirstOrDefault(x => x.Lo - 1e-6 <= T && T <= x.Hi + 1e-6);
+                if (host is null) { issues.Add(Issue("failed", "no_piece", first.Id, At(t), "支撐點不在任何橋架上")); continue; }
+                var pm = ok[host.Id];
+                var station = host.Fwd ? T - host.T0 : host.T0 - T;
+                station = Math.Min(Math.Max(station, 0.0), pm.Len);
+                var pt = new[] { pm.Start[0] + pm.U[0] * station, pm.Start[1] + pm.U[1] * station, pm.Z };
+                supports.Add(new SupportPoint
+                {
+                    PieceId = pm.Id, ChainId = cid, StationMm = R3(station), PointMm = P3(pt),
+                    DirectionDeg = Norm360(Math.Atan2(pm.U[1], pm.U[0]) * 180.0 / Math.PI),
+                    TrayWidthMm = R3(pm.W), TrayHeightMm = R3(pm.H), BearingZMm = R3(pm.Z - pm.H / 2), Reason = pts[t],
+                });
+            }
+        }
+        supports.AddRange(FittingSupports(fittings ?? Array.Empty<SupportFitting>(), cfg, issues));
+        for (int i = 0; i < supports.Count; i++) supports[i].Id = $"H{i + 1:000}";
+        return res;
+    }
+
+    /// <summary>支撐點（橋架參考座標）→ 族插入點／旋轉／尺寸。insertion_to_bearing：插入點在承托面下方為正。</summary>
+    public static Placement Place(SupportPoint sp, HangerConfig cfg)
+    {
+        var th = sp.DirectionDeg * Math.PI / 180.0;
+        double nx = -Math.Sin(th), ny = Math.Cos(th);
+        double shift = (cfg.WidenLeftMm - cfg.WidenRightMm) / 2;
+        double px = sp.PointMm[0], py = sp.PointMm[1], bz = sp.BearingZMm;
+        return new Placement(
+            P3(new[] { px + nx * shift, py + ny * shift, bz }),
+            P3(new[] { px + nx * shift, py + ny * shift, bz - cfg.InsertionToBearingMm }),
+            Norm360(sp.DirectionDeg + cfg.OrientationCorrectionDeg),
+            R3(sp.TrayWidthMm + cfg.WidenLeftMm + cfg.WidenRightMm),
+            cfg.RodMode == "fixed" && cfg.RodLengthMm is double r ? R3(r) : null);
+    }
+
+    public static bool AngleCompatible(double a, double b, double tolDeg)
+    {
+        var d = Math.Abs((a - b) % 180.0);
+        return Math.Min(d, 180.0 - d) <= tolDeg + 1e-9;
+    }
+
+    static bool IsValid(double? v) => v is double d && double.IsFinite(d);
+    static bool IsValid(double[]? v) => v is { Length: 3 } && v.All(double.IsFinite);
+    static bool IsValid(string? v) => !string.IsNullOrWhiteSpace(v);
+
+    /// <summary>追蹤資料缺欄位：null、空白字串、NaN／Infinity 都算缺少（與 Python _has 同一規則）。</summary>
+    static List<string> MissingTracking(ExistingHanger e)
+    {
+        var m = new List<string>();
+        if (!IsValid(e.TrayKey)) m.Add("tray_key");
+        if (!IsValid(e.StationMm)) m.Add("station_mm");
+        if (!IsValid(e.DirectionDeg)) m.Add("direction_deg");
+        return m;
+    }
+
+    static double RotDiff(double a, double b)
+    {
+        var d = Math.Abs((a - b) % 360.0);
+        return Math.Min(d, 360.0 - d);
+    }
+
+    static double Dist3(double[] a, double[] b) => Math.Sqrt(Math.Pow(a[0] - b[0], 2) + Math.Pow(a[1] - b[1], 2) + Math.Pow(a[2] - b[2], 2));
+
+    /// <summary>實際元素與預定插入點／旋轉角／橫擔長度比較（位置為 3D 距離，旋轉以 0–360 嚴格比較）；不符回傳原因，否則 null。</summary>
+    static string? GeometryMismatch(PlannedKey p, ExistingHanger e, double tolMm, double tolDeg)
+    {
+        var dist = Dist3(e.ActualPointMm!, p.InsertionPointMm!);
+        if (dist > tolMm + 1e-9) return $"實際插入點與預定位置不符（差 {dist:F1} mm，容許 {tolMm:G} mm）：位置、高程、橋架或設定已變更";
+        var dr = RotDiff(e.ActualRotationDeg!.Value, p.RotationDeg!.Value);
+        if (dr > tolDeg + 1e-9) return $"實際旋轉角與預定不符（差 {dr:F2}°，容許 {tolDeg:G}°）";
+        var dl = Math.Abs(e.ActualCrossLengthMm!.Value - p.CrossLengthMm!.Value);
+        if (dl > tolMm + 1e-9) return $"實際橫擔長度與預定不符（差 {dl:F1} mm，容許 {tolMm:G} mm）：橫擔尺寸或加寬設定已變更";
+        return null;
+    }
+
+    /// <summary>重跑去重（與 Python supports.classify 同一規則）：同橋架＋同 station＋方向相容的本工具吊架恰 1 支，
+    /// 且（planned 帶幾何時）實際插入點／旋轉角／橫擔長度都在容許內 → exists。
+    /// 追蹤資料不完整、實際幾何讀不到或不符、方向不相容、多支 → pending（待確認）；pending 不新增吊架。絕不刪除或修改。</summary>
+    public static List<Classification> Classify(IReadOnlyList<PlannedKey> planned, IReadOnlyList<ExistingHanger> existing, double tolMm, double tolDeg)
+    {
+        var outp = new List<Classification>();
+        foreach (var p in planned)
+        {
+            var geometry = p.InsertionPointMm is not null && p.RotationDeg is not null && p.CrossLengthMm is not null;
+            var tools = existing.Where(e => e.Source == "tool").ToList();
+            // 缺 tray_key 時以位置判斷：實際插入點 vs 預定插入點（含族校正偏移；左右加寬不對稱時與中心線點不同）
+            var refPt = geometry ? p.InsertionPointMm! : p.PointMm;
+            bool IsNear(ExistingHanger e)
+            {
+                var q = IsValid(e.ActualPointMm) ? e.ActualPointMm : IsValid(e.PointMm) ? e.PointMm : null;
+                return q is not null && Math.Sqrt(Math.Pow(q[0] - refPt[0], 2) + Math.Pow(q[1] - refPt[1], 2)) <= tolMm + 1e-9;
+            }
+            var incomplete = tools.Where(e => MissingTracking(e).Count > 0 && (IsValid(e.TrayKey) ? e.TrayKey == p.TrayKey : IsNear(e))).ToList();
+            var tm = tools.Where(e => IsValid(e.TrayKey) && e.TrayKey == p.TrayKey && IsValid(e.StationMm) && Math.Abs(e.StationMm!.Value - p.StationMm) <= tolMm + 1e-9).ToList();
+            if (tm.Count > 0)
+            {
+                if (tm.Count > 1) { outp.Add(new Classification("pending", tm.Select(e => e.Id).ToList(), "同位置有多支本工具吊架")); continue; }
+                var h = tm[0];
+                var one = new List<string> { h.Id };
+                if (!IsValid(h.DirectionDeg)) { outp.Add(new Classification("pending", one, "追蹤資料不完整：缺少 direction_deg")); continue; }
+                if (!AngleCompatible(h.DirectionDeg!.Value, p.DirectionDeg, tolDeg)) { outp.Add(new Classification("pending", one, "同位置本工具吊架方向不相容")); continue; }
+                if (geometry)
+                {
+                    var miss = new List<string>();
+                    if (!IsValid(h.ActualPointMm)) miss.Add("actual_point_mm");
+                    if (!IsValid(h.ActualRotationDeg)) miss.Add("actual_rotation_deg");
+                    if (!IsValid(h.ActualCrossLengthMm)) miss.Add("actual_cross_member_length_mm");
+                    if (miss.Count > 0) { outp.Add(new Classification("pending", one, "實際幾何無法讀取：缺少 " + string.Join("、", miss))); continue; }
+                    if (GeometryMismatch(p, h, tolMm, tolDeg) is string bad) { outp.Add(new Classification("pending", one, bad)); continue; }
+                }
+                outp.Add(new Classification("exists", one, "本工具已放置"));
+                continue;
+            }
+            if (incomplete.Count > 0)
+            {
+                var names = incomplete.SelectMany(MissingTracking).Distinct().OrderBy(x => x, StringComparer.Ordinal);
+                outp.Add(new Classification("pending", incomplete.Select(e => e.Id).ToList(), "本工具吊架的追蹤資料不完整，無法判定是否重複：缺少 " + string.Join("、", names)));
+                continue;
+            }
+            var om = existing.Where(e => e.Source != "tool" && e.PointMm is double[] q &&
+                                         Math.Sqrt(Math.Pow(q[0] - p.PointMm[0], 2) + Math.Pow(q[1] - p.PointMm[1], 2)) <= tolMm + 1e-9).ToList();
+            if (om.Count > 0) { outp.Add(new Classification("pending", om.Select(e => e.Id).ToList(), "附近有非本工具（手動）吊架")); continue; }
+            outp.Add(new Classification("new", new List<string>(), ""));
+        }
+        return outp;
+    }
+
+    /// <summary>中介 JSON（未建接頭）→ pieces/links；端點在 elbow/tee/cross/unsupported 接點者為 fitting 端。</summary>
+    public static (List<SupportPiece> Pieces, List<SupportLink> Links) FromModel(TrayModel m)
+    {
+        var pieces = m.Segments.Select(s => new SupportPiece
+        {
+            Id = s.Id, Start = (double[])s.Start.Clone(), End = (double[])s.End.Clone(), WidthMm = m.Tray.WidthMm, HeightMm = m.Tray.HeightMm,
+        }).ToList();
+        var byId = pieces.ToDictionary(p => p.Id);
+        var links = new List<SupportLink>();
+        foreach (var j in m.Joints)
+        {
+            if (j.Kind == "union" && j.Segments.Count == 2) { links.Add(new SupportLink(j.Segments[0], j.Segments[1], "union")); continue; }
+            foreach (var sid in j.Segments)
+            {
+                if (!byId.TryGetValue(sid, out var p)) continue;
+                if (Dist(p.Start, j.Point) <= GeomTolMm) p.StartKind = "fitting";
+                if (Dist(p.End, j.Point) <= GeomTolMm) p.EndKind = "fitting";
+            }
+        }
+        return (pieces, links);
+    }
+
+    static double Dist(double[] a, double[] b) => Math.Sqrt(Math.Pow(a[0] - b[0], 2) + Math.Pow(a[1] - b[1], 2) + Math.Pow(a[2] - b[2], 2));
+}

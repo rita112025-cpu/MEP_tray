@@ -37,6 +37,7 @@ FIELDS = {
     "Joints": "joints", "Point": "point", "SegmentIds": "segments", "Branch": "branch",
     "Hangers": "hangers", "Findings": "findings", "SegmentId": "segment_id", "Status": "status",
     "MinLegMm": "min_leg_mm", "Warnings": "warnings", "Subject": "subject", "Suggestion": "suggestion", "Code": "code", "Disclosures": "disclosures",
+    "HangerSupports": "hanger_supports", "HangerLayout": "hanger_layout",
 }
 
 
@@ -171,6 +172,7 @@ def build_model(inp: Inputs, route: Route, reports: list, gov: dict, run_id: str
     warnings = [f"{sid} 長度 {math.dist(a, b) * 1000:.3f} mm 小於 Revit 最短線段 {REVIT_MIN_SEGMENT_MM} mm，匯入時會整批回滾"
                 for sid, (a, b) in ((f"S{i + 1:03d}", sg) for i, sg in enumerate(segs))
                 if math.dist(a, b) * 1000 < REVIT_MIN_SEGMENT_MM]
+    supports_out, layout_meta = hanger_section(inp, route, segs)
     return {
         FIELDS["SchemaVersion"]: SCHEMA_VERSION, FIELDS["RunId"]: run_id, FIELDS["Units"]: "mm",
         FIELDS["CoordinateSystem"]: coordinate_system(basis, origin_mm, rotation_deg),
@@ -179,11 +181,42 @@ def build_model(inp: Inputs, route: Route, reports: list, gov: dict, run_id: str
         FIELDS["Segments"]: [{FIELDS["Id"]: f"S{i + 1:03d}", FIELDS["Start"]: _mm(a), FIELDS["End"]: _mm(b)}
                              for i, (a, b) in enumerate(segs)],
         FIELDS["Joints"]: build_joints(segs),
-        FIELDS["Hangers"]: [_mm(p) for p in route.hangers],
+        FIELDS["Hangers"]: [_mm(p) for p in route.hangers],          # 舊欄位（點位，保留相容）
+        FIELDS["HangerSupports"]: supports_out,
+        FIELDS["HangerLayout"]: layout_meta,
         FIELDS["Findings"]: findings,
         FIELDS["Disclosures"]: disc,
         FIELDS["Warnings"]: warnings,
     }
+
+
+def hanger_section(inp: Inputs, route: Route, segs) -> tuple[list, dict]:
+    """hanger_supports（橋架參考座標，未建接頭前）與 hanger_layout（單位/座標/參數/問題）。
+    族插入點不在此檔：需族實測資料，由 Revit 端依使用者吊架設定在建立接頭後重算。"""
+    from . import supports as S
+    params = getattr(route, "hanger_params", None)
+    meta = {"supported_object": "cable_tray", "units": "mm",
+            "coordinate_system": "同 coordinate_system（模型區域座標，與 segments 相同；mm）",
+            "reference": "path_centerline_pre_fitting",
+            "point_meaning": "point_mm 為橋架中心線上的支撐位置；bearing_z_mm = 中心線高程 − 橋架高度/2（承托面）；direction_deg 為所在段行進方向（XY，逆時針，0°=+X）",
+            "family_insertion": None,
+            "family_insertion_note": "族插入點/旋轉/尺寸不在此檔；Revit 端依使用者吊架設定（族實測之插入點偏移、修正角、參數對應）於建立接頭後以實際橋架端點重算，位置可能因接頭本體長度內移",
+            "params": params, "issues": []}
+    if not params or not segs:
+        meta["status"] = "none"
+        return [], meta
+    model_like = {"tray": {"width_mm": inp.tray_w_mm, "height_mm": inp.tray_h_mm},
+                  "segments": [{"id": f"S{i + 1:03d}", "start": _mm(a), "end": _mm(b)} for i, (a, b) in enumerate(segs)],
+                  "joints": build_joints(segs)}
+    pieces, links = S.pieces_from_model(model_like)
+    lay = S.layout(pieces, links, params)
+    meta["status"] = "computed"
+    meta["issues"] = lay["issues"]
+    out = [{"id": sp["id"], "segment_id": sp["piece_id"], "chain_id": sp["chain_id"], "station_mm": sp["station_mm"],
+            "point_mm": sp["point_mm"], "direction_deg": sp["direction_deg"], "tray_width_mm": sp["tray_width_mm"],
+            "tray_height_mm": sp["tray_height_mm"], "bearing_z_mm": sp["bearing_z_mm"], "reason": sp["reason"]}
+           for sp in lay["supports"]]
+    return out, meta
 
 
 def write_model(model: dict, run_id: str, name: str | None = None, overwrite: bool = False,

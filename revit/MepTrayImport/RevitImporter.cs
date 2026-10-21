@@ -69,6 +69,8 @@ public sealed class ImportReport
     public string Phase { get; set; } = "validate";   // validate | resolve | transaction | done
     public string Basis { get; set; } = "";
     public List<string> CreatedTrays { get; } = new();
+    /// <summary>本次建立的橋架元素（供「匯入橋架＋吊架」以建立接頭後的實際幾何計算吊架）。</summary>
+    [System.Text.Json.Serialization.JsonIgnore] public List<ElementId> TrayElementIds { get; } = new();
     public List<JointResult> Joints { get; } = new();
     public List<string> Warnings { get; } = new();
     public Inspection? Inspection { get; set; }
@@ -202,6 +204,7 @@ public static class RevitImporter
                 SetFeet(ct, BuiltInParameter.RBS_CABLETRAY_HEIGHT_PARAM, heightFt, s.Id, "高度");
                 trays[s.Id] = ct;
                 rep.CreatedTrays.Add($"{s.Id}={ct.Id}");
+                rep.TrayElementIds.Add(ct.Id);
             }
             doc.Regenerate();
 
@@ -229,6 +232,7 @@ public static class RevitImporter
             rep.Committed = false;
             rep.Abort = $"建立階段失敗，已整批 Rollback：{ex.GetType().Name}: {ex.Message}";
             rep.CreatedTrays.Clear();
+            rep.TrayElementIds.Clear();
             rep.Joints.Clear();
             rep.Warnings.Clear();
         }

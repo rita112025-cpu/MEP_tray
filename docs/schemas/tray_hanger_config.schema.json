@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rita112025-cpu/MEP_tray/docs/schemas/tray_hanger_config.schema.json",
+  "title": "MEP_tray 橋架吊架放置設定 v1（Revit 實際放置用）",
+  "description": "Revit「匯入橋架＋吊架」與「選取橋架補吊架」共用的執行設定。全部長度 mm。所有數值皆無預設，缺漏時工具拒絕執行並指出欄位；工具不把任何數值當成規範值。族參數名稱、插入點偏移、修正角、放置方式必須取自目標族的實測/盤點結果，不得依族或類型名稱（例如 圓形/矩形）推測用途。hanger_config.schema.json 仍為多系統（含導管/配管、斜/垂直）的保留 schema。",
+  "type": "object",
+  "required": ["units", "supported_object", "family", "placement_mode", "max_spacing_mm", "start_offset_mm", "end_offset_mm",
+               "short_run_policy", "near_fitting", "widen_left_mm", "widen_right_mm", "insertion_to_bearing_mm",
+               "orientation_correction_deg", "parameter_map", "rod_length", "dedupe", "calibration"],
+  "properties": {
+    "units": { "const": "mm" },
+    "supported_object": { "enum": ["cable_tray"], "description": "v1 只支援 Cable Tray；核心演算與物件種類無關，導管之後擴充。" },
+    "family": {
+      "type": "object", "required": ["family_name", "type_name"],
+      "properties": { "family_name": { "type": "string", "minLength": 1 }, "type_name": { "type": "string", "minLength": 1 } }
+    },
+    "placement_mode": { "enum": ["level", "workplane"], "description": "需與族的 FamilyPlacementType 一致（OneLevelBased→level、WorkPlaneBased→workplane）；需主體/面的族 v1 不支援。" },
+    "max_spacing_mm": { "type": "number", "exclusiveMinimum": 0, "description": "最大支撐間距；依專案規範填寫。" },
+    "start_offset_mm": { "type": "number", "minimum": 0, "description": "自橋架起點（建立接頭後的實際端點）內縮。" },
+    "end_offset_mm": { "type": "number", "minimum": 0 },
+    "short_run_policy": { "enum": ["midpoint", "skip"], "description": "段長小於起+終內縮時：置中 1 支並警告，或不放並列為失敗。" },
+    "near_fitting": {
+      "type": "object", "required": ["enabled"],
+      "properties": { "enabled": { "type": "boolean" }, "max_distance_mm": { "type": "number", "exclusiveMinimum": 0 } }
+    },
+    "fitting_support": {
+      "type": "object", "required": ["enabled"],
+      "description": "選填；未填 = 關閉，與 near_fitting 並存。啟用時除直線段（含兩側）的吊架外，另在彎頭中心線弧中點、三通主幹中心各加 1 支（只在 Revit 放置時生效；網頁預覽看不到）。接頭幾何讀不出或交叉驗證不一致 → 該接頭退回只放兩側，並在預覽與報告列出（fitting_mid_fallback）。不判斷「放不下」。",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "kinds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["elbow", "tee"] }, "description": "enabled=true 時必填；工具不提供預設。" }
+      },
+      "if": { "properties": { "enabled": { "const": true } } },
+      "then": { "required": ["kinds"] }
+    },
+    "widen_left_mm": { "type": "number", "minimum": 0, "description": "橫擔相對橋架寬度在行進方向左側的加長量。" },
+    "widen_right_mm": { "type": "number", "minimum": 0 },
+    "insertion_to_bearing_mm": { "type": "number", "description": "族插入點到承托面（橋架底）的垂直距離；插入點在承托面下方為正。需由族實測。" },
+    "orientation_correction_deg": { "type": "number", "description": "族在旋轉 0° 時橫擔方向與橋架行進方向的修正角（逆時針為正）。需由族實測。" },
+    "parameter_map": {
+      "type": "object", "required": ["cross_member_length"],
+      "properties": { "cross_member_length": { "$ref": "#/$defs/param_ref" } }
+    },
+    "rod_length": {
+      "type": "object", "required": ["mode"],
+      "properties": {
+        "mode": { "enum": ["none", "fixed", "to_structure"] },
+        "value_mm": { "type": "number", "exclusiveMinimum": 0 },
+        "param": { "$ref": "#/$defs/param_ref" },
+        "offset_mm": { "type": "number", "description": "to_structure：長度 = 結構面 Z − 吊架承托面 Z + offset_mm。可為負或 0，但必須明確填寫（工具不提供預設）；用來吸收族吊桿長度的量測基準差。" },
+        "min_mm": { "type": "number", "minimum": 0, "description": "to_structure：套用 offset 與取整後的長度下限；低於即該支失敗。必填，無預設。" },
+        "max_mm": { "type": "number", "exclusiveMinimum": 0, "description": "to_structure：長度上限，不得小於 min_mm；超過即該支失敗。必填，無預設。" },
+        "round_to_mm": { "type": "number", "exclusiveMinimum": 0, "description": "to_structure 選填：長度取最接近的此值倍數（恰在中間時遠離 0 進位）；未填 = 只取到 0.001 mm。" }
+      },
+      "allOf": [{
+        "if": { "properties": { "mode": { "const": "to_structure" } }, "required": ["mode"] },
+        "then": { "required": ["param", "offset_mm", "min_mm", "max_mm"], "properties": { "param": { "properties": { "scope": { "const": "instance" } } } } }
+      }],
+      "description": "fixed 需族有對應長度參數；沒有時預檢列為 unsupported。固定吊桿長度不能繞過族的主體需求。to_structure：每支新吊架從承托面沿 +Z 打射線，只接受樓板（Floors）與結構構架（Structural Framing，含連結模型），不接天花板；沒打到、結構面不高於橋架頂面、或長度超出 [min_mm, max_mm] → 該支失敗。param.scope 必須為 instance。"
+    },
+    "dedupe": {
+      "type": "object", "required": ["tolerance_mm", "angle_tolerance_deg"],
+      "properties": {
+        "tolerance_mm": { "type": "number", "exclusiveMinimum": 0 },
+        "angle_tolerance_deg": { "type": "number", "minimum": 0, "exclusiveMaximum": 90 }
+      }
+    },
+    "test_fail_nth": {
+      "type": "integer", "minimum": 1, "maximum": 9223372036854775807,
+      "description": "驗收用測試開關（選填；未填 = 關閉，行為完全不變）。設為 N 時，Revit 放置迴圈中本次第 N 支「新增」吊架在建立實例、設定參數、讀回驗證、寫入追蹤資料之後故意拋出例外，驗證「單支失敗只回滾該支」（部分完成）；預覽與結果最上方顯示 ⚠ 警告。需寫成整數字面（2，不可寫 2.0、\"2\"、true），否則工具拒絕執行。不影響佈置、去重、校正簽章。只加在設定檔的複本上，正式設定勿使用。"
+    },
+    "instance_params": {
+      "type": "array",
+      "description": "選填；未填或 [] = 不寫入，行為不變。新建吊架實例（只限本工具本次新增者，既有／手動吊架不修改）要寫入的文字（Text）實例參數，例如 BEP 表 7（PDF p.78）要求的設計用系統分類編碼、施工用系統分類編碼、工項對應編碼、維運用編碼欄位。name 必須是 Revit 參數的確切名稱、value 是要寫入的文字，兩者都必須取自業主共用參數檔與「物件編碼規則」，工具不提供任何預設。name 不可重複、前後不可有空白、不可與橫擔／吊桿長度參數同名；value 不可為空白（不寫入空值）。預檢：名稱若是族類型參數 → 失敗；放置時參數不存在、唯讀或不是文字 → 該支失敗並只回滾該支；寫入後讀回逐字比對。數量編碼屬類型／族參數，不在本欄範圍。不計入校正簽章。",
+      "items": {
+        "type": "object", "required": ["name", "value"], "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "value": { "type": "string", "minLength": 1, "pattern": "\\S" }
+        }
+      }
+    },
+    "calibration": {
+      "type": "object",
+      "required": ["family_file", "family_name", "type_name", "project_signature", "cross_member_model"],
+      "description": "由 Revit「讀取目標吊架族」→「校正目標吊架」寫入，不要手填；兩個放置命令缺少此區段即拒絕執行。family_name/type_name 必須與 family 相同。放置前 Revit 端另核對族檔 size/sha256 與 project_signature；任一不同 → 要求重新校正。",
+      "properties": {
+        "family_file": {
+          "type": "object", "required": ["path", "size", "sha256"],
+          "properties": {
+            "path": { "type": "string", "minLength": 1 },
+            "size": { "type": "number" },
+            "sha256": { "type": "string", "minLength": 1 },
+            "mtime_utc": { "type": "string" }
+          }
+        },
+        "family_name": { "type": "string", "minLength": 1 },
+        "type_name": { "type": "string", "minLength": 1 },
+        "project_signature": {
+          "type": "string", "minLength": 1,
+          "description": "專案中已載入族的完整內容簽章（v2:<sha256>：族參數定義、全部類型的參數值含實例預設值、目標類型下的族幾何、專案端類型參數；不含工具自建 (MEPTRAY …) 類型）。舊格式（無 v2: 前綴）會被放置命令判定過期，需重新校正。"
+        },
+        "cross_member_model": {
+          "type": "object", "required": ["ratio", "offset_mm"],
+          "properties": {
+            "ratio": { "type": "number", "not": { "minimum": -0.000001, "maximum": 0.000001 }, "description": "實測橫擔長度 = ratio × 族參數 + offset_mm；|ratio| > 1e-6。" },
+            "offset_mm": { "type": "number" },
+            "param": { "type": "string" },
+            "axis": { "enum": ["local_x", "local_y"] }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "param_ref": {
+      "type": "object", "required": ["name", "scope"],
+      "properties": { "name": { "type": "string", "minLength": 1 }, "scope": { "enum": ["type", "instance"] } }
+    }
+  }
+}
