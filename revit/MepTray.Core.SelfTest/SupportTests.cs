@@ -142,6 +142,13 @@ static class SupportTests
         Check(S(Ex(nullPt: true)) == "pending", "幾何去重：實際插入點讀不到 → pending");
         Check(S(Ex(rot: null)) == "pending" && S(Ex(len: null)) == "pending", "幾何去重：實際旋轉角／橫擔長度讀不到 → pending");
         Check(S(Ex(st: null)) == "pending" && S(Ex(key: null)) == "pending" && S(Ex(dir: null)) == "pending", "追蹤資料缺欄位 → pending（不補一支）");
+        Check(S(Ex(key: "  ")) == "pending" && S(Ex(key: "")) == "pending", "追蹤資料 tray_key 為空白字串 → pending");
+        Check(S(Ex(st: double.NaN)) == "pending" && S(Ex(dir: double.PositiveInfinity)) == "pending" && S(Ex(rot: double.NaN)) == "pending" && S(Ex(len: double.PositiveInfinity)) == "pending",
+              "NaN／Infinity 視為缺少 → pending");
+        // 缺 tray_key、位置在預定插入點（與中心線點相差 50 mm，左右加寬不對稱）→ 以插入點判斷，必須 pending 而不是 new
+        var offPlan = new List<PlannedKey> { new("T1", 300, new[] { 300.0, 0, 0 }, 0, new[] { 300.0, 50, -90 }, 90, 400) };
+        var lost = new ExistingHanger("lost", "tool", null, null, new[] { 300.0, 50, -90 }, null, new[] { 300.0, 50, -90 }, 90, 400);
+        Check(Supports.Classify(offPlan, new List<ExistingHanger> { lost }, 5, 2)[0].Status == "pending", "缺 tray_key 的鄰近判斷用預定插入點（含偏移）→ pending");
         var movedPlan = new List<PlannedKey> { new("T1", 300, new[] { 300.0, 0, 0 }, 0, new[] { 300.0, 800, -90 }, 90, 400) };
         Check(Supports.Classify(movedPlan, new List<ExistingHanger> { Ex() }, 5, 2)[0].Status == "pending", "幾何去重：橋架移動、吊架未跟著移動 → pending");
     }

@@ -302,7 +302,7 @@ public static class HangerPlacer
             if (!e.IsValid() || e.Get<string>("Source") != ToolSource) continue;
             seen.Add(fi.Id.Value);
             (double[]? actPt, double? actRot, double? actLen) = cfg is null ? default : ReadActual(fi, cfg);
-            list.Add(new ExistingHanger(fi.Id.Value.ToString(CultureInfo.InvariantCulture), "tool", e.Get<string>("TrayUniqueId"),
+            list.Add(new ExistingHanger(fi.Id.Value.ToString(CultureInfo.InvariantCulture), "tool", string.IsNullOrWhiteSpace(e.Get<string>("TrayUniqueId")) ? null : e.Get<string>("TrayUniqueId"),
                 Parse(e.Get<string>("StationMm")), PointOf(fi), Parse(e.Get<string>("DirectionDeg")), actPt, actRot, actLen));
         }
         foreach (var fi in new FilteredElementCollector(doc).OfClass(typeof(FamilyInstance)).Cast<FamilyInstance>())
@@ -318,12 +318,13 @@ public static class HangerPlacer
     {
         double[]? pt = null; double? rot = null; double? len = null;
         if (fi.Location is LocationPoint lp) { pt = Mm(lp.Point); rot = Supports.Norm360(lp.Rotation * 180.0 / Math.PI); }
-        var p = cfg.CrossMemberLength is { } cm ? fi.LookupParameter(cm.Name) : null;
+        // 橫擔長度寫在哪就從哪讀：type → FamilySymbol（ToolType 寫入處），instance → 實例；讀不到維持 null（Classify 判待確認）
+        var p = cfg.CrossMemberLength is { } cm ? (cm.Scope == "type" ? fi.Symbol?.LookupParameter(cm.Name) : fi.LookupParameter(cm.Name)) : null;
         if (p is { StorageType: StorageType.Double }) len = cfg.CrossRatio * Units.FeetToMm(p.AsDouble()) + cfg.CrossOffsetMm;
         return (pt, rot, len);
     }
 
-    static double? Parse(string? s) => double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : null;
+    static double? Parse(string? s) => double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var v) && double.IsFinite(v) ? v : null;
     static double[]? PointOf(FamilyInstance fi) => fi.Location is LocationPoint lp ? Mm(lp.Point) : null;
 
     // ── 3. 預檢（不改模型）──

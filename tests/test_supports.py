@@ -469,6 +469,33 @@ def test_incomplete_tracking_is_pending_not_new(field):
     assert cl[0]["match"] == ["e0"]
 
 
+@pytest.mark.parametrize("field,bad", [("tray_key", ""), ("tray_key", "   "), ("station_mm", float("nan")), ("station_mm", float("inf")),
+                                       ("direction_deg", float("nan")), ("actual_rotation_deg", float("nan")),
+                                       ("actual_cross_member_length_mm", float("inf")), ("actual_point_mm", [0.0, float("nan"), 0.0])])
+def test_blank_or_nonfinite_values_count_as_missing(field, bad):
+    plan, placed = _geom_case()
+    placed[0][field] = bad
+    cl = S.classify(plan, placed, 5, 2)
+    assert cl[0]["status"] == "pending" and cl[0]["match"] == ["e0"]
+    assert cl[0]["status"] != "new"
+
+
+def test_missing_traykey_proximity_uses_planned_insertion_point_with_offset():
+    """左右加寬不對稱 → 插入點與中心線點水平相差 50 mm；缺 tray_key 的既有吊架位於插入點，必須被找到（不可補一支）。"""
+    r = S.layout([P("A", (0, 0, 0), (5000, 0, 0))], [], cfg())
+    pc = pcfg(widen_left_mm=100.0, widen_right_mm=0.0)
+    sp = r["supports"][0]
+    pl = S.placement(sp, pc)
+    assert math.hypot(pl["insertion_point_mm"][0] - sp["point_mm"][0], pl["insertion_point_mm"][1] - sp["point_mm"][1]) == pytest.approx(50.0)
+    plan = [{"tray_key": "T1", "station_mm": sp["station_mm"], "point_mm": sp["point_mm"], "direction_deg": sp["direction_deg"],
+             "insertion_point_mm": pl["insertion_point_mm"], "rotation_deg": pl["rotation_deg"], "cross_member_length_mm": pl["cross_member_length_mm"]}]
+    lost = [{"id": "lost", "source": "tool", "tray_key": None, "station_mm": None, "point_mm": list(pl["insertion_point_mm"]), "direction_deg": None,
+             "actual_point_mm": list(pl["insertion_point_mm"]), "actual_rotation_deg": pl["rotation_deg"],
+             "actual_cross_member_length_mm": pl["cross_member_length_mm"]}]
+    cl = S.classify(plan, lost, 5, 2)
+    assert cl[0]["status"] == "pending" and cl[0]["match"] == ["lost"]
+
+
 def test_incomplete_tracking_far_away_does_not_block_others():
     plan, placed = _geom_case()
     placed.append({"id": "lost", "source": "tool", "tray_key": None, "station_mm": None, "point_mm": None, "direction_deg": None,
@@ -847,6 +874,7 @@ def contract_cases() -> dict:
         gcase("geom_unreadable", lambda e: e.update(actual_point_mm=None)),
         gcase("tracking_no_station", lambda e: e.update(station_mm=None)),
         gcase("tracking_no_traykey", lambda e: e.update(tray_key=None)),
+        gcase("tracking_blank_traykey", lambda e: e.update(tray_key="  ")),
     ]
     for c in cc:
         c["tol_mm"], c["tol_deg"] = 5.0, 2.0
