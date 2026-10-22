@@ -9,6 +9,7 @@
   "end_offset_mm": null,
   "short_run_policy": null,
   "near_fitting": { "enabled": false },
+  "fitting_support": { "enabled": false },
   "widen_left_mm": null,
   "widen_right_mm": null,
   "insertion_to_bearing_mm": null,
