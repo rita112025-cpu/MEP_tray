@@ -45,6 +45,7 @@ report.render_report（自含 HTML，無 JS）──► pipeline._publish（暫�
 | `disclosure.py` | 固定揭露文字（橫幅、範圍說明、Revit 狀態、引擎變動說明） |
 | `sanitize.py` / `paths.py` | 路徑／機敏字串清理；輸出路徑與 run_id 規則 |
 | `webui.py` | 本機 HTTP 服務與前端 |
+| `hanger_report.py` | 吊架批次結果 JSON（Revit 寫出的 `*.hangers_<批次>.json`）→ Excel 報表：每支吊架的位置、所屬橋架、同橋架間距、類型（直線段／彎頭中點／三通中點）、狀態；只讀 JSON，不連 Revit。欄位與 Revit 吊架參數名稱的對照表 `hanger_report_columns.json`（`revit_param` 未填＝未設定，不推測）；網頁 ④ 區「匯出 Excel」（`POST api/hanger-report`）與命令列共用（測試 `tests/test_hanger_report.py`） |
 | `revit/MepTray.Core`、`MepTrayImport` | C# 模型、單位、Comments、`Supports`（吊架核心）、`ConduitHangers`（配管兩管配對／中線／橫擔外緣檢查）與匯入器；`HangerPlacer`／`AddHangersCommand`（吊架放置，兩個入口共用）、`AddConduitHangersCommand`（選取配管補吊架，沿用 `HangerPlacer`） |
 
 ## 3. 決定性
@@ -65,7 +66,7 @@ report.render_report（自含 HTML，無 JS）──► pipeline._publish（暫�
 | 僅本機 | 綁 127.0.0.1；Host 白名單 | `tests/test_webui.py` |
 | 認證 | 網址路徑 token（不用 cookie） | 同上 |
 | 跨站 | Origin 與 Sec-Fetch-Site 檢查 | 同上 |
-| 請求本文 | Transfer-Encoding 400、Expect 417、單一純數字 Content-Length、1 MB、嚴格 JSON（拒 NaN、重複鍵、深度 >20） | 同上（原始 socket 測試） |
+| 請求本文 | Transfer-Encoding 400、Expect 417、單一純數字 Content-Length、1 MB（吊架報表 `api/hanger-report` 為 8 MB）、嚴格 JSON（拒 NaN、重複鍵、深度 >20） | 同上（原始 socket 測試）；`tests/test_hanger_report.py` |
 | 資源 | 16 個連線上限（503）、15 秒逾時、單一工作者（409） | 同上 |
 | 下載 | 只允許 manifest 清單內的檔案；CSP 含 sandbox、nosniff、Content-Disposition | 同上 |
 | 前端 | 一律 `textContent`，不用 innerHTML | 同上 |

@@ -31,6 +31,7 @@ from urllib.parse import unquote, urlsplit
 
 from . import pipeline as P
 from . import export_revit as ER
+from . import hanger_report as HR
 from . import report as RP
 from . import versioning as V
 from .disclosure import BANNER_FIXED, SCOPE_NOTE
@@ -43,6 +44,7 @@ from .sanitize import sanitize_text
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 MAX_BODY = 1_048_576                  # POST 本文上限 1 MB
+MAX_HANGER_REPORT_BODY = 8_388_608    # 吊架批次結果 JSON 上限 8 MB（只讀、同步轉檔，不進工作佇列）
 MAX_OBSTACLE_BYTES = 262_144          # 障礙物整體序列化上限 256 KB
 MAX_OBSTACLES = 200
 MAX_END_POINTS = 3
@@ -1011,6 +1013,35 @@ APP_JS = r"""
     rd.readAsText(f);
   });
 
+  $("hanger_report_export").addEventListener("click", function () {
+    var inp = $("hanger_report_file"), out = $("hanger_report_status"), btn = $("hanger_report_export");
+    var f = inp.files[0];
+    inp.removeAttribute("aria-invalid");
+    if (!f) { out.textContent = "✖ 請先選取吊架批次結果 JSON 檔"; inp.setAttribute("aria-invalid", "true"); return; }
+    if (f.size > 8388608) { out.textContent = "✖ 檔案超過 8 MB"; inp.setAttribute("aria-invalid", "true"); return; }
+    function done(msg) { btn.disabled = false; btn.setAttribute("aria-busy", "false"); out.textContent = msg; }
+    btn.disabled = true; btn.setAttribute("aria-busy", "true"); out.textContent = "匯出中…";
+    var rd = new FileReader();
+    rd.onload = function () {
+      var body = String(rd.result).replace(/^\uFEFF/, "");
+      fetch("api/hanger-report", {method: "POST", headers: {"Content-Type": "application/json"}, body: body})
+        .then(function (r) {
+          if (r.status !== 200) return r.json().then(function (d) { done("✖ " + ((d.error && d.error.message) || "匯出失敗")); inp.setAttribute("aria-invalid", "true"); });
+          var n = r.headers.get("X-Hanger-Count"), cd = r.headers.get("Content-Disposition") || "";
+          var m = /filename="([A-Za-z0-9._-]+)"/.exec(cd);
+          return r.blob().then(function (b) {
+            var a = document.createElement("a"), url = URL.createObjectURL(b);
+            a.href = url; a.download = m ? m[1] : "hangers.xlsx";
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+            setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
+            done("已匯出 " + n + " 筆吊架（" + a.download + "）");
+          });
+        }).catch(function () { done("✖ 無法連線到伺服器"); });
+    };
+    rd.onerror = function () { done("✖ 讀取檔案失敗"); inp.setAttribute("aria-invalid", "true"); };
+    rd.readAsText(f);
+  });
+
   $("form").addEventListener("submit", function (ev) {
     ev.preventDefault();
     if (busy) return;
@@ -1100,7 +1131,12 @@ def render_index(token: str, rules: dict) -> str:
 <p id="status" role="status" aria-live="polite">尚未執行</p></section></form>
 <section aria-labelledby="h-res"><h2 id="h-res">④ 結果下載</h2>
 <div id="results" aria-live="polite"></div>
-<h3>最近的版本</h3><ul id="versions"></ul><p id="versions-empty">尚無版本。</p></section>
+<h3>最近的版本</h3><ul id="versions"></ul><p id="versions-empty">尚無版本。</p>
+<h3>吊架報表（Excel）</h3>
+<p class="hint">選取 Revit 寫出的吊架批次結果 <span class="mono">&lt;設定檔&gt;.hangers_&lt;批次&gt;.json</span>，匯出每支吊架的位置、所屬橋架、間距、類型與狀態。只讀取該檔，不連線 Revit。</p>
+<div class="row">{field("hanger_report_file", "吊架批次結果 JSON 檔", '<input id="hanger_report_file" type="file" accept=".json,application/json" aria-describedby="hanger_report_status">')}</div>
+<button type="button" id="hanger_report_export" aria-busy="false">匯出 Excel</button>
+<p id="hanger_report_status" class="hint" role="status" aria-live="polite"></p></section>
 <script src="app.js"></script></body></html>
 """
 
@@ -1310,6 +1346,8 @@ class Handler(BaseHTTPRequestHandler):
         rest = self._route()
         if rest is None:
             return
+        if rest == ["api", "hanger-report"]:
+            return self._hanger_report()
         if rest != ["api", "run"]:
             return self._not_found()
         try:
@@ -1320,7 +1358,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(e)
         self._json(202, {"job_id": jid})
 
-    def _read_body(self) -> bytes:
+    def _hanger_report(self):
+        """上傳的吊架批次結果 JSON → Excel（同步；不寫檔、不碰工作佇列與輸出資料夾）。"""
+        try:
+            obj = parse_json_body(self._read_body(MAX_HANGER_REPORT_BODY))
+            try:
+                batch = HR.parse_batch(obj)
+                data = HR.build_workbook(batch)
+            except HR.HangerReportError as e:
+                raise ApiError(400, "invalid_hanger_report", sanitize_text(str(e)))
+        except ApiError as e:
+            return self._error(e)
+        self._send(200, data, HR.XLSX_TYPE, DOWNLOAD_CSP,
+                   {"Content-Disposition": f'attachment; filename="{HR.safe_filename(batch["BatchId"])}"',
+                    "X-Hanger-Count": str(len(batch["Items"]))})
+
+    def _read_body(self, limit: int = MAX_BODY) -> bytes:
         h = self.headers
         if h.get("Transfer-Encoding") is not None:
             raise ApiError(400, "bad_request", "不支援 Transfer-Encoding")
@@ -1335,8 +1388,8 @@ class Handler(BaseHTTPRequestHandler):
         if len(cls) != 1 or not re.fullmatch(r"[0-9]{1,9}", cls[0].strip()):
             raise ApiError(400, "bad_content_length", "Content-Length 不合法")
         n = int(cls[0])
-        if n > MAX_BODY:
-            raise ApiError(413, "payload_too_large", f"請求本文超過 {MAX_BODY // 1024} KB")
+        if n > limit:
+            raise ApiError(413, "payload_too_large", f"請求本文超過 {limit // 1024} KB")
         try:
             data = self.rfile.read(n)
         except (TimeoutError, socket.timeout, OSError):
