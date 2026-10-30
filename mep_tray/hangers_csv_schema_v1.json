@@ -1,0 +1,104 @@
+{
+  "_說明": "吊架 CSV 輸出 schema v1 草稿。狀態：draft，未經真實 Revit 批次驗收。證據以 PR #34 head 7038da4 為準：C# = revit/MepTrayImport/HangerPlacer.cs（除非另註明），Py = mep_tray/hanger_report.py，columns = mep_tray/hanger_report_columns.json。標記：✓ 已由程式證實；△ 推論；✗ 未驗證。本檔不是 Revit 匯出格式，不修改 C# JSON 契約。",
+  "schema": "hangers-csv",
+  "schema_version": "v1",
+  "status": "draft",
+  "encoding": "utf-8-sig",
+  "line_terminator": "\r\n",
+  "number_format": "repr(float)",
+  "null_policy": "選填欄位為 null 時輸出空白；不輸出字串 null",
+  "formula_guard": {
+    "applies_to": "字串欄位；數值欄位不經過此函式",
+    "triggers": ["'", "=", "+", "-", "@"],
+    "trigger_check": "去除開頭空白後，第一個字元屬於 triggers",
+    "action": "在值前加 '",
+    "controls": "U+0000–U+001F 逐字元跳脫為 \\uXXXX，並計入 manifest.escaped_cell_count",
+    "decode_for_tests_only": "若儲存值以 ' 開頭，且去掉該 ' 後第一個非空白字元屬於 triggers，則移除一個 '",
+    "evidence": "△ 設計；未在 Excel 驗證顯示結果",
+    "status": "△"
+  },
+  "files": [
+    {
+      "name": "hangers.csv",
+      "one_row_per": "Items[]",
+      "source_array": "Items",
+      "columns": [
+        {"name": "batch_id", "source": "BatchId", "source_level": "batch", "type": "string", "unit": null, "required": true, "empty": "不得為空", "evidence": {"csharp": "HangerPlacer.cs:47", "py": "hanger_report.py:180", "columns": null}, "status": "✓"},
+        {"name": "seq", "source": "derived: Items 序號（1 起算）", "type": "integer", "unit": null, "required": true, "empty": "不得為空", "evidence": {"csharp": null, "py": "hanger_report.py:221", "columns": "hanger_report_columns.json:6"}, "status": "✓"},
+        {"name": "support_id", "source": "Items[].SupportId", "type": "string", "unit": null, "required": true, "empty": "不得為空", "evidence": {"csharp": "HangerPlacer.cs:17", "py": "hanger_report.py:147", "columns": "hanger_report_columns.json:12"}, "status": "✓"},
+        {"name": "tray_id", "source": "Items[].TrayId", "type": "string（Revit ElementId，整數字串）", "unit": null, "required": true, "empty": "不得為空", "meaning": "直線段：橋架 ElementId（HangerPlacer.cs:142 key = t.Id.Value）；彎頭／三通中點：接頭 ElementId（HangerPlacer.cs:261；Supports.cs:497 PieceId = f.Id）", "evidence": {"csharp": "HangerPlacer.cs:18", "py": "hanger_report.py:147", "columns": "hanger_report_columns.json:18"}, "status": "✓ 程式；△ Revit 語意"},
+        {"name": "tray_unique_id", "source": "Items[].TrayUniqueId", "type": "string（Revit UniqueId）", "unit": null, "required": true, "empty": "允許空字串，保留為空白", "meaning": "被支撐物件的 UniqueId：接頭（若有 FittingId）否則橋架（HangerPlacer.cs:394 SupportedUniqueId）", "evidence": {"csharp": "HangerPlacer.cs:19", "py": "hanger_report.py:148", "columns": "hanger_report_columns.json:30"}, "status": "✓ 程式；△ UniqueId 格式未驗證"},
+        {"name": "fitting_id", "source": "Items[].FittingId", "type": "string", "unit": null, "required": false, "empty": "null → 空白", "evidence": {"csharp": "HangerPlacer.cs:21", "py": "hanger_report.py:148", "columns": "hanger_report_columns.json:24"}, "status": "✓"},
+        {"name": "type", "source": "derived: hanger_type(Reason, FittingId)", "type": "string", "unit": null, "required": true, "empty": "不得為空；不符規則時為「無法判定（…）」", "evidence": {"csharp": null, "py": "hanger_report.py:193", "columns": "hanger_report_columns.json:36"}, "status": "✓"},
+        {"name": "station_mm", "source": "Items[].StationMm", "type": "number", "unit": "mm", "required": true, "empty": "不得為空", "evidence": {"csharp": "HangerPlacer.cs:24", "py": "hanger_report.py:149", "columns": "hanger_report_columns.json:42"}, "status": "✓"},
+        {"name": "spacing_mm", "source": "derived: spacings()（計畫間距）", "type": "number", "unit": "mm", "required": false, "empty": "首支、中點、非直線段、跨橋架 → 空白", "meaning": "計畫間距，不代表實際已建立的間距（失敗與待確認者仍計入）", "evidence": {"csharp": null, "py": "hanger_report.py:202", "columns": "hanger_report_columns.json:48"}, "status": "✓ 程式；✗ 真實資料"},
+        {"name": "tray_x_mm", "source": "Items[].TrayPointMm[0]", "type": "number", "unit": "mm", "required": true, "empty": "不得為空", "meaning": "橋架中心線參考點（Revit 內部座標）", "evidence": {"csharp": "HangerPlacer.cs:25", "py": "hanger_report.py:149", "columns": "hanger_report_columns.json:54"}, "status": "✓"},
+        {"name": "tray_y_mm", "source": "Items[].TrayPointMm[1]", "type": "number", "unit": "mm", "required": true, "empty": "不得為空", "evidence": {"csharp": "HangerPlacer.cs:25", "py": "hanger_report.py:149", "columns": "hanger_report_columns.json:60"}, "status": "✓"},
+        {"name": "tray_z_mm", "source": "Items[].TrayPointMm[2]", "type": "number", "unit": "mm", "required": true, "empty": "不得為空", "evidence": {"csharp": "HangerPlacer.cs:25", "py": "hanger_report.py:149", "columns": "hanger_report_columns.json:66"}, "status": "✓"},
+        {"name": "insert_x_mm", "source": "Items[].InsertionPointMm[0]", "type": "number", "unit": "mm", "required": true, "empty": "不得為空", "meaning": "族插入點（已含族校正偏移）", "evidence": {"csharp": "HangerPlacer.cs:27", "py": "hanger_report.py:150", "columns": "hanger_report_columns.json:72"}, "status": "✓"},
+        {"name": "insert_y_mm", "source": "Items[].InsertionPointMm[1]", "type": "number", "unit": "mm", "required": true, "empty": "不得為空", "evidence": {"csharp": "HangerPlacer.cs:27", "py": "hanger_report.py:150", "columns": "hanger_report_columns.json:78"}, "status": "✓"},
+        {"name": "insert_z_mm", "source": "Items[].InsertionPointMm[2]", "type": "number", "unit": "mm", "required": true, "empty": "不得為空", "evidence": {"csharp": "HangerPlacer.cs:27", "py": "hanger_report.py:150", "columns": "hanger_report_columns.json:84"}, "status": "✓"},
+        {"name": "direction_deg", "source": "Items[].TrayDirectionDeg", "type": "number", "unit": "deg", "required": true, "empty": "不得為空", "evidence": {"csharp": "HangerPlacer.cs:29", "py": "hanger_report.py:150", "columns": "hanger_report_columns.json:90"}, "status": "✓"},
+        {"name": "rotation_deg", "source": "Items[].RotationDeg", "type": "number", "unit": "deg", "required": true, "empty": "不得為空", "evidence": {"csharp": "HangerPlacer.cs:28", "py": "hanger_report.py:151", "columns": "hanger_report_columns.json:96"}, "status": "✓"},
+        {"name": "cross_member_mm", "source": "Items[].CrossMemberLengthMm", "type": "number", "unit": "mm", "required": true, "empty": "不得為空", "evidence": {"csharp": "HangerPlacer.cs:30", "py": "hanger_report.py:151", "columns": "hanger_report_columns.json:102"}, "status": "✓"},
+        {"name": "rod_mm", "source": "Items[].RodLengthMm", "type": "number", "unit": "mm", "required": false, "empty": "null → 空白", "evidence": {"csharp": "HangerPlacer.cs:31", "py": "hanger_report.py:152", "columns": "hanger_report_columns.json:108"}, "status": "✓"},
+        {"name": "status", "source": "derived: STATUS_LABEL[Status]", "type": "string", "unit": null, "required": true, "empty": "不得為空", "evidence": {"csharp": null, "py": "hanger_report.py:221", "columns": "hanger_report_columns.json:114"}, "status": "✓"},
+        {"name": "status_code", "source": "Items[].Status", "type": "enum: new | created | exists | pending | failed", "unit": null, "required": true, "empty": "不得為空；未知值拒絕匯出", "evidence": {"csharp": "HangerPlacer.cs:39；Supports.Classify；HangerPlacer.cs:510 created；HangerPlacer.cs:518 failed", "py": "hanger_report.py:143、155", "columns": "hanger_report_columns.json:120"}, "status": "✓"},
+        {"name": "reason_code", "source": "Items[].Reason", "type": "string", "unit": null, "required": true, "empty": "允許空字串，保留為空白", "known_values": ["spacing", "near_fitting", "gap_fix", "short_midpoint", "elbow_mid", "tee_mid"], "evidence": {"csharp": "HangerPlacer.cs:37；Supports.cs 指派處", "py": "hanger_report.py:152", "columns": "hanger_report_columns.json:126"}, "status": "✓"},
+        {"name": "detail", "source": "Items[].Detail", "type": "string", "unit": null, "required": true, "empty": "允許空字串，保留為空白", "meaning": "新建為空字串；其餘為 Reason 加上元素編號（HangerPlacer.cs:410）。不包含 LayoutIssues 的原因", "evidence": {"csharp": "HangerPlacer.cs:40、410", "py": "hanger_report.py:155", "columns": "hanger_report_columns.json:132"}, "status": "✓"},
+        {"name": "element_id", "source": "Items[].ElementId", "type": "string", "unit": null, "required": false, "empty": "null → 空白（尚未建立時）", "evidence": {"csharp": "HangerPlacer.cs:41、511", "py": "hanger_report.py:155", "columns": "hanger_report_columns.json:138"}, "status": "✓"},
+        {"name": "type_name", "source": "Items[].TypeName", "type": "string", "unit": null, "required": false, "empty": "只有 created 才有值；其餘空白", "evidence": {"csharp": "HangerPlacer.cs:42、512", "py": "hanger_report.py:154", "columns": "hanger_report_columns.json:144"}, "status": "✓ 程式；✗ 真實"},
+        {"name": "rod_hit_element", "source": "Items[].HitElementId", "type": "string", "unit": null, "required": false, "empty": "非 to_structure 模式為空白", "evidence": {"csharp": "HangerPlacer.cs:33；RodToStructure.cs:73", "py": "hanger_report.py:153", "columns": "hanger_report_columns.json:150"}, "status": "✓ 程式；✗ 真實"},
+        {"name": "rod_hit_link", "source": "Items[].HitLinkInstanceId", "type": "string", "unit": null, "required": false, "empty": "同上", "evidence": {"csharp": "HangerPlacer.cs:34；RodToStructure.cs:73", "py": "hanger_report.py:153", "columns": "hanger_report_columns.json:156"}, "status": "✓ 程式；✗ 真實"},
+        {"name": "rod_hit_category", "source": "Items[].HitCategory", "type": "string", "unit": null, "required": false, "empty": "同上", "evidence": {"csharp": "HangerPlacer.cs:35；RodToStructure.cs:73", "py": "hanger_report.py:154", "columns": "hanger_report_columns.json:162"}, "status": "✓ 程式；✗ 真實"},
+        {"name": "rod_hit_z_mm", "source": "Items[].HitZMm", "type": "number", "unit": "mm", "required": false, "empty": "同上", "evidence": {"csharp": "HangerPlacer.cs:36；RodToStructure.cs:73", "py": "hanger_report.py:154", "columns": "hanger_report_columns.json:168"}, "status": "✓ 程式；✗ 真實"}
+      ]
+    },
+    {
+      "name": "layout_issues.csv",
+      "one_row_per": "LayoutIssues[]",
+      "source_array": "LayoutIssues",
+      "columns": [
+        {"name": "batch_id", "source": "BatchId", "source_level": "batch", "type": "string", "unit": null, "required": true, "empty": "不得為空", "evidence": {"csharp": "HangerPlacer.cs:47", "py": "hanger_report.py:180", "columns": null}, "status": "✓"},
+        {"name": "layout_index", "source": "derived: LayoutIssues 陣列位置（0 起算）", "type": "integer", "unit": null, "required": true, "empty": "不得為空", "evidence": {"csharp": null, "py": "hanger_report.py（LayoutIssues 迴圈 enumerate）", "columns": null}, "status": "✓"},
+        {"name": "level", "source": "LayoutIssues[].Level", "type": "string", "unit": null, "required": true, "empty": "不得為空", "known_values": ["failed", "unsupported", "warning", "pending", "info"], "evidence": {"csharp": "Supports.cs:58（SupportIssue）", "py": "hanger_report.py（parse_batch LayoutIssues）", "columns": null}, "status": "✓"},
+        {"name": "code", "source": "LayoutIssues[].Code", "type": "string", "unit": null, "required": true, "empty": "不得為空", "evidence": {"csharp": "Supports.cs:58；指派處如 Supports.cs:632（fixed_remainder）", "py": "hanger_report.py（parse_batch LayoutIssues）", "columns": null}, "status": "✓"},
+        {"name": "piece_id", "source": "LayoutIssues[].PieceId", "type": "string", "unit": null, "required": true, "empty": "允許空字串，保留為空白", "meaning": "與 hangers.tray_id 使用同一種 key（橋架或接頭 ElementId）", "evidence": {"csharp": "Supports.cs:58；Supports.cs:531；Supports.cs:497", "py": "hanger_report.py（parse_batch LayoutIssues）", "columns": null}, "status": "✓ 程式；△ 未以真實資料核對"},
+        {"name": "location_x_mm", "source": "LayoutIssues[].LocationMm[0]", "type": "number", "unit": "mm", "required": false, "empty": "null → 空白", "evidence": {"csharp": "Supports.cs:58（型別為非 nullable double[]）", "py": "hanger_report.py（_point 允許 null）", "columns": null}, "status": "✓ 讀取；△ C# 是否會為 null"},
+        {"name": "location_y_mm", "source": "LayoutIssues[].LocationMm[1]", "type": "number", "unit": "mm", "required": false, "empty": "同上", "evidence": {"csharp": "Supports.cs:58", "py": "hanger_report.py（_point）", "columns": null}, "status": "✓ 讀取；△"},
+        {"name": "location_z_mm", "source": "LayoutIssues[].LocationMm[2]", "type": "number", "unit": "mm", "required": false, "empty": "同上", "evidence": {"csharp": "Supports.cs:58", "py": "hanger_report.py（_point）", "columns": null}, "status": "✓ 讀取；△"},
+        {"name": "detail", "source": "LayoutIssues[].Detail", "type": "string", "unit": null, "required": true, "empty": "允許空字串，保留為空白", "evidence": {"csharp": "Supports.cs:58、632", "py": "hanger_report.py（parse_batch LayoutIssues）", "columns": null}, "status": "✓"}
+      ]
+    }
+  ],
+  "manifest": {
+    "file": "export_manifest.json",
+    "note": "匯出工具產生的追溯中繼資料；不是原始 JSON 的 Key，也不是 CSV 欄位",
+    "fields": [
+      {"name": "schema_version", "source": "本規格（hangers-csv-v1）", "status": "設計"},
+      {"name": "exporter_version", "source": "mep_tray.__version__", "evidence": "mep_tray/__init__.py:3", "status": "✓"},
+      {"name": "source_file_name", "source": "CLI 輸入檔名（basename）", "evidence": "HangerRun.cs:51–52：JSON 先寫入，路徑之後才加入 Notes，因此 JSON 內不含路徑", "status": "✓"},
+      {"name": "source_sha256", "source": "輸入檔 bytes 的 SHA-256", "status": "設計"},
+      {"name": "source_batch_id", "source": "BatchId", "evidence": "HangerPlacer.cs:47", "status": "✓"},
+      {"name": "source_outcome", "source": "Outcome", "evidence": "HangerPlacer.cs:52（預設「預覽」）", "status": "✓"},
+      {"name": "entry", "source": "Entry", "evidence": "HangerPlacer.cs:48", "status": "✓"},
+      {"name": "rod_mode", "source": "RodMode", "evidence": "HangerPlacer.cs:49", "status": "✓"},
+      {"name": "coordinates", "source": "Coordinates", "evidence": "HangerPlacer.cs:50", "status": "✓"},
+      {"name": "preflight_errors", "source": "PreflightErrors（原樣保留）", "evidence": "HangerPlacer.cs:53", "status": "✓"},
+      {"name": "notes", "source": "Notes（原樣保留）", "evidence": "HangerPlacer.cs:57", "status": "✓"},
+      {"name": "revit_warnings", "source": "RevitWarnings（原樣保留）", "evidence": "HangerPlacer.cs:56", "status": "✓"},
+      {"name": "test_fail_nth", "source": "TestFailNth；非 null 時記錄", "evidence": "HangerPlacer.cs:59", "status": "✓"},
+      {"name": "item_count", "source": "len(Items)", "status": "設計"},
+      {"name": "layout_issue_count", "source": "len(LayoutIssues)", "status": "設計"},
+      {"name": "csv_files", "source": "每份 CSV 的檔名、row_count、sha256", "status": "設計"},
+      {"name": "escaped_cell_count", "source": "第 formula_guard.controls 的跳脫次數", "status": "設計"},
+      {"name": "encoding", "source": "utf-8-sig", "evidence": "hanger_report.py:186（讀取端）", "status": "✓ 讀取；設計 寫出"}
+    ]
+  },
+  "excluded_source_fields": [
+    {"path": "Items[].TrayHeightMm", "csharp": "HangerPlacer.cs:23；寫入 HangerPlacer.cs:406", "unit": "mm", "reason": "來源與單位可由程式證實，但 hanger_report.py 未讀取，真實 JSON 未觀察；待 reader 加入驗證並以真實檔確認後才可納入", "status": "△ 暫不納入"},
+    {"path": "Items[].BearingPointMm[0..2]", "csharp": "HangerPlacer.cs:26；寫入 HangerPlacer.cs:407（來自 Supports.cs:66 Placement）", "unit": "mm", "reason": "同上", "status": "△ 暫不納入"},
+    {"path": "InstanceParams[]", "csharp": "HangerPlacer.cs:61；InstanceParamValue 於 Supports.cs:78", "reason": "批次層級；Python 未讀取；建議 v1.1 放入 manifest", "status": "△ 暫不納入"},
+    {"path": "TestFailNth", "csharp": "HangerPlacer.cs:59", "reason": "驗收用測試開關，不屬於正式資料；只記錄於 manifest", "status": "設計"}
+  ]
+}
