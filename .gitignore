@@ -10,3 +10,7 @@ cer.log
 **/obj/
 venv/
 ci-inputs/
+# local-only files (backup cleanup 2026-11-05)
+.venv/
+*_test*.rfa
+電纜線架 - 垂直三通(變向).rfa
