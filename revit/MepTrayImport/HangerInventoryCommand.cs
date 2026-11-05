@@ -17,7 +17,8 @@ namespace MepTray.Revit;
 [Transaction(TransactionMode.ReadOnly)]
 public class HangerInventoryCommand : IExternalCommand
 {
-    public const string DefaultRfaFolder = @"F:\學習revit&MEP_PLAN\Revit課程資料\鑫亞電通\Autodesk 機電元件\04_台灣專用元件族\13_固定工具";
+    /// <summary>Default .rfa folder, from env var MEPTRAY_RFA_FOLDER; empty when unset.</summary>
+    public static string DefaultRfaFolder => Environment.GetEnvironmentVariable("MEPTRAY_RFA_FOLDER") ?? "";
     const int MaxInstanceDetailsPerFamily = 200;
 
     public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
@@ -60,7 +61,7 @@ public class HangerInventoryCommand : IExternalCommand
                 var fd = new TaskDialog("吊架族群盤點 — .rfa 資料夾")
                 {
                     MainInstruction = exists ? "使用這個資料夾？" : "資料夾不存在或無法存取",
-                    MainContent = candidate,
+                    MainContent = candidate.Length > 0 ? candidate : "（未設定環境變數 MEPTRAY_RFA_FOLDER，請選擇資料夾）",
                     CommonButtons = TaskDialogCommonButtons.Cancel,
                 };
                 if (exists)
