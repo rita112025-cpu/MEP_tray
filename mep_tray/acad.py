@@ -117,8 +117,11 @@ def audit_and_convert(dxf: Path, dwg_out: Path | None = None, accore: Path | Non
                     try:
                         proc.wait(timeout=10)
                     except (OSError, subprocess.SubprocessError):
-                        proc.kill()
-                        proc.wait(timeout=10)
+                        try:
+                            proc.kill()
+                            proc.wait(timeout=10)
+                        except (OSError, subprocess.SubprocessError) as err:
+                            cleanup.append(f"直接行程結束未確認: {err}")
                     detail = "；".join(cleanup) if cleanup else "已依本次 PID 終止行程樹並確認直接行程結束"
                     return AcadResult(None, None, ver, f"{ver} 執行逾時（>{timeout}s）；{detail}")
         except (OSError, subprocess.SubprocessError) as e:

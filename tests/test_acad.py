@@ -135,6 +135,25 @@ def test_timeout_kill_failure_still_reports_and_falls_back_to_kill(tmp_path):
     assert "taskkill missing" in r.note and "未確認" in r.note
 
 
+def test_timeout_process_that_never_exits_is_reported_not_raised(tmp_path):
+    dxf, fake = fake_dxf(tmp_path), fake_exe(tmp_path)
+    popen = popen_factory(hang=True)
+
+    def noop_killer(pid):
+        pass                         # 行程樹終止「成功」但直接行程仍不結束
+
+    def stubborn_kill(self):
+        self.killed = False          # kill() 也無效
+
+    FakeProc.kill, original = stubborn_kill, FakeProc.kill
+    try:
+        r = audit_and_convert(dxf, None, accore=fake, popen=popen, killer=noop_killer, timeout=1)
+    finally:
+        FakeProc.kill = original
+    assert "逾時" in r.note and r.audit_errors is None and r.dwg is None
+    assert "直接行程結束未確認" in r.note and "已依本次 PID" not in r.note
+
+
 def test_crashed_process_does_not_publish_partial_dwg(tmp_path):
     def behavior(args, kw):
         script = Path(args[args.index("/s") + 1]).read_text(encoding="ascii")
