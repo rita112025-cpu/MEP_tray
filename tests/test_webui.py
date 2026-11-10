@@ -1322,7 +1322,9 @@ def test_app_draws_axis_labels_and_view_specific_legend():
 def test_index_still_has_four_sections_and_one_script_with_view_switching(srv):
     html_ = call(srv, "GET", T(srv))[2].decode("utf-8")
     assert html_.count("<section") == 4 and re.findall(r"<script[^>]*>", html_) == ['<script src="app.js">']
-    assert "<button" not in html_.split("④ 結果下載")[1]                # 切換按鈕由 app.js 以 DOM 建立
+    # 切換按鈕由 app.js 以 DOM 建立；④ 區唯一的靜態按鈕是吊架報表「匯出 Excel」
+    assert re.findall(r"<button[^>]*>", html_.split("④ 結果下載")[1]) == [
+        '<button type="button" id="hanger_report_export" aria-busy="false">']
 
 
 # ───────────── 起訖點標籤避讓（階段 3 第三刀追加：YZ 起點與終點重合時標籤重疊） ─────────────

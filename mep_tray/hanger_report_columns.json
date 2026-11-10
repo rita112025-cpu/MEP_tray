@@ -1,0 +1,29 @@
+{
+  "_說明": "吊架報表欄位與 Revit 吊架參數名稱的對照表。revit_param 為 null 表示尚未取得實際參數名稱：報表的「參數對照」工作表會標示「未設定」，工具不推測、不自行填入任何名稱。取得業主／族的實際參數名稱後，只需在對應欄位填入字串（前後不可有空白、不可重複）。key、source、label 由程式定義，請勿修改。",
+  "version": 1,
+  "columns": [
+    {"key": "seq", "source": null, "label": "序號", "revit_param": null},
+    {"key": "support_id", "source": "SupportId", "label": "吊架編號", "revit_param": null},
+    {"key": "tray_id", "source": "TrayId", "label": "所屬橋架／接頭 ElementId", "revit_param": null},
+    {"key": "fitting_id", "source": "FittingId", "label": "接頭 ElementId（中點吊架）", "revit_param": null},
+    {"key": "tray_unique_id", "source": "TrayUniqueId", "label": "被支撐物件 UniqueId", "revit_param": null},
+    {"key": "type", "source": null, "label": "類型", "revit_param": null},
+    {"key": "station_mm", "source": "StationMm", "label": "Station (mm)", "revit_param": null},
+    {"key": "spacing_mm", "source": null, "label": "與同橋架前一支間距 (mm)", "revit_param": null},
+    {"key": "tray_x_mm", "source": "TrayPointMm[0]", "label": "中心線點 X (mm)", "revit_param": null},
+    {"key": "tray_y_mm", "source": "TrayPointMm[1]", "label": "中心線點 Y (mm)", "revit_param": null},
+    {"key": "tray_z_mm", "source": "TrayPointMm[2]", "label": "中心線點 Z (mm)", "revit_param": null},
+    {"key": "insert_x_mm", "source": "InsertionPointMm[0]", "label": "族插入點 X (mm)", "revit_param": null},
+    {"key": "insert_y_mm", "source": "InsertionPointMm[1]", "label": "族插入點 Y (mm)", "revit_param": null},
+    {"key": "insert_z_mm", "source": "InsertionPointMm[2]", "label": "族插入點 Z (mm)", "revit_param": null},
+    {"key": "direction_deg", "source": "TrayDirectionDeg", "label": "橋架方向角 (度)", "revit_param": null},
+    {"key": "rotation_deg", "source": "RotationDeg", "label": "族旋轉角 (度)", "revit_param": null},
+    {"key": "cross_member_mm", "source": "CrossMemberLengthMm", "label": "橫擔長度 (mm)", "revit_param": null},
+    {"key": "rod_mm", "source": "RodLengthMm", "label": "吊桿長度 (mm)", "revit_param": null},
+    {"key": "status", "source": null, "label": "狀態", "revit_param": null},
+    {"key": "status_code", "source": "Status", "label": "原始狀態碼", "revit_param": null},
+    {"key": "reason_code", "source": "Reason", "label": "佈置原因碼", "revit_param": null},
+    {"key": "detail", "source": "Detail", "label": "說明", "revit_param": null},
+    {"key": "element_id", "source": "ElementId", "label": "已建立吊架 ElementId", "revit_param": null}
+  ]
+}
