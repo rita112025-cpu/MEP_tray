@@ -1,0 +1,113 @@
+{
+  "Uuid": "b1c0a11e-7a31-4e0a-9c1e-0b1a6416a001",
+  "IsCustomNode": false,
+  "Description": "Read-only BIM inspector snapshot for Revit. Run this graph manually. It writes a .json file and does not modify the open model.",
+  "Name": "BIM Inspector Extract",
+  "ElementResolver": {
+    "ResolutionMap": {}
+  },
+  "Inputs": [],
+  "Outputs": [],
+  "Nodes": [
+    {
+      "ConcreteType": "PythonNodeModels.PythonNode, PythonNodeModels",
+      "NodeType": "PythonScriptNode",
+      "Code": "# -*- coding: utf-8 -*-\n\"\"\"Read-only Revit snapshot for the BIM inspector.\n\nPaste this file into a Dynamo 3.3 CPython3 Python node, or open\n``bim_inspector_extract.dyn`` and run it by hand (Manual).\n\nHow to run in Dynamo:\n1. Open the graph. Confirm the run mode is Manual. Do not switch it to run by itself.\n2. Fill DEFAULT_OUTPUT_JSON below with a .json path, or wire a string into IN[0].\n3. Optionally fill DEFAULT_PROJECT_LABEL, or wire a fake label into IN[1].\n   Do not put a real project name, path, or central-model name in the label.\n4. Open the model you want to read, then click Run once.\n\nThe script reads the open document and writes JSON. It does not start a\ntransaction, and it does not save, sync, or upgrade the model.\n\nUNVERIFIED against a live Revit 2025 session. Connector properties, category\nenums, and UnitUtils are used defensively and may differ on a real document.\n\"\"\"\nfrom __future__ import annotations\n\nimport json\nimport math\nimport os\nimport re\n\nSCHEMA_VERSION = 1\nEXTRACTOR_VERSION = \"0.1.0\"\nDEFAULT_OUTPUT_JSON = \"\"\nDEFAULT_PROJECT_LABEL = \"UNNAMED\"\nLENGTH_NOTE = (\n    \"Millimetres. Revit internal feet are converted with UnitUtils to millimetres when that API is present; \"\n    \"otherwise feet are multiplied by 304.8 and rounded to 0.001 mm.\"\n)\n\n# Built-in category enum names. Display names are localized, so the checker matches these.\nEXTRACT_CATEGORIES = (\n    \"OST_MechanicalEquipment\",\n    \"OST_ElectricalEquipment\",\n    \"OST_PlumbingFixtures\",\n    \"OST_SpecialityEquipment\",\n    \"OST_Sprinklers\",\n    \"OST_DataDevices\",\n    \"OST_LightingDevices\",\n    \"OST_LightingFixtures\",\n    \"OST_ElectricalFixtures\",\n    \"OST_FireAlarmDevices\",\n    \"OST_SecurityDevices\",\n    \"OST_CommunicationDevices\",\n    \"OST_NurseCallDevices\",\n    \"OST_TelephoneDevices\",\n    \"OST_CableTray\",\n    \"OST_CableTrayFitting\",\n    \"OST_Conduit\",\n    \"OST_ConduitFitting\",\n    \"OST_PipeCurves\",\n    \"OST_PipeFitting\",\n    \"OST_FlexPipeCurves\",\n    \"OST_DuctCurves\",\n    \"OST_DuctFitting\",\n    \"OST_FlexDuctCurves\",\n    \"OST_PlaceHolderPipes\",\n    \"OST_PlaceHolderDucts\",\n)\n\n_FAMILY_PARAMS = (\"ALL_MODEL_FAMILY_NAME\", \"SYMBOL_FAMILY_NAME_PARAM\", \"ELEM_FAMILY_PARAM\")\n_TYPE_PARAMS = (\"ALL_MODEL_TYPE_NAME\", \"SYMBOL_NAME_PARAM\", \"ELEM_TYPE_PARAM\")\n_LEVEL_PARAMS = (\n    \"RBS_START_LEVEL_PARAM\",\n    \"FAMILY_LEVEL_PARAM\",\n    \"SCHEDULE_LEVEL_PARAM\",\n    \"INSTANCE_REFERENCE_LEVEL_PARAM\",\n    \"LEVEL_PARAM\",\n)\n_MODEL_SUFFIXES = (\".rvt\", \".rfa\", \".rte\", \".rft\", \".dwg\", \".dxf\", \".dwt\", \".ifc\")\n_PATHY = re.compile(r\"([A-Za-z]:\\\\|\\\\\\\\|/home/|/Users/)\")\n\n\ndef to_mm(feet: object) -> float:\n    \"\"\"Convert a Revit internal foot value with the fixed 304.8 mm factor.\"\"\"\n    if isinstance(feet, bool) or not isinstance(feet, (int, float)):\n        raise TypeError(\"length must be a number\")\n    value = float(feet) * 304.8\n    if not math.isfinite(value):\n        raise ValueError(\"non-finite length\")\n    return round(value, 3)\n\n\ndef length_to_mm(DB, feet: object) -> float:\n    converted = _via_unit_utils(DB, feet)\n    if converted is None:\n        return to_mm(feet)\n    value = float(converted)\n    if not math.isfinite(value):\n        raise ValueError(\"non-finite length\")\n    return round(value, 3)\n\n\ndef element_id_text(element_id: object) -> str:\n    \"\"\"Revit 2024+ uses ElementId.Value; older builds expose IntegerValue.\"\"\"\n    if element_id is None:\n        return \"\"\n    value = getattr(element_id, \"Value\", None)\n    if value is None:\n        value = getattr(element_id, \"IntegerValue\", None)\n    if isinstance(value, bool) or value is None:\n        return \"\"\n    try:\n        number = int(value)\n    except (TypeError, ValueError):\n        return \"\"\n    if number < 0:\n        return \"\"\n    return str(number)\n\n\ndef builtin_category_name(raw: object) -> str:\n    if raw is None:\n        return \"\"\n    text = str(raw)\n    if \".\" in text:\n        text = text.rsplit(\".\", 1)[-1]\n    if not text.startswith(\"OST_\"):\n        return \"\"\n    return text\n\n\ndef assert_json_path(path: object) -> str:\n    if not isinstance(path, str):\n        raise RuntimeError(\"輸出路徑必須是字串\")\n    if \"\\x00\" in path:\n        raise RuntimeError(\"輸出路徑無效\")\n    cleaned = path.strip().strip('\"')\n    if not cleaned:\n        raise RuntimeError(\"需要輸出 .json 路徑（IN[0] 或 DEFAULT_OUTPUT_JSON）\")\n    lower = cleaned.lower()\n    for suffix in _MODEL_SUFFIXES:\n        if lower.endswith(suffix):\n            raise RuntimeError(\"拒絕寫入模型檔，輸出必須是 .json\")\n    if not lower.endswith(\".json\"):\n        raise RuntimeError(\"輸出路徑必須以 .json 結尾\")\n    return cleaned\n\n\ndef clean_label(label: object) -> str:\n    text = \" \".join(str(label).split())\n    if not text or any(sep in text for sep in (\"\\\\\", \"/\", \":\")):\n        return \"UNNAMED\"\n    return text[:80]\n\n\ndef build_snapshot(DB, doc, project_label: object) -> dict:\n    \"\"\"Read categories, levels, parameters, connectors, and locations. No writes.\"\"\"\n    level_rows, level_errors = _read_levels(DB, doc)\n    levels_by_id = {row[\"id\"]: row[\"name\"] for row in level_rows}\n    elements: list[dict] = []\n    errors = list(level_errors)\n    skipped: list[str] = []\n    for name in EXTRACT_CATEGORIES:\n        bic = getattr(DB.BuiltInCategory, name, None)\n        if bic is None:\n            skipped.append(name)\n            continue\n        try:\n            collected = list(DB.FilteredElementCollector(doc).OfCategory(bic).WhereElementIsNotElementType())\n        except Exception as exc:\n            skipped.append(name)\n            errors.append({\"id\": \"\", \"error\": _short_error(exc)})\n            continue\n        for element in collected:\n            try:\n                elements.append(_read_element(DB, doc, element, levels_by_id))\n            except Exception as exc:\n                errors.append({\"id\": _safe_id(element), \"error\": _short_error(exc)})\n    elements.sort(key=lambda item: item[\"id\"])\n    errors.sort(key=lambda item: (item[\"id\"], item[\"error\"]))\n    return {\n        \"schema_version\": SCHEMA_VERSION,\n        \"source\": {\n            \"extractor\": \"bim_inspector.dynamo.extract_snapshot\",\n            \"extractor_version\": EXTRACTOR_VERSION,\n            \"host\": \"Revit\",\n            \"host_version\": _host_version(doc),\n            \"units\": \"mm\",\n            \"project_label\": clean_label(project_label),\n            \"document_identity_omitted\": True,\n            \"length_unit_note\": LENGTH_NOTE,\n            \"skipped_categories\": sorted(set(skipped)),\n            \"element_errors\": errors,\n        },\n        \"levels\": level_rows,\n        \"elements\": elements,\n    }\n\n\ndef write_snapshot(path: object, payload: dict) -> str:\n    target = assert_json_path(path)\n    parent = os.path.dirname(target)\n    if parent and not os.path.isdir(parent):\n        raise RuntimeError(\"輸出資料夾不存在\")\n    text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)\n    with open(target, \"w\", encoding=\"utf-8\", newline=\"\\n\") as handle:\n        handle.write(text)\n        handle.write(\"\\n\")\n    return target\n\n\ndef dynamo_main() -> str:\n    output = _injected_input(0) or DEFAULT_OUTPUT_JSON\n    label = _injected_input(1) or DEFAULT_PROJECT_LABEL\n    DB, document = _open_readonly_document()\n    payload = build_snapshot(DB, document, label)\n    return write_snapshot(output, payload)\n\n\ndef _via_unit_utils(DB, feet: object):\n    utils = getattr(DB, \"UnitUtils\", None)\n    unit_ids = getattr(DB, \"UnitTypeId\", None)\n    if utils is None or unit_ids is None:\n        return None\n    millimeters = getattr(unit_ids, \"Millimeters\", None)\n    convert = getattr(utils, \"ConvertFromInternalUnits\", None)\n    if millimeters is None or convert is None:\n        return None\n    try:\n        return convert(float(feet), millimeters)\n    except Exception:\n        return None\n\n\ndef _read_levels(DB, doc) -> tuple[list[dict], list[dict]]:\n    try:\n        raw = list(DB.FilteredElementCollector(doc).OfClass(DB.Level))\n    except Exception as exc:\n        return [], [{\"id\": \"\", \"error\": _short_error(exc)}]\n    rows: list[dict] = []\n    errors: list[dict] = []\n    for level in raw:\n        try:\n            ident = element_id_text(getattr(level, \"Id\", None))\n            if not ident:\n                errors.append({\"id\": \"\", \"error\": \"LevelMissingId\"})\n                continue\n            rows.append({\n                \"id\": ident,\n                \"name\": _clip(str(getattr(level, \"Name\", \"\") or \"\"), 200),\n                \"elevation_mm\": length_to_mm(DB, level.Elevation),\n            })\n        except Exception as exc:\n            errors.append({\"id\": _safe_id(level), \"error\": _short_error(exc)})\n    rows.sort(key=lambda item: item[\"id\"])\n    return rows, errors\n\n\ndef _read_element(DB, doc, element, levels_by_id: dict) -> dict:\n    ident = element_id_text(getattr(element, \"Id\", None))\n    if not ident:\n        raise RuntimeError(\"ElementMissingId\")\n    category_name, builtin = _category(element)\n    family, type_name = _family_and_type(DB, doc, element)\n    level_id = _level_id(DB, element)\n    return {\n        \"id\": ident,\n        \"category\": category_name,\n        \"builtin_category\": builtin,\n        \"family\": family,\n        \"type\": type_name,\n        \"level_id\": level_id,\n        \"level_name\": levels_by_id.get(level_id, \"\"),\n        \"location_mm\": _location_mm(DB, element),\n        \"parameters\": _parameters(DB, doc, element),\n        \"connectors\": _connectors(DB, element),\n    }\n\n\ndef _category(element) -> tuple[str, str]:\n    category = getattr(element, \"Category\", None)\n    if category is None:\n        return \"\", \"\"\n    name = _clip(str(getattr(category, \"Name\", \"\") or \"\"), 200)\n    builtin = builtin_category_name(getattr(category, \"BuiltInCategory\", None))\n    return name, builtin\n\n\ndef _family_and_type(DB, doc, element) -> tuple[str, str]:\n    symbol = _type_element(DB, doc, element)\n    family = \"\"\n    type_name = \"\"\n    if symbol is not None:\n        type_name = _clip(str(getattr(symbol, \"Name\", \"\") or \"\"), 200)\n        fam = getattr(symbol, \"Family\", None)\n        if fam is not None:\n            family = _clip(str(getattr(fam, \"Name\", \"\") or \"\"), 200)\n        if not family:\n            family = _clip(str(getattr(symbol, \"FamilyName\", \"\") or \"\"), 200)\n    if not family:\n        family = _clip(_named_param_text(DB, element, _FAMILY_PARAMS), 200)\n    if not type_name:\n        type_name = _clip(_named_param_text(DB, element, _TYPE_PARAMS), 200)\n    return family, type_name\n\n\ndef _type_element(DB, doc, element):\n    symbol = getattr(element, \"Symbol\", None)\n    if symbol is not None:\n        return symbol\n    getter = getattr(element, \"GetTypeId\", None)\n    if getter is None:\n        return None\n    try:\n        type_id = getter()\n    except Exception:\n        return None\n    if not element_id_text(type_id):\n        return None\n    try:\n        return doc.GetElement(type_id)\n    except Exception:\n        return None\n\n\ndef _parameters(DB, doc, element) -> dict:\n    found: dict[str, str] = {}\n    _absorb(DB, found, element)\n    symbol = _type_element(DB, doc, element)\n    if symbol is not None and symbol is not element:\n        _absorb(DB, found, symbol)\n    return dict(sorted(found.items()))\n\n\ndef _absorb(DB, found: dict, element) -> None:\n    try:\n        raw = element.Parameters\n    except Exception:\n        return\n    if raw is None:\n        return\n    try:\n        params = list(raw)\n    except Exception:\n        return\n    for param in params:\n        name = _param_name(param)\n        if not name or name in found:\n            continue\n        found[name] = _param_text(DB, param)\n\n\ndef _param_name(param) -> str:\n    definition = getattr(param, \"Definition\", None)\n    if definition is None:\n        return \"\"\n    return str(getattr(definition, \"Name\", \"\") or \"\").strip()\n\n\ndef _param_text(DB, param) -> str:\n    if param is None or not getattr(param, \"HasValue\", False):\n        return \"\"\n    storage = param.StorageType\n    kinds = DB.StorageType\n    if storage == kinds.String:\n        return _clip(_as_text(_call(param, \"AsString\")), 500)\n    if storage == kinds.Integer:\n        shown = _as_text(_call(param, \"AsValueString\"))\n        if shown.strip():\n            return _clip(shown, 500)\n        number = _call(param, \"AsInteger\")\n        return \"\" if number is None else _clip(str(int(number)), 500)\n    if storage == kinds.Double:\n        shown = _as_text(_call(param, \"AsValueString\"))\n        if shown.strip():\n            return _clip(shown, 500)\n        number = _call(param, \"AsDouble\")\n        return \"\" if number is None else _clip(_number_text(number), 500)\n    if storage == kinds.ElementId:\n        return element_id_text(_call(param, \"AsElementId\"))\n    return _clip(_as_text(_call(param, \"AsValueString\")), 500)\n\n\ndef _named_param_text(DB, element, names: tuple[str, ...]) -> str:\n    bips = getattr(DB, \"BuiltInParameter\", None)\n    getter = getattr(element, \"get_Parameter\", None)\n    if bips is None or getter is None:\n        return \"\"\n    for name in names:\n        bip = getattr(bips, name, None)\n        if bip is None:\n            continue\n        try:\n            param = getter(bip)\n        except Exception:\n            continue\n        text = _param_text(DB, param) if param is not None else \"\"\n        if text.strip():\n            return text.strip()\n    return \"\"\n\n\ndef _level_id(DB, element) -> str:\n    bips = getattr(DB, \"BuiltInParameter\", None)\n    getter = getattr(element, \"get_Parameter\", None)\n    if bips is None or getter is None:\n        return \"\"\n    for name in _LEVEL_PARAMS:\n        bip = getattr(bips, name, None)\n        if bip is None:\n            continue\n        try:\n            param = getter(bip)\n        except Exception:\n            continue\n        if param is None or not getattr(param, \"HasValue\", False):\n            continue\n        if param.StorageType != DB.StorageType.ElementId:\n            continue\n        text = element_id_text(_call(param, \"AsElementId\"))\n        if text:\n            return text\n    return \"\"\n\n\ndef _location_mm(DB, element):\n    location = getattr(element, \"Location\", None)\n    if location is not None:\n        point = getattr(location, \"Point\", None)\n        if point is not None:\n            return _xyz_mm(DB, point)\n        curve = getattr(location, \"Curve\", None)\n        if curve is not None:\n            try:\n                return _xyz_mm(DB, curve.Evaluate(0.5, True))\n            except Exception:\n                pass\n    getter = getattr(element, \"get_BoundingBox\", None)\n    if getter is None:\n        return None\n    try:\n        box = getter(None)\n    except Exception:\n        return None\n    if box is None:\n        return None\n    low, high = box.Min, box.Max\n    return {\n        \"x\": length_to_mm(DB, (low.X + high.X) / 2.0),\n        \"y\": length_to_mm(DB, (low.Y + high.Y) / 2.0),\n        \"z\": length_to_mm(DB, (low.Z + high.Z) / 2.0),\n    }\n\n\ndef _xyz_mm(DB, point) -> dict:\n    return {\"x\": length_to_mm(DB, point.X), \"y\": length_to_mm(DB, point.Y), \"z\": length_to_mm(DB, point.Z)}\n\n\ndef _connectors(DB, element) -> list[dict]:\n    manager = getattr(element, \"ConnectorManager\", None)\n    if manager is None:\n        mep = getattr(element, \"MEPModel\", None)\n        if mep is not None:\n            manager = getattr(mep, \"ConnectorManager\", None)\n    if manager is None:\n        return []\n    try:\n        raw = manager.Connectors\n    except Exception:\n        return []\n    if raw is None:\n        return []\n    try:\n        items = list(raw)\n    except Exception:\n        return []\n    found = []\n    for index, connector in enumerate(items):\n        origin = None\n        try:\n            origin = _xyz_mm(DB, connector.Origin)\n        except Exception:\n            origin = None\n        try:\n            domain = _clip(str(connector.Domain), 80)\n        except Exception:\n            domain = \"\"\n        found.append({\n            \"index\": index,\n            \"domain\": domain,\n            \"is_connected\": _as_bool(getattr(connector, \"IsConnected\", None)),\n            \"origin_mm\": origin,\n        })\n    return found\n\n\ndef _as_bool(value):\n    if value is None:\n        return None\n    if value is True or value is False or type(value) is bool:\n        return bool(value)\n    text = str(value).strip().lower()\n    if text in (\"true\", \"false\"):\n        return text == \"true\"\n    return None\n\n\ndef _open_readonly_document():\n    # Imported only when Dynamo actually runs this script.\n    import clr\n    clr.AddReference(\"RevitAPI\")\n    clr.AddReference(\"RevitServices\")\n    import Autodesk.Revit.DB as DB\n    from RevitServices.Persistence import DocumentManager\n    document = DocumentManager.Instance.CurrentDBDocument\n    if document is None:\n        raise RuntimeError(\"沒有開啟中的 Revit 文件\")\n    return DB, document\n\n\ndef _injected_input(index: int):\n    values = globals().get(\"IN\")\n    if values is None:\n        return \"\"\n    try:\n        value = values[index]\n    except Exception:\n        return \"\"\n    return _unwrap(value)\n\n\ndef _unwrap(value):\n    if value is None:\n        return \"\"\n    if isinstance(value, str):\n        return value\n    for attr in (\"FileName\", \"FullName\"):\n        got = getattr(value, attr, None)\n        if isinstance(got, str) and got:\n            return got\n    if isinstance(value, (list, tuple)) and value:\n        return _unwrap(value[0])\n    return str(value)\n\n\ndef _host_version(doc) -> str:\n    try:\n        text = str(doc.Application.VersionNumber)\n    except Exception:\n        return \"\"\n    return \"\".join(ch for ch in text if ch.isdigit() or ch == \".\")[:20]\n\n\ndef _safe_id(element) -> str:\n    try:\n        return element_id_text(getattr(element, \"Id\", None))\n    except Exception:\n        return \"\"\n\n\ndef _short_error(exc: BaseException) -> str:\n    text = \" \".join(f\"{exc.__class__.__name__}: {exc}\".split())\n    if _PATHY.search(text):\n        return exc.__class__.__name__\n    return text[:200]\n\n\ndef _call(obj, name: str):\n    method = getattr(obj, name, None)\n    if method is None:\n        return None\n    try:\n        return method()\n    except Exception:\n        return None\n\n\ndef _as_text(value) -> str:\n    return \"\" if value is None else str(value)\n\n\ndef _number_text(value) -> str:\n    number = float(value)\n    if not math.isfinite(number):\n        return \"\"\n    rounded = round(number, 6)\n    text = f\"{rounded:.6f}\".rstrip(\"0\").rstrip(\".\")\n    return text or \"0\"\n\n\ndef _clip(text: str, limit: int) -> str:\n    if len(text) <= limit:\n        return text\n    return text[: limit - 1] + \"…\"\n\n\ndef _run_if_dynamo():\n    if \"IN\" not in globals():\n        return None\n    return dynamo_main()\n\n\nOUT = _run_if_dynamo()\n",
+      "Engine": "CPython3",
+      "VariableInputPorts": true,
+      "Id": "a11ce0c0de0000000000000000000001",
+      "Inputs": [
+        {
+          "Id": "a11ce0c0de0000000000000000000002",
+          "Name": "IN[0]",
+          "Description": "Output .json path",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        },
+        {
+          "Id": "a11ce0c0de0000000000000000000003",
+          "Name": "IN[1]",
+          "Description": "De-identified project label",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "a11ce0c0de0000000000000000000004",
+          "Name": "OUT",
+          "Description": "Written .json path",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Read-only snapshot. Manual run only."
+    }
+  ],
+  "Connectors": [],
+  "Dependencies": [],
+  "NodeLibraryDependencies": [],
+  "Thumbnail": "",
+  "GraphDocumentationURL": null,
+  "ExtensionWorkspaceData": [
+    {
+      "ExtensionGuid": "28992e1d-abb9-417f-8b1b-05e053bee670",
+      "Name": "Properties",
+      "Version": "3.3.2",
+      "Data": {}
+    }
+  ],
+  "Author": "",
+  "Linting": {
+    "activeLinter": "None",
+    "activeLinterId": "7b75fb44-43fd-4631-a878-29f4d5d8399a",
+    "warningCount": 0,
+    "errorCount": 0
+  },
+  "Bindings": [],
+  "View": {
+    "Dynamo": {
+      "ScaleFactor": 1.0,
+      "HasRunWithoutCrash": false,
+      "IsVisibleInDynamoLibrary": true,
+      "Version": "3.3.2",
+      "RunType": "Manual",
+      "RunPeriod": "1000"
+    },
+    "Camera": {
+      "Name": "Background Preview",
+      "EyeX": -17.0,
+      "EyeY": 24.0,
+      "EyeZ": 50.0,
+      "LookX": 12.0,
+      "LookY": -13.0,
+      "LookZ": -58.0,
+      "UpX": 0.0,
+      "UpY": 1.0,
+      "UpZ": 0.0
+    },
+    "NodeViews": [
+      {
+        "ShowGeometry": true,
+        "Name": "BIM Inspector Extract (read-only)",
+        "Id": "a11ce0c0de0000000000000000000001",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "X": 280.0,
+        "Y": 180.0
+      }
+    ],
+    "Annotations": [],
+    "X": 0.0,
+    "Y": 0.0,
+    "Zoom": 1.0
+  }
+}

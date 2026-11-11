@@ -1,0 +1,378 @@
+{
+  "schema_version": 1,
+  "notes": "De-identified fixture. Fake ids, fake family names, no project path.",
+  "source": {
+    "extractor": "fixture",
+    "extractor_version": "0.1.0",
+    "host": "fixture",
+    "host_version": "",
+    "units": "mm",
+    "project_label": "SAMPLE-DEIDENTIFIED",
+    "document_identity_omitted": true,
+    "length_unit_note": "Fixture values are already millimetres.",
+    "skipped_categories": [],
+    "element_errors": []
+  },
+  "levels": [
+    {
+      "id": "L1",
+      "name": "Level-Sample-1",
+      "elevation_mm": 0
+    },
+    {
+      "id": "L2",
+      "name": "Level-Sample-2",
+      "elevation_mm": 4000
+    }
+  ],
+  "elements": [
+    {
+      "id": "E-AHU-MISSING",
+      "category": "Mechanical Equipment",
+      "builtin_category": "OST_MechanicalEquipment",
+      "family": "AHU-Sample",
+      "type": "AHU-Type-A",
+      "level_id": "L1",
+      "level_name": "Level-Sample-1",
+      "location_mm": {
+        "x": 0,
+        "y": 0,
+        "z": 500
+      },
+      "parameters": {
+        "SCADA_POINT": "P-1"
+      },
+      "connectors": []
+    },
+    {
+      "id": "E-AHU-EMPTY",
+      "category": "Mechanical Equipment",
+      "builtin_category": "OST_MechanicalEquipment",
+      "family": "AHU-Sample",
+      "type": "AHU-Type-A",
+      "level_id": "L1",
+      "level_name": "Level-Sample-1",
+      "location_mm": {
+        "x": 5000,
+        "y": 0,
+        "z": 500
+      },
+      "parameters": {
+        "SCADA_TAG": "T-1",
+        "SCADA_POINT": "  "
+      },
+      "connectors": []
+    },
+    {
+      "id": "E-AHU-OK",
+      "category": "Mechanical Equipment",
+      "builtin_category": "OST_MechanicalEquipment",
+      "family": "AHU-Sample",
+      "type": "AHU-Type-A",
+      "level_id": "L1",
+      "level_name": "Level-Sample-1",
+      "location_mm": {
+        "x": 9000,
+        "y": 0,
+        "z": 500
+      },
+      "parameters": {
+        "SCADA_TAG": "T-2",
+        "SCADA_POINT": "P-2",
+        "SCADA_STATUS": "OK"
+      },
+      "connectors": []
+    },
+    {
+      "id": "E-PANEL",
+      "category": "Electrical Equipment",
+      "builtin_category": "OST_ElectricalEquipment",
+      "family": "Panel-Sample",
+      "type": "Panel-Type",
+      "level_id": "L1",
+      "level_name": "Level-Sample-1",
+      "location_mm": {
+        "x": 0,
+        "y": 3000,
+        "z": 500
+      },
+      "parameters": {},
+      "connectors": []
+    },
+    {
+      "id": "E-TRAY-OPEN",
+      "category": "Cable Trays",
+      "builtin_category": "OST_CableTray",
+      "family": "Tray-Sample",
+      "type": "Tray-Type",
+      "level_id": "L1",
+      "level_name": "Level-Sample-1",
+      "location_mm": {
+        "x": 0,
+        "y": 0,
+        "z": 3000
+      },
+      "parameters": {},
+      "connectors": [
+        {
+          "index": 0,
+          "domain": "DomainCableTray",
+          "is_connected": true,
+          "origin_mm": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          }
+        },
+        {
+          "index": 1,
+          "domain": "DomainCableTray",
+          "is_connected": false,
+          "origin_mm": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "E-PIPE-OK",
+      "category": "Pipe Fittings",
+      "builtin_category": "OST_PipeFitting",
+      "family": "Elbow-Sample",
+      "type": "Elbow-90",
+      "level_id": "L1",
+      "level_name": "Level-Sample-1",
+      "location_mm": {
+        "x": 1000,
+        "y": 0,
+        "z": 3000
+      },
+      "parameters": {},
+      "connectors": [
+        {
+          "index": 0,
+          "domain": "DomainPiping",
+          "is_connected": true,
+          "origin_mm": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          }
+        },
+        {
+          "index": 1,
+          "domain": "DomainPiping",
+          "is_connected": true,
+          "origin_mm": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "E-DUCT-LOW",
+      "category": "Ducts",
+      "builtin_category": "OST_DuctCurves",
+      "family": "Duct-Sample",
+      "type": "Duct-Type",
+      "level_id": "L1",
+      "level_name": "Level-Sample-1",
+      "location_mm": {
+        "x": 0,
+        "y": 6000,
+        "z": 1000
+      },
+      "parameters": {},
+      "connectors": [
+        {
+          "index": 0,
+          "domain": "DomainHvac",
+          "is_connected": false,
+          "origin_mm": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "E-DUCT-OK",
+      "category": "Ducts",
+      "builtin_category": "OST_DuctCurves",
+      "family": "Duct-Sample",
+      "type": "Duct-Type",
+      "level_id": "L1",
+      "level_name": "Level-Sample-1",
+      "location_mm": {
+        "x": 4000,
+        "y": 6000,
+        "z": 3000
+      },
+      "parameters": {},
+      "connectors": [
+        {
+          "index": 0,
+          "domain": "DomainHvac",
+          "is_connected": true,
+          "origin_mm": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          }
+        },
+        {
+          "index": 1,
+          "domain": "DomainHvac",
+          "is_connected": true,
+          "origin_mm": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "E-PUMP-HIGH",
+      "category": "Mechanical Equipment",
+      "builtin_category": "OST_MechanicalEquipment",
+      "family": "Pump-Sample",
+      "type": "Pump-Type",
+      "level_id": "L1",
+      "level_name": "Level-Sample-1",
+      "location_mm": {
+        "x": 0,
+        "y": 9000,
+        "z": 3900
+      },
+      "parameters": {
+        "SCADA_TAG": "PUMP-H",
+        "SCADA_POINT": "P-H",
+        "SCADA_STATUS": "OK"
+      },
+      "connectors": []
+    },
+    {
+      "id": "E-PUMP-A",
+      "category": "Mechanical Equipment",
+      "builtin_category": "OST_MechanicalEquipment",
+      "family": "Pump-Sample",
+      "type": "Pump-Type",
+      "level_id": "L1",
+      "level_name": "Level-Sample-1",
+      "location_mm": {
+        "x": 100,
+        "y": 100,
+        "z": 0
+      },
+      "parameters": {
+        "SCADA_TAG": "PUMP-A",
+        "SCADA_POINT": "P-A",
+        "SCADA_STATUS": "OK"
+      },
+      "connectors": []
+    },
+    {
+      "id": "E-PUMP-B",
+      "category": "Mechanical Equipment",
+      "builtin_category": "OST_MechanicalEquipment",
+      "family": "Pump-Sample",
+      "type": "Pump-Type",
+      "level_id": "L1",
+      "level_name": "Level-Sample-1",
+      "location_mm": {
+        "x": 100,
+        "y": 100,
+        "z": 0
+      },
+      "parameters": {
+        "SCADA_TAG": "PUMP-B",
+        "SCADA_POINT": "P-B",
+        "SCADA_STATUS": "OK"
+      },
+      "connectors": []
+    },
+    {
+      "id": "E-FAN",
+      "category": "Mechanical Equipment",
+      "builtin_category": "OST_MechanicalEquipment",
+      "family": "Fan-Sample",
+      "type": "Fan-Type",
+      "level_id": "L1",
+      "level_name": "Level-Sample-1",
+      "location_mm": {
+        "x": 2000,
+        "y": 0,
+        "z": 400
+      },
+      "parameters": {
+        "SCADA_TAG": "FAN",
+        "SCADA_POINT": "P-F",
+        "SCADA_STATUS": "OK"
+      },
+      "connectors": []
+    },
+    {
+      "id": "E-FAN-COPY",
+      "category": "Mechanical Equipment",
+      "builtin_category": "OST_MechanicalEquipment",
+      "family": "Fan-Sample (2)",
+      "type": "Fan-Type",
+      "level_id": "L1",
+      "level_name": "Level-Sample-1",
+      "location_mm": {
+        "x": 2500,
+        "y": 0,
+        "z": 400
+      },
+      "parameters": {
+        "SCADA_TAG": "FAN-2",
+        "SCADA_POINT": "P-F2",
+        "SCADA_STATUS": "OK"
+      },
+      "connectors": []
+    },
+    {
+      "id": "E-TRAY-COPY",
+      "category": "Cable Trays",
+      "builtin_category": "OST_CableTray",
+      "family": "Tray-Sample1",
+      "type": "Tray-Type",
+      "level_id": "L1",
+      "level_name": "Level-Sample-1",
+      "location_mm": {
+        "x": 8000,
+        "y": 0,
+        "z": 3000
+      },
+      "parameters": {},
+      "connectors": [
+        {
+          "index": 0,
+          "domain": "DomainCableTray",
+          "is_connected": true,
+          "origin_mm": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          }
+        },
+        {
+          "index": 1,
+          "domain": "DomainCableTray",
+          "is_connected": true,
+          "origin_mm": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          }
+        }
+      ]
+    }
+  ]
+}

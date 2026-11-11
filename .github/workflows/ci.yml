@@ -61,6 +61,11 @@ jobs:
       - name: compileall
         run: python -m compileall -q mep_tray tests
 
+      - name: compileall bim_inspector
+        # Kept as its own step so the mep_tray/tests command above stays byte-for-byte.
+        # tests/test_docs.py asserts that exact compileall line.
+        run: python -m compileall -q bim_inspector
+
       - name: Set up .NET SDK 10
         # MepTray.Core targets net8.0;net10.0 and SelfTest targets net10.0. One SDK 10
         # builds both TFMs (net8.0 reference packs come from NuGet); only the net10.0
