@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "notes": "去識別化範例。尺寸與數量都是虛構值，正式專案必須改成該專案的規則，檢查程式沒有內建專案尺寸。單位是 mm。",
+  "checks": {
+    "required_parameters": {
+      "enabled": true,
+      "rules": [
+        {
+          "id": "EQ-SCADA-MECH",
+          "builtin_categories": ["OST_MechanicalEquipment"],
+          "categories": [],
+          "families": [],
+          "types": [],
+          "parameters": ["SCADA_TAG", "SCADA_POINT"],
+          "parameter_prefix": "SCADA_",
+          "empty_is_missing": true
+        }
+      ]
+    },
+    "open_connectors": {
+      "enabled": true,
+      "id": "OPEN-END",
+      "builtin_categories": [
+        "OST_CableTray",
+        "OST_CableTrayFitting",
+        "OST_Conduit",
+        "OST_ConduitFitting",
+        "OST_PipeCurves",
+        "OST_PipeFitting",
+        "OST_FlexPipeCurves",
+        "OST_DuctCurves",
+        "OST_DuctFitting",
+        "OST_FlexDuctCurves"
+      ],
+      "categories": [],
+      "flag_when_no_connectors": false
+    },
+    "elevation": {
+      "enabled": true,
+      "offset_rules": [
+        {
+          "id": "ELEV-DUCT-SAMPLE",
+          "builtin_categories": ["OST_DuctCurves"],
+          "categories": [],
+          "families": [],
+          "types": [],
+          "level_ids": [],
+          "level_names": ["Level-Sample-1"],
+          "min_offset_mm": 2400,
+          "max_offset_mm": 4500
+        }
+      ],
+      "level_consistency": {
+        "enabled": true,
+        "id": "ELEV-LEVEL-MISMATCH",
+        "builtin_categories": ["OST_MechanicalEquipment"],
+        "categories": [],
+        "families": [],
+        "types": [],
+        "margin_mm": 500
+      }
+    },
+    "duplicates": {
+      "enabled": true,
+      "same_location": {
+        "enabled": true,
+        "id": "DUP-LOCATION",
+        "tolerance_mm": 1.0,
+        "builtin_categories": [],
+        "categories": [],
+        "families": [],
+        "types": []
+      },
+      "family_names": {
+        "enabled": true,
+        "id": "DUP-FAMILY-NAME",
+        "suffix_patterns": ["\\s*\\(\\d+\\)\\s*", "(?<=\\D)\\d+"]
+      },
+      "count_ranges": [
+        {
+          "id": "COUNT-AHU-SAMPLE",
+          "builtin_categories": ["OST_MechanicalEquipment"],
+          "categories": [],
+          "family": "AHU-Sample",
+          "type": null,
+          "min_count": 1,
+          "max_count": 2
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "notes": "De-identified fixture. Fake ids, fake family names, no project path.",
+  "source": {
+    "extractor": "fixture",
+    "extractor_version": "0.1.0",
+    "host": "fixture",
+    "host_version": "",
+    "units": "mm",
+    "project_label": "SAMPLE-DEIDENTIFIED",
+    "document_identity_omitted": true,
+    "length_unit_note": "Fixture values are already millimetres.",
+    "skipped_categories": [],
+    "element_errors": []
+  },
+  "levels": [
+    {
+      "id": "L1",
+      "name": "Level-Sample-1",
+      "elevation_mm": 0
+    },
+    {
+      "id": "L2",
+      "name": "Level-Sample-2",
+      "elevation_mm": 4000
+    }
+  ],
+  "elements": [
+    {
+      "id": "E-AHU-CLEAN",
+      "category": "Mechanical Equipment",
+      "builtin_category": "OST_MechanicalEquipment",
+      "family": "AHU-Sample",
+      "type": "AHU-Type-A",
+      "level_id": "L1",
+      "level_name": "Level-Sample-1",
+      "location_mm": {
+        "x": 0,
+        "y": 0,
+        "z": 500
+      },
+      "parameters": {
+        "SCADA_TAG": "T-CLEAN",
+        "SCADA_POINT": "P-CLEAN",
+        "SCADA_STATUS": "OK"
+      },
+      "connectors": []
+    },
+    {
+      "id": "E-DUCT-CLEAN",
+      "category": "Ducts",
+      "builtin_category": "OST_DuctCurves",
+      "family": "Duct-Clean",
+      "type": "Duct-Type",
+      "level_id": "L1",
+      "level_name": "Level-Sample-1",
+      "location_mm": {
+        "x": 0,
+        "y": 6000,
+        "z": 3000
+      },
+      "parameters": {},
+      "connectors": [
+        {
+          "index": 0,
+          "domain": "DomainHvac",
+          "is_connected": true,
+          "origin_mm": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          }
+        },
+        {
+          "index": 1,
+          "domain": "DomainHvac",
+          "is_connected": true,
+          "origin_mm": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "E-TRAY-CLEAN",
+      "category": "Cable Trays",
+      "builtin_category": "OST_CableTray",
+      "family": "Tray-Clean",
+      "type": "Tray-Type",
+      "level_id": "L1",
+      "level_name": "Level-Sample-1",
+      "location_mm": {
+        "x": 3000,
+        "y": 0,
+        "z": 3000
+      },
+      "parameters": {},
+      "connectors": [
+        {
+          "index": 0,
+          "domain": "DomainCableTray",
+          "is_connected": true,
+          "origin_mm": {
+            "x": 0,
+            "y": 0,
+            "z": 0
+          }
+        }
+      ]
+    }
+  ]
+}
